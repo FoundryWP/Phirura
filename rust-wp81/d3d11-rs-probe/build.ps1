@@ -124,6 +124,7 @@ $linkArgs = @(
     "/EXPORT:wp81_rs_stop",
     "/EXPORT:wp81_rs_stage",
     "/EXPORT:wp81_rs_last_hr",
+    "/EXPORT:wp81_rs_last_hr_name",
     "/EXPORT:wp81_rs_vertex_count",
     "/EXPORT:wp81_rs_sc_step",
     "/EXPORT:wp81_rs_sc_step_name",

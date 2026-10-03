@@ -406,13 +406,22 @@ namespace Phirura
                     {
                         AppLog.WriteSync("RustRenderer.Bisect: step limit=" + limit + " FAILED rc=" + rc
                             + " " + Diagnose());
+                        // The step that actually *executes* `CreateSwapChainForComposition` is the
+                        // only one that fills in the per-variant HRESULT table, and it is exactly the
+                        // step that fails. So log the table HERE, on the failure path, before
+                        // returning - otherwise `sc-hr` is read after a step that never tried a
+                        // variant (limits 10/13/18 all stop *before* slot 24) and reads all-n/a.
+                        if (limit == 16)
+                        {
+                            LogVtable();
+                        }
                         return lastOk;
                     }
                     lastOk = reached;
                     // The step that builds the swapchain is also where the factory vtable gets
                     // snapshotted. Log it as soon as that step has succeeded, because the NEXT step
                     // is the one that dies and takes the log's tail with it.
-                    if (limit == 10 || limit == 13 || limit == 18)
+                    if (limit == 10 || limit == 13 || limit == 18 || limit == 16)
                     {
                         LogVtable();
                     }

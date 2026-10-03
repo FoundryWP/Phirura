@@ -50,6 +50,31 @@ First mind:实践是检验真理的唯一标准
 > 24 then trips over. Two bisect stops separate them: `limit=13` runs the probe then stops before
 > slot 24 (dies → the *probe* is guilty), `limit=18` skips the probe and stops before slot 24
 > (clean → slot 24 is guilty).
+>
+> ### Round 42 — the hard fault was a use-after-free, and the descriptor is now authoritative
+>
+> The `IsCurrent=-1` was a red herring (the `limit=13` run returned before the probe; it was still at
+> its `-1` initialiser). With the probe actually running it reports **`IsCurrent = 1` (TRUE)** and
+> **`QI hr = S_OK`** — the factory is sound.
+>
+> **The hard fault was NOT the driver.** `RustStage1Page` subscribed `Loaded += OnPageLoaded` twice
+> over and `StartRenderer` is `async void`, so **several bring-ups ran concurrently** (the log shows
+> interleaved `Bisect: begin` lines). They race on Rust's single global `STATE`, and every
+> `wp81_rs_start_upto` begins with `release_all()` — one run frees another's device mid-call.
+> `CreateSwapChainForComposition` given a freed device returns `DXGI_ERROR_INVALID_CALL`, or faults.
+> Fixed with `-=` before `+=` and an `Interlocked.CompareExchange` re-entrancy gate.
+>
+> **The descriptor is now Microsoft's own WP8.1 sample** (`XAML DirectX 3D shooting game sample`,
+> `Shared/Common/DeviceResources.cpp`): `B8G8R8A8_UNORM`, `Stereo=IsWindowedStereoEnabled()`,
+> `SampleDesc{1,0}`, `BufferCount=2`, **`DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL`**,
+> `DXGI_SCALING_STRETCH`, **`DXGI_ALPHA_MODE_IGNORE`**, `Flags=0`, via
+> `CreateSwapChainForComposition`, attached with `ISwapChainPanelNative::SetSwapChain` **on the UI
+> thread**, then `IDXGIDevice3::SetMaximumFrameLatency(1)`. That shape is variant 0; every variant's
+> HRESULT is recorded and logged (`RustRenderer.sc-hr: v0=… v3=…`).
+>
+> **Still open:** whether the attach must move to the UI thread (the sample does), and whether the
+> factory must come from `IDXGIDevice3` rather than `IDXGIDevice`. The next run's `sc-hr` line
+> decides.
 
 ## The goal
 

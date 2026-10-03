@@ -328,6 +328,14 @@ pub const D3D_DRIVER_TYPE_UNKNOWN: UINT = 0;
 pub const D3D_DRIVER_TYPE_HARDWARE: UINT = 1;
 pub const D3D11_SDK_VERSION: UINT = 7;
 
+// D3D11.h - D3D11_CREATE_DEVICE_FLAG
+//
+// `BGRA_SUPPORT` (0x20) is what every WP8.1 XAML/DirectX sample passes, and it is required for
+// XAML composition interop: a `SwapChainPanel` surface is BGRA, so a device created without this
+// flag is not a valid device for `CreateSwapChainForComposition` and DXGI rejects the call with
+// `DXGI_ERROR_INVALID_CALL` even though the descriptor is otherwise perfect.
+pub const D3D11_CREATE_DEVICE_BGRA_SUPPORT: UINT = 0x20;
+
 // D3D11.h - D3D11_USAGE
 pub const D3D11_USAGE_DEFAULT: UINT = 0;
 pub const D3D11_USAGE_IMMUTABLE: UINT = 1;
@@ -398,6 +406,30 @@ pub const DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL: UINT = 3;
 // dxgi.h - DXGI_MWA / DXGI_PRESENT
 pub const DXGI_PRESENT_TEST: UINT = 0x1;
 pub const DXGI_ADAPTER_FLAG_SOFTWARE: UINT = 2;
+
+// dxgi.h - the DXGI_ERROR_* family. Only the ones the swapchain path can actually return are
+// listed, so a failing HRESULT in the phone's log decodes to a sentence instead of a number.
+pub const DXGI_ERROR_INVALID_CALL: i32 = 0x887A0001u32 as i32;
+pub const DXGI_ERROR_NOT_CURRENTLY_AVAILABLE: i32 = 0x887A0022u32 as i32;
+pub const DXGI_ERROR_UNSUPPORTED: i32 = 0x887A0004u32 as i32;
+pub const DXGI_ERROR_DEVICE_REMOVED: i32 = 0x887A0005u32 as i32;
+pub const DXGI_ERROR_DEVICE_RESET: i32 = 0x887A0007u32 as i32;
+pub const DXGI_ERROR_ALREADY_EXISTS: i32 = 0x887A0008u32 as i32;
+pub const DXGI_ERROR_SDK_COMPONENT_MISSING: i32 = 0x887A002Du32 as i32;
+
+/// English name for a DXGI HRESULT (used by the swapchain step-name table on the C# side).
+pub fn dxgi_error_name(hr: i32) -> &'static [u8] {
+    match hr {
+        DXGI_ERROR_INVALID_CALL => b"DXGI_ERROR_INVALID_CALL\0",
+        DXGI_ERROR_NOT_CURRENTLY_AVAILABLE => b"DXGI_ERROR_NOT_CURRENTLY_AVAILABLE\0",
+        DXGI_ERROR_UNSUPPORTED => b"DXGI_ERROR_UNSUPPORTED\0",
+        DXGI_ERROR_DEVICE_REMOVED => b"DXGI_ERROR_DEVICE_REMOVED\0",
+        DXGI_ERROR_DEVICE_RESET => b"DXGI_ERROR_DEVICE_RESET\0",
+        DXGI_ERROR_ALREADY_EXISTS => b"DXGI_ERROR_ALREADY_EXISTS\0",
+        DXGI_ERROR_SDK_COMPONENT_MISSING => b"DXGI_ERROR_SDK_COMPONENT_MISSING\0",
+        _ => b"\0",
+    }
+}
 
 // ===========================================================================
 // the binding: WP8.1 module names only

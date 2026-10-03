@@ -346,6 +346,10 @@ pub unsafe extern "C" fn wp81_rs_start_upto(
     // next run overwrites those fields. Release first so eight bisect steps do not leak eight
     // devices - on a 512 MB phone that is what turns a diagnostic into a second failure.
     release_all(s);
+    // Reset the per-variant HRESULT table HERE, not in `release_all` - `wp81_rs_stop()` calls
+    // `release_all` between bisect steps, so resetting there wiped the table before C# could log
+    // it (every entry read back "n/a").
+    reset_sc_hrs();
     s.width = width;
     s.height = height;
     s.limit = limit;
@@ -746,7 +750,6 @@ unsafe fn release_all(s: &mut State) {
     s.context = ComPtr::NULL;
     s.device = ComPtr::NULL;
     s.stage = -1;
-    reset_sc_hrs();
 }
 
 #[no_mangle]
@@ -763,6 +766,15 @@ pub unsafe extern "C" fn wp81_rs_stage() -> i32 {
 #[no_mangle]
 pub unsafe extern "C" fn wp81_rs_last_hr() -> i32 {
     st().last_hr
+}
+
+/// A NUL-terminated name for the last HRESULT the Rust side saw, e.g. `DXGI_ERROR_INVALID_CALL`.
+///
+/// Returns an empty string for an HRESULT with no entry in the table, so C# can decide whether to
+/// print the hex or the name.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_last_hr_name() -> *const u8 {
+    crate::direct::dxgi_error_name(st().last_hr).as_ptr()
 }
 
 /// A short ASCII name for a swapchain sub-step (see the `SC_*` codes in `renderer.rs`).

@@ -233,18 +233,35 @@ stop before slot 24** — the pair separates a faulting probe from a faulting sl
 `release_all(s)` runs first in every `start_upto` (and `wp81_rs_stop()` between C# steps) or the
 bisect leaks one D3D device per step (fatal on a 512 MB phone).
 
-**On-device status (R41).** DLL loads and runs on the Lumia 925. `limit=2/10/13` all **clean**;
-vtable snapshot shows **32 readable slots with slot 24 = a real code pointer** and
-`QI(IDXGIFactory2)` = **S_OK** → slot number/IID/factory pointer all correct. `limit=16` **dies**,
-after tick 13 → the fault is inside `create_swapchain_for_panel_traced` at/after
-`CreateSwapChainForComposition`, and it **hard-faults** (no HRESULT) — the signature of an
-**unimplemented DXGI 1.2 entry** on this 2014 driver. Leading hypothesis:
-`DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL` needs FL ≥10.0 and this device is 9.3, so the descriptor-variant
-loop now tries **`DISCARD`→`SEQUENTIAL`→the two `FLIP_SEQUENTIAL`** shapes (FL-9.3-safe first),
-recording the accepted index in `wp81_rs_sc_variant()`. The native attach also now tries **both**
-panel interop interfaces and records which answered in `wp81_rs_panel_iface()` (0=Panel, 1=Background
-Panel). **`SwapChainBackgroundPanel` + `ISwapChainBackgroundPanelNative` are real on WP8.1** (proven
-by compiling against the reference set and reading `windows.ui.xaml.media.dxinterop.h`).
+**On-device status (R41/R42).** DLL loads and runs on the Lumia 925. `limit=2/10/13` all **clean**;
+vtable snapshot shows **32 readable slots with slot 24 = a real code pointer**, `QI(IDXGIFactory2)` =
+**S_OK**, `IsCurrent` = **1 (TRUE)** → slot number/IID/factory pointer all correct. `limit=16`
+previously **hard-faulted** after tick 13.
+
+**That hard fault was a USE-AFTER-FREE, not a driver bug (R42).** `RustStage1Page` did
+`this.Loaded += OnPageLoaded` with no `-=` and `StartRenderer` is `async void` with no gate, so
+**several bring-ups ran concurrently** (visible as interleaved `Bisect: begin` lines in the log).
+They race on Rust's single global `STATE`, and every `wp81_rs_start_upto` starts with `release_all()`
+— so one run frees another's device mid-call. `CreateSwapChainForComposition` handed a freed device
+returns `DXGI_ERROR_INVALID_CALL` (or faults). **Fixed** with `-=` before `+=` and an
+`Interlocked.CompareExchange` re-entrancy gate. **Lesson: any native bridge with one global STATE must
+have exactly one C# caller in flight** — and a bug that "goes away" when you move a probe is a
+timing/race bug, not a fix.
+
+**The authoritative swapchain descriptor (R42).** Microsoft's own WP8.1 sample
+(`microsoftarchive/msdn-code-gallery-microsoft` → `[C++]-Windows Phone 8.1 samples/XAML DirectX 3D
+shooting game sample/C++/Shared/Common/DeviceResources.cpp`) is the ground truth:
+`B8G8R8A8_UNORM`, `Stereo = IsWindowedStereoEnabled()`, `SampleDesc{1,0}`,
+`DXGI_USAGE_RENDER_TARGET_OUTPUT`, **`BufferCount = 2`**, **`SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL`**,
+`Scaling = DXGI_SCALING_STRETCH`, **`AlphaMode = DXGI_ALPHA_MODE_IGNORE`**, `Flags = 0`; via
+**`CreateSwapChainForComposition`**; attach with **`ISwapChainPanelNative::SetSwapChain` on the UI
+THREAD**; then **`IDXGIDevice3::SetMaximumFrameLatency(1)`**. WP8.1 forces
+`DXGI_MODE_ROTATION_IDENTITY` (no W/H swap) and `AlphaMode` must not be `PREMULTIPLIED`.
+The variant loop now tries that officially-correct shape first; every variant's HRESULT is recorded
+(`record_sc_hr` → `wp81_rs_sc_hr(i)`, logged as `RustRenderer.sc-hr: v0=… v3=…`). The native attach
+tries **both** panel interop interfaces and records which answered in `wp81_rs_panel_iface()`
+(0=Panel, 1=BackgroundPanel). **`SwapChainBackgroundPanel` + `ISwapChainBackgroundPanelNative` are
+real on WP8.1** (proven against the reference set + `windows.ui.xaml.media.dxinterop.h`).
 
 **Stage 3 (pending, plan-forbidden until Stage 1 renders on device)**: port prpr scene draw calls.
 Vertex stride **36 B** (`pos3(12)+uv2(8)+rgba4(16)`, `z` kept 0), `MAX_VERTICES=65536` → ~2.3 MB

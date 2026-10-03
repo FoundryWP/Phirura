@@ -185,11 +185,16 @@ pub unsafe fn create_device() -> Option<(ComPtr, ComPtr, u32, [u16; 128])> {
     let mut device = ComPtr::NULL;
     let mut context = ComPtr::NULL;
     let mut level = 0u32;
+    // `D3D11_CREATE_DEVICE_BGRA_SUPPORT` is not optional here: a XAML `SwapChainPanel` surface is
+    // BGRA, and DXGI refuses `CreateSwapChainForComposition` (with `DXGI_ERROR_INVALID_CALL`, not a
+    // helpful "device lacks BGRA") when the device was created without this flag. Every WP8.1
+    // XAML/DirectX sample passes it; the first version of this file did not, which is a strong
+    // candidate for the on-device failure that survived the descriptor fix.
     let hr = D3D11CreateDevice(
         chosen.vtbl as *mut c_void,
         D3D_DRIVER_TYPE_UNKNOWN,
         core::ptr::null_mut(),
-        0,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT,
         levels.as_ptr(),
         levels.len() as u32,
         D3D11_SDK_VERSION,
@@ -576,6 +581,118 @@ pub unsafe fn create_swapchain_for_hwnd(
     }
     Some(swapchain)
 }
+
+/// The fallback route: `CreateSwapChainForCoreWindow`.
+///
+/// The plan calls for measuring both attachment routes, and this is the second one. It is
+/// structurally simpler than the composition route (no panel interop interface, no `SetSwapChain`),
+/// and on WP8.1 the CoreWindow *is* the app's single window, so it is a legitimate target. It lives
+/// behind its own entry point so the two routes can be tried independently from C# without
+/// rebuilding.
+///
+/// `core_window` is the `ICoreWindow*` of `Windows.UI.Core.CoreWindow.GetForCurrentThread()`,
+/// passed from C# as an `IUnknown*`.
+///
+/// `trace` receives `(step, hresult)` exactly as [`create_swapchain_for_panel_traced`] does; step
+/// codes 30..33 are unique to this path so a log line says which route produced the HRESULT.
+pub unsafe fn create_swapchain_for_corewindow_traced(
+    device: ComPtr,
+    core_window: *mut c_void,
+    width: u32,
+    height: u32,
+    trace: *mut i32,
+) -> Option<ComPtr> {
+    unsafe fn note(trace: *mut i32, step: i32, hr: i32) {
+        if !trace.is_null() {
+            *trace = step;
+            *trace.add(1) = hr;
+        }
+    }
+
+    if core_window.is_null() {
+        note(trace, CW_NO_WINDOW, -1);
+        return None;
+    }
+
+    // Same device -> adapter -> factory walk as the panel route.
+    let mut dxgi_device = ComPtr::NULL;
+    let hr = device.query_interface(&IID_IDXGIDEVICE, &mut dxgi_device.vtbl as *mut _ as *mut *mut c_void);
+    if hr < 0 || dxgi_device.is_null() {
+        note(trace, CW_QI_DXGIDEVICE, hr);
+        return None;
+    }
+    let mut adapter = ComPtr::NULL;
+    let get_adapter: extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT = dxgi_device.method(7);
+    let hr = get_adapter(dxgi_device.vtbl as *mut c_void, &mut adapter.vtbl as *mut _ as *mut *mut c_void);
+    if hr < 0 || adapter.is_null() {
+        dxgi_device.release();
+        note(trace, CW_GET_ADAPTER, hr);
+        return None;
+    }
+    let mut factory = ComPtr::NULL;
+    let get_parent: extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> HRESULT =
+        adapter.method(6);
+    let hr = get_parent(
+        adapter.vtbl as *mut c_void,
+        &IID_IDXGIFACTORY2,
+        &mut factory.vtbl as *mut _ as *mut *mut c_void,
+    );
+    adapter.release();
+    dxgi_device.release();
+    if hr < 0 || factory.is_null() {
+        note(trace, CW_GET_PARENT, hr);
+        return None;
+    }
+
+    let scd = DXGI_SWAP_CHAIN_DESC1 {
+        Width: width,
+        Height: height,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        Stereo: 0,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+        BufferCount: 2,
+        Scaling: DXGI_SCALING_STRETCH,
+        SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+        AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+        Flags: 0,
+    };
+    let create_for_window: extern "system" fn(
+        *mut c_void,
+        *mut c_void,
+        *mut c_void,
+        *const DXGI_SWAP_CHAIN_DESC1,
+        *mut c_void,
+        *mut *mut c_void,
+    ) -> HRESULT = factory.method(IDXGIFACTORY2_CREATESWAPCHAINFORCOREWINDOW);
+    let mut swapchain = ComPtr::NULL;
+    let hr = create_for_window(
+        factory.vtbl as *mut c_void,
+        device.vtbl as *mut c_void,
+        core_window,
+        &scd,
+        core::ptr::null_mut(),
+        &mut swapchain.vtbl as *mut _ as *mut *mut c_void,
+    );
+    factory.release();
+    if hr < 0 || swapchain.is_null() {
+        note(trace, CW_CREATE, hr);
+        return None;
+    }
+    if !trace.is_null() {
+        *trace = CW_CREATE_OK;
+        *trace.add(1) = 0;
+    }
+    Some(swapchain)
+}
+
+/// Step codes for [`create_swapchain_for_corewindow_traced`] (30..33).
+pub const CW_NO_WINDOW: i32 = 30;
+pub const CW_QI_DXGIDEVICE: i32 = 31;
+pub const CW_GET_ADAPTER: i32 = 32;
+pub const CW_GET_PARENT: i32 = 33;
+pub const CW_CREATE: i32 = 34;
+pub const CW_CREATE_OK: i32 = 35;
 
 /// Compile both stages of `QUAD_HLSL` and build every pipeline object once.
 pub unsafe fn build_pipeline(device: ComPtr, context: ComPtr) -> Option<Pipeline> {
