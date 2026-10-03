@@ -84,7 +84,7 @@ impl OffsetAnalysisPanel {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn start_analysis(&mut self, chart: &Chart, res: &Resource, info_offset: f32) {
-        use std::thread;
+        
 
         let note_events = extract_note_events(chart);
         let clip = res.music.clone();
@@ -104,9 +104,7 @@ impl OffsetAnalysisPanel {
             let note = WeightedGaussianNote::new(note_events, 0.02);
             let duration = pcm.len() as f64 / sample_rate as f64;
             let result = estimate_with(&superflux, &note, duration, &config);
-            if let Ok(mut guard) = result_slot.lock() {
-                *guard = Some(result);
-            }
+            if let Ok(mut guard) = result_slot.lock() {            *guard = Some(result);        }
         });
 
         self.state = OffsetAnalysisState::Computing;
@@ -408,3 +406,5 @@ fn auto_offset_note_kind(kind: &NoteKind) -> AutoOffsetNoteKind {
         NoteKind::Drag => AutoOffsetNoteKind::Drag,
     }
 }
+
+

@@ -41,7 +41,7 @@ pub mod macroquad_compat_types {
         pub height: u32,
     }
 
-    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
     pub struct RenderPass {
         pub id: u32,
     }
@@ -106,23 +106,33 @@ pub mod macroquad_compat_types {
     }
 
     /// `Eq` is dropped because the clear colour is a float tuple, matching upstream.
+    ///
+    /// **All three fields are real and all three are needed.** `prpr::ui` builds the literal
+    /// `Clear { depth: None, stencil: Some(0), color: None }` at the top of `Ui::new`, so a
+    /// `Clear { color }`-only variant is two `E0559`s ("has no field named `depth`/`stencil`").
+    /// Conversely `prpr::particle` calls the constructor `PassAction::clear_color(0.0, 0.0, 0.0, 0.0)`
+    /// with four scalar arguments, so `clear_color` cannot take a tuple.
     #[derive(Copy, Clone, Debug, Default, PartialEq)]
     pub enum PassAction {
         #[default]
         Nothing,
         Clear {
             color: Option<(f32, f32, f32, f32)>,
-            /// Depth buffer clear value; WP8.1 C# renderer ignores this field.
+            /// Depth buffer clear value; the WP8.1 C# renderer ignores the field.
             depth: Option<f32>,
-            /// Stencil buffer clear value; WP8.1 C# renderer ignores this field.
+            /// Stencil buffer clear value; the WP8.1 C# renderer ignores the field.
             stencil: Option<i32>,
         },
     }
 
     impl PassAction {
-        /// The constructor form `prpr` uses.
+        /// The constructor form `prpr` uses: four separate scalar channels, not a tuple.
         pub fn clear_color(r: f32, g: f32, b: f32, a: f32) -> Self {
-            PassAction::Clear { color: Some((r, g, b, a)), depth: None, stencil: None }
+            PassAction::Clear {
+                color: Some((r, g, b, a)),
+                depth: None,
+                stencil: None,
+            }
         }
     }
 
@@ -617,11 +627,16 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    /// 5-argument form: `(ctx, buffer_layouts, vertex_attributes, shader, params)`.
+    /// `(ctx, buffer_layouts, vertex_attributes, shader, params)`.
     ///
-    /// `prpr::particle` passes a `&[BufferLayout; N]` and `&[VertexAttribute; M]`, then a
-    /// `Shader` and `PipelineParams`. The C# renderer owns actual pipelines; this records the
-    /// description so the id can be forwarded if needed.
+    /// `prpr::particle` passes `&[BufferLayout; N]`, `&[VertexAttribute; M]`, a `Shader` and a
+    /// `PipelineParams`. The slice-ness of the first two is the part that is easy to get wrong: the
+    /// obvious-looking signature is `(ctx, BufferLayout, ShaderMeta, PipelineParams)`, which is a
+    /// different miniquad revision entirely and turns one call into four type errors (two
+    /// "expected `BufferLayout`, found `&[BufferLayout; 2]`"-style, one "unexpected argument #4 of
+    /// type `miniquad::Shader`", one "remove the extra argument").
+    ///
+    /// The C# renderer owns actual pipelines; nothing is recorded here.
     pub fn with_params(
         _ctx: &mut Context,
         _layouts: &[BufferLayout],
@@ -695,10 +710,11 @@ impl Buffer {
     pub fn immutable<T>(_ctx: &mut Context, _buffer_type: BufferType, data: &[T]) -> Self {
         Buffer { id: 0, len: core::mem::size_of_val(data) }
     }
-    /// Allocates a dynamic buffer of `byte_len` bytes.
+    /// Allocates a dynamic buffer from a data slice.
     ///
-    /// `prpr::particle` calls this with a byte count (`MAX_PARTICLES * size_of::<GpuParticle>()`)
-    /// rather than a data slice, so the argument is `usize` rather than `&[T]`.
+    /// Generic over the element type, like `new` and `immutable`. `prpr::particle` calls it as
+    /// `Buffer::stream(ctx, BufferType::VertexBuffer, Self::MAX_PARTICLES * size_of::<GpuParticle>())`
+    /// - a *byte count*, not a slice - so the argument is a `usize` rather than `&[T]`.
     pub fn stream(_ctx: &mut Context, _buffer_type: BufferType, byte_len: usize) -> Self {
         Buffer { id: 0, len: byte_len }
     }

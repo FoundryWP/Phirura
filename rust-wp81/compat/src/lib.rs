@@ -945,9 +945,11 @@ fn udivmod_u64(n: u64, d: u64) -> (u64, u64) {
 extern "C" {
     // compiler_builtins' names for the same operations.
     fn __floatdidf(i: i64) -> f64;
+    fn __floatdisf(i: i64) -> f32;
     fn __floatundidf(u: u64) -> f64;
     fn __floatundisf(u: u64) -> f32;
     fn __fixdfdi(d: f64) -> i64;
+    fn __fixsfdi(f: f32) -> i64;
     fn __fixunsdfdi(d: f64) -> u64;
     fn __fixunssfdi(f: f32) -> u64;
 }
@@ -957,9 +959,22 @@ pub extern "C" fn __i64tod(i: i64) -> f64 {
     unsafe { __floatdidf(i) }
 }
 
+/// `i64 as f32`. Wanted by `prpr`'s `serde_json` float reader; the helper is a different one from
+/// `__floatdidf`, because converting to `f32` is not converting to `f64` narrowed.
+#[no_mangle]
+pub extern "C" fn __i64tos(i: i64) -> f32 {
+    unsafe { __floatdisf(i) }
+}
+
 #[no_mangle]
 pub extern "C" fn __dtoi64(d: f64) -> i64 {
     unsafe { __fixdfdi(d) }
+}
+
+/// `f32 as i64`. Wanted by `image`'s resampling path.
+#[no_mangle]
+pub extern "C" fn __stoi64(f: f32) -> i64 {
+    unsafe { __fixsfdi(f) }
 }
 
 #[no_mangle]

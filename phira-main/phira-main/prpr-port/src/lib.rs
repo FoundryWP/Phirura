@@ -323,6 +323,115 @@ pub extern "C" fn wp81_port_version() -> u32 {
 }
 
 // ===========================================================================
+// the compat anchor
+//
+// `wp81-compat` is a *dependency*, but rustc only pulls objects out of a dependency rlib when
+// something references them - and nothing here calls `NtCreateFile` or `lstrlenW`. They are
+// referenced from **patched std**, which is a separate compilation unit, so without an anchor the
+// linker silently drops the whole crate and the link then reports 13 unresolved externals
+// (`lstrlenW`, `atexit`, `LoadLibraryA`, `NtCreateFile`, `GetUserProfileDirectoryW`, …) for symbols
+// that exist one directory away and are already compiled.
+//
+// The probe crate hit this first and solved it the same way (`link-probe::wp81_anchor_compat`), so
+// this mirrors that: take each shim's address at *runtime* and fold them together. Taking the
+// addresses in a `static` initialiser would not work - a pointer has no value in const evaluation -
+// and the function is `#[no_mangle]` so the linker keeps it, then `/EXPORT:wp81_anchor_port` in
+// build-port.ps1 forces it into the DLL's export table, which is what actually drags the archive
+// members in. None of the shims are *called* here: invoking `NtCreateFile` with null arguments
+// would be meaningless.
+//
+// **When the link reports an unresolved external that compat defines, add it here.** The export
+// list and this function are one mechanism; a symbol in neither is not linked.
+// ===========================================================================
+
+// The two `global_asm!` divide helpers have no Rust item to name, so they are opened as `extern`
+// declarations purely to take their addresses for the anchor.
+extern "C" {
+    fn __rt_udiv64();
+    fn __rt_sdiv64();
+}
+
+#[inline]
+fn __rt_udiv64_addr() -> usize {
+    __rt_udiv64 as unsafe extern "C" fn() as usize
+}
+
+#[inline]
+fn __rt_sdiv64_addr() -> usize {
+    __rt_sdiv64 as unsafe extern "C" fn() as usize
+}
+
+#[no_mangle]
+pub extern "C" fn wp81_anchor_port() -> usize {
+    let anchors: [usize; 45] = [
+        // console / stdio
+        wp81_compat::GetConsoleMode as usize,
+        wp81_compat::GetConsoleOutputCP as usize,
+        wp81_compat::ReadConsoleW as usize,
+        wp81_compat::WriteConsoleW as usize,
+        wp81_compat::GetStdHandle as usize,
+        wp81_compat::SetStdHandle as usize,
+        wp81_compat::GetConsoleCP as usize,
+        wp81_compat::SetConsoleCtrlHandler as usize,
+        // process environment
+        wp81_compat::GetCommandLineW as usize,
+        wp81_compat::GetEnvironmentStringsW as usize,
+        wp81_compat::FreeEnvironmentStringsW as usize,
+        wp81_compat::GetUserProfileDirectoryW as usize,
+        wp81_compat::GetEnvironmentVariableW as usize,
+        wp81_compat::SetEnvironmentVariableW as usize,
+        wp81_compat::GetCurrentDirectoryW as usize,
+        wp81_compat::SetCurrentDirectoryW as usize,
+        wp81_compat::GetActiveProcessorCount as usize,
+        // threads / pipes
+        wp81_compat::WaitForMultipleObjects as usize,
+        wp81_compat::CreatePipe as usize,
+        // NT file layer
+        wp81_compat::NtCreateFile as usize,
+        wp81_compat::NtOpenFile as usize,
+        wp81_compat::NtReadFile as usize,
+        wp81_compat::NtWriteFile as usize,
+        wp81_compat::NtSetInformationFile as usize,
+        wp81_compat::NtCreateNamedPipeFile as usize,
+        wp81_compat::RtlNtStatusToDosError as usize,
+        wp81_compat::wp81_close_handle as usize,
+        // CRNG, loader, strings, exit
+        wp81_compat::ProcessPrng as usize,
+        wp81_compat::LoadLibraryA as usize,
+        wp81_compat::lstrlenW as usize,
+        wp81_compat::strlen as usize,
+        wp81_compat::wcslen as usize,
+        wp81_compat::atexit as usize,
+        // `_tls_index` is a `static mut` and the loader writes it from the image's TLS directory at
+        // load time, so taking its address is an unsafe read of mutable static. Only the *address*
+        // is taken; nothing here reads or writes its value.
+        unsafe { core::ptr::addr_of!(wp81_compat::_tls_index) as usize },
+        // MSVC ARM runtime helpers. These are called from compiler_builtins and from LLVM-generated
+        // code in *any* crate, so like the shims they are referenced from outside this one and need
+        // the same anchor. `__rt_udiv64` / `__rt_sdiv64` are `global_asm!` blocks rather than Rust
+        // functions - written in assembly precisely because a 16-byte register return cannot be
+        // expressed in Rust - so they are reached through the `extern` block below rather than
+        // through the crate path.
+        wp81_compat::__rt_udiv as usize,
+        wp81_compat::__i64tod as usize,
+        wp81_compat::__i64tos as usize,
+        wp81_compat::__dtoi64 as usize,
+        wp81_compat::__dtou64 as usize,
+        wp81_compat::__stoi64 as usize,
+        wp81_compat::__stou64 as usize,
+        wp81_compat::__u64tod as usize,
+        wp81_compat::__u64tos as usize,
+        __rt_udiv64_addr() as usize,
+        __rt_sdiv64_addr() as usize,
+    ];
+    let mut acc = 0usize;
+    for a in anchors {
+        acc ^= a;
+    }
+    acc
+}
+
+// ===========================================================================
 // libm
 //
 // `pxfm` (reached through prpr's image/blur path) calls the C float-maths entry points, and a
@@ -350,6 +459,11 @@ libm_shim!(sinf, libm::sinf, (x: f32) -> f32);
 libm_shim!(cosf, libm::cosf, (x: f32) -> f32);
 libm_shim!(tanf, libm::tanf, (x: f32) -> f32);
 libm_shim!(asinf, libm::asinf, (x: f32) -> f32);
+// `lyon_tessellation`'s stroke-join code calls this one directly; it is the only trig entry point
+// the tessellator needs that the earlier list did not already carry.
+libm_shim!(acosf, libm::acosf, (x: f32) -> f32);
+libm_shim!(atanf, libm::atanf, (x: f32) -> f32);
+libm_shim!(sqrtf, libm::sqrtf, (x: f32) -> f32);
 libm_shim!(floorf, libm::floorf, (x: f32) -> f32);
 libm_shim!(ceilf, libm::ceilf, (x: f32) -> f32);
 libm_shim!(truncf, libm::truncf, (x: f32) -> f32);

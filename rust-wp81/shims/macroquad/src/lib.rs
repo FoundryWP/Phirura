@@ -66,6 +66,15 @@ pub use glam::{Mat2, Mat3, Mat3A, Mat4, Quat, Vec2, Vec3, Vec3A, Vec4};
 pub use glam::{DMat2, DMat3, DMat4, DQuat, DVec2, DVec3, DVec4};
 pub use glam::{IVec2, IVec3, IVec4, UVec2, UVec3, UVec4};
 
+/// The swizzle extension traits.
+///
+/// `prpr::ui` writes `pos.xy() / pos.w` on a `Vec4` and `prpr::ext` does the same, so
+/// `Vec4Swizzles` has to be in scope or every such expression is
+/// `E0599: no method named 'xy' found` — with rustc helpfully noting the method exists "for
+/// `macroquad::Vec4` here" because the trait is implemented but not imported. macroquad's real
+/// prelude re-exports these; omitting them is a shim-completeness bug, not a prpr bug.
+pub use glam::{Vec2Swizzles, Vec3Swizzles, Vec4Swizzles};
+
 pub use glam::{dmat2, dmat3, dmat4, dquat, dvec2, dvec3, dvec4};
 pub use glam::{ivec2, ivec3, ivec4, uvec2, uvec3, uvec4};
 pub use glam::{vec2, vec3, vec3a, vec4};
@@ -223,6 +232,15 @@ impl From<[f32; 4]> for Color {
     }
 }
 
+/// Both `Color → [f32; 4]` and `[f32; 4] → Color` are needed, and both must exist:
+///
+/// * `prpr::ui::text` passes a `Color` to `glyph_brush::Text::with_color<C: Into<Color>>`, whose
+///   `Color` is `[f32; 4]` - so `Color: Into<[f32; 4]>` is required.
+/// * the same file converts a glyph's stored `[f32; 4]` back with `vertex.extra.color.into()`
+///   into a `Color` - so `[f32; 4]: Into<Color>` is required too.
+///
+/// Neither collides with core's blanket `impl<T> From<T> for T`: that impl only overlaps when the
+/// two types are *equal*, and `Color` is not `[f32; 4]`.
 impl From<Color> for [f32; 4] {
     fn from(c: Color) -> Self {
         [c.r, c.g, c.b, c.a]
@@ -465,40 +483,59 @@ pub enum DrawMode {
 /// The methods take and return the real handle types where prpr passes them (`Texture2D`), and
 /// ignore everything else - `make_pipeline` takes the raw GL-ish pipeline description that
 /// `core/render.rs` builds, and the C# renderer decides its own pipeline state.
+///
+/// # Why every method takes `&self`, not `&mut self`
+///
+/// Upstream macroquad's `QuadGl` mutates *global* batcher state, so its methods are `&self` - and
+/// that is load-bearing for `prpr`, which writes
+///
+/// ```ignore
+/// let gl = unsafe { get_internal_gl() }.quad_gl;
+/// gl.texture(...); gl.draw_mode(...); gl.geometry(...);
+/// ```
+///
+/// in a dozen places: an immutable local binding calling mutating methods. With `&mut self` that
+/// is 20 `E0596: cannot borrow 'gl' as mutable` errors across `ui.rs`, `ui/text.rs`, `ext.rs`,
+/// `core/resource.rs`. The shim's state is `static mut`/atomically shared anyway, so `&self` costs
+/// nothing and the signature matches what `prpr` is written against. **Do not "fix" this by making
+/// the bindings `mut`** - that is editing upstream for no reason and would break at the
+/// destructuring sites (`let InternalGlContext { quad_gl: gl, .. } = …`), which cannot be `mut`.
 pub struct QuadGl;
 
 impl QuadGl {
-    pub fn texture(&mut self, tex: Option<Texture2D>) {
+    pub fn texture(&self, tex: Option<Texture2D>) {
         draw::set_texture(tex.map(|t| t.id));
     }
 
-    pub fn draw_mode(&mut self, mode: DrawMode) {
+    pub fn draw_mode(&self, mode: DrawMode) {
         draw::set_draw_mode(mode);
     }
 
-    pub fn geometry(&mut self, vertices: &[Vertex], indices: &[u16]) {
+    pub fn geometry(&self, vertices: &[Vertex], indices: &[u16]) {
         draw::push_geometry(vertices, indices);
     }
 
-    pub fn scissor(&mut self, _rect: Option<(i32, i32, i32, i32)>) {
-        // The C# renderer applies its own scissor. On the paths prpr uses the recorded geometry is
-        // already correct, so this is a no-op on WP8.1.
+    pub fn scissor(&self, _rect: Option<(i32, i32, i32, i32)>) {
+        // The parameter is the *tuple*, not a `Rect`: `prpr::ui` stores its scissor as
+        // `Option<(i32, i32, i32, i32)>` and hands it straight through, so a `Rect` here is an
+        // E0308 at two call sites. The C# renderer applies its own scissor anyway; on the paths
+        // prpr uses the recorded geometry is already correct, so this is a no-op on WP8.1.
     }
 
-    pub fn push_model_matrix(&mut self, _mat: Mat4) {}
+    pub fn push_model_matrix(&self, _mat: Mat4) {}
 
-    pub fn pop_model_matrix(&mut self) {}
+    pub fn pop_model_matrix(&self) {}
 
     /// Builds a pipeline.
     ///
-    /// The signature follows the miniquad revision prpr targets, which is the *older* one: shader
-    /// sources by value, then `PipelineParams`, then attribute layouts and uniforms. An earlier
-    /// attempt used a `(write_color, write_depth, stencil_test, blend)` boolean tuple, which is the
-    /// shape of a different API entirely and matched nothing.
+    /// The signature follows the miniquad revision prpr targets: shader sources by `&str`, then
+    /// `PipelineParams`, then attribute layouts and uniforms. An earlier attempt used a
+    /// `(write_color, write_depth, stencil_test, blend)` boolean tuple plus shader sources by value,
+    /// which is the shape of a different API entirely and matched nothing.
     ///
     /// Returns `Ok` because `prpr::ext::make_pipeline` unwraps the result.
     pub fn make_pipeline(
-        &mut self,
+        &self,
         _ctx: &mut miniquad::Context,
         _vertex: &str,
         _fragment: &str,
@@ -514,30 +551,37 @@ impl QuadGl {
     /// Ends the batch. The C# side drains the buffer at the end of the frame, so this is where a
     /// real implementation would hand it over; recording is already in order, so there is nothing
     /// to do.
-    pub fn flush(&mut self) {}
+    pub fn flush(&self) {}
 
-    /// `prpr::ext::get_viewport` unwraps this with a fallback, so `None` means "ask the shell".
+    /// `prpr` destructures the result as `let (x, y, w, h) = …` and supplies a `(0, 0, w, h)`
+    /// fallback literal, so this must be the **tuple** form, not a `Rect` - a `Rect` makes both
+    /// halves of that expression type-error (`E0308` twice per call site).
     ///
-    /// Returns `(x, y, w, h)` — the tuple form that `prpr` destructures directly.
+    /// `None` means "ask the shell", which `prpr::ext::get_viewport` unwraps with a fallback that
+    /// asks `get_active_render_pass()` for the real size.
     pub fn get_viewport(&self) -> Option<(i32, i32, i32, i32)> {
         None
     }
 
     /// A setter, not a getter: `prpr::core::line` brackets an offscreen pass with
     /// `viewport(None)` / `viewport(Some(..))`. The getter is `get_viewport`.
-    pub fn viewport(&mut self, _rect: Option<(i32, i32, i32, i32)>) {}
+    pub fn viewport(&self, _rect: Option<(i32, i32, i32, i32)>) {}
 
     /// Selects the render target. A setter, not a getter - `prpr::core::effect` and
     /// `prpr::core::line` both call it with the pass they want to draw into.
-    pub fn render_pass(&mut self, _pass: Option<crate::miniquad_compat::RenderPass>) {}
+    pub fn render_pass(&self, _pass: Option<crate::miniquad_compat::RenderPass>) {}
 
-    /// `prpr::ext::get_viewport` maps over this, so it must be an `Option` - returning a bare
-    /// `RenderPass` made it "not an iterator".
+    /// The active render target as a handle.
+    ///
+    /// Must be `Option<RenderPass>` and not a size: `prpr::ext::get_viewport` writes
+    /// `get_active_render_pass().map(|it| { let tex = it.texture(gl.quad_context); (tex.width, …) })`,
+    /// so the value has to have `.texture()` on it. Returning a bare `RenderPass` (not an
+    /// `Option`) made it "not an iterator"; returning a size tuple breaks `.texture()`.
     pub fn get_active_render_pass(&self) -> Option<crate::miniquad_compat::RenderPass> {
         None
     }
 
-    pub fn set_blend(&mut self, _blend: Option<miniquad::BlendState>, _clear: bool) {}
+    pub fn set_blend(&self, _blend: Option<miniquad::BlendState>, _clear: bool) {}
 
     /// The projection `prpr::ui` composes its transforms against.
     pub fn get_projection_matrix(&self) -> Mat4 {
@@ -546,7 +590,7 @@ impl QuadGl {
 
     /// Sets a shader uniform. The value is dropped: the C# renderer owns pipelines, and prpr's
     /// effects are what it renders through.
-    pub fn set_uniform<T>(&mut self, _name: &str, _value: T) {}
+    pub fn set_uniform<T>(&self, _name: &str, _value: T) {}
 }
 
 pub mod window {
@@ -597,23 +641,28 @@ pub mod window {
 
     /// The context macroquad hands out.
     ///
-    /// `prpr` both destructures it (`InternalGlContext { quad_gl, quad_context }`) and calls
-    /// `flush()` straight through it, so it carries a `QuadGl` and derefs to it.
+    /// `prpr` both destructures it and calls through it, so both access paths matter:
+    ///
+    /// * `let InternalGlContext { quad_context: ctx, quad_gl } = gl;` then
+    ///   `self.setup_render_pass(quad_gl, ctx)` - and the parameter is `&QuadGl`, so `quad_gl`
+    ///   **must be a reference**, not a value. A `QuadGl` field makes that an `E0308`
+    ///   ("expected `&QuadGl`, found `QuadGl`") at three call sites in `particle.rs`.
+    /// * `get_internal_gl().flush()` - served by the `Deref` impl below.
     pub struct InternalGlContext<'a> {
-        pub quad_gl: QuadGl,
+        pub quad_gl: &'static mut QuadGl,
         pub quad_context: &'a mut miniquad::Context,
     }
 
     impl<'a> core::ops::Deref for InternalGlContext<'a> {
         type Target = QuadGl;
         fn deref(&self) -> &QuadGl {
-            &self.quad_gl
+            self.quad_gl
         }
     }
 
     impl<'a> core::ops::DerefMut for InternalGlContext<'a> {
         fn deref_mut(&mut self) -> &mut QuadGl {
-            &mut self.quad_gl
+            self.quad_gl
         }
     }
 
@@ -641,13 +690,15 @@ pub mod window {
     }
 
     pub unsafe fn get_internal_gl() -> InternalGlContext<'static> {
-        // Real addresses into `static mut`, because returning a reference to a temporary cannot
-        // work. Nothing here dereferences them: `prpr` only forwards them to `QuadGl` and to the
-        // miniquad calls, both of which ignore their arguments.
+        // Real addresses into `static mut`, because returning references to temporaries cannot
+        // work. Nothing here dereferences the context: `prpr` only forwards it to the miniquad
+        // calls, which ignore their arguments. The `QuadGl` is a ZST, so a leaked static is free
+        // and avoids a stack borrow that would not outlive the `'static` signature.
         static mut CTX: u8 = 0;
+        static mut GL: QuadGl = QuadGl;
         let p: *mut u8 = core::ptr::addr_of_mut!(CTX);
         InternalGlContext {
-            quad_gl: QuadGl,
+            quad_gl: &mut *core::ptr::addr_of_mut!(GL),
             quad_context: &mut *(p as *mut miniquad::Context),
         }
     }
@@ -1058,6 +1109,18 @@ pub use window::{pop_camera_state, push_camera_state};
 /// (`macroquad::miniquad::...`) as well as importing `miniquad` directly.
 pub use miniquad;
 
+/// macroquad's prelude re-exports `std::thread`, and `prpr::ui::offset_analysis` relies on that:
+/// it writes a bare `thread::spawn(move || …)` with no `use std::thread` anywhere in the file.
+/// Without this the prelude glob does not supply the name and the file fails with
+/// `E0433: cannot find module or crate 'thread' in this scope`.
+///
+/// **This is the one runtime-landmine in the port.** `std::thread` was measured to abort
+/// (`0xC0000409`) on WP8.1 — the OS supports threads (a raw `CreateThread` probe succeeds), it is
+/// Rust's thread wrapper that dies. `offset_analysis` is the only user, so the honest options are
+/// to gate it out on this target or to hand-roll a `CreateThread` wrapper later; re-exporting here
+/// at least keeps the *compile* honest about the dependency.
+pub use std::thread;
+
 /// Sets the asset root. The shell resolves assets from the app package, so there is no search path
 /// to configure - `prpr::core::init` calls this unconditionally at startup.
 pub fn set_pc_assets_folder(_path: &str) {}
@@ -1105,6 +1168,10 @@ pub mod texture {
 
 pub mod math {
     pub use super::{Mat4, Quat, Rect, Vec2, Vec3, Vec4};
+    /// The swizzle traits travel with the maths types: `prpr` gets `pos.xy()` through the
+    /// prelude, and a module that re-exports `Vec4` without them still fails to compile at the
+    /// `.xy()` sites.
+    pub use super::{Vec2Swizzles, Vec3Swizzles, Vec4Swizzles};
 
     /// macroquad's polar helper, used by `prpr::particle` to place particles on a ring.
     pub fn polar_to_cartesian(r: f32, theta: f32) -> Vec2 {
@@ -1173,6 +1240,14 @@ pub mod prelude {
     pub use super::color::*;
     pub use super::glam;
     pub use super::utils;
+    /// `std::thread`, through the prelude glob.
+    ///
+    /// `prpr::ui::offset_analysis` writes a bare `thread::spawn(..)` and imports only
+    /// `macroquad::prelude::*`, so the name has to arrive by this glob. Exporting it from the crate
+    /// root alone is not enough - rustc then reports "unresolved module **or unlinked crate**" and
+    /// suggests `use macroquad::thread`, which is a *crate-shaped* suggestion for a path prpr does
+    /// not spell out.
+    pub use super::thread;
     pub use super::miniquad::UniformType;
     pub use super::QuadGl;
     pub use super::{
@@ -1192,7 +1267,7 @@ pub mod prelude {
         is_mouse_button_down, load_file, load_image, load_material, measure_text, polar_to_cartesian,
         pop_camera_state, push_camera_state, set_pc_assets_folder, simulate_mouse_with_touch,
         touches, vec2, vec3, vec4, Camera2D, Color, Mat4, Material, Quat, Rect, TextDimensions,
-        Vec2, Vec3, Vec4, Vertex,
+        Vec2, Vec3, Vec4, Vertex, Vec2Swizzles, Vec3Swizzles, Vec4Swizzles,
     };
     pub use super::material::Material as MaterialType;
     pub use super::draw::*;

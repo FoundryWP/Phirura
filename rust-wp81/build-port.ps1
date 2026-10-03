@@ -91,7 +91,16 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 # The exported surface is the whole C#-facing ABI. Keep in step with the #[no_mangle] functions in
 # prpr-port/src/lib.rs and with PrprPort.cs on the C# side.
+#
+# `wp81_anchor_port` is NOT part of that ABI - it is the mechanism that makes the link work at all,
+# and it is easy to mistake for dead code and delete. `wp81-compat`'s shims (`lstrlenW`, `atexit`,
+# `LoadLibraryA`, the `Nt*` file calls, `ProcessPrng`, `_tls_index`, ...) are referenced from
+# *patched std*, never from prpr-port, so rustc pulls none of them out of the compat rlib and the
+# linker reports them as unresolved externals even though they are compiled and one directory away.
+# An /EXPORT: for one function that takes their addresses is what drags the archive members in -
+# `build-probe.ps1` does the same thing with `wp81_anchor_compat`.
 $exports = @(
+    "wp81_anchor_port",
     "wp81_install_callbacks",
     "wp81_parse_pec",
     "wp81_chart_info",

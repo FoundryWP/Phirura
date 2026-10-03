@@ -1,7 +1,7 @@
 ﻿cargo.exe : warning: unused workspace dependency `objc2-core-foundation`
-At line:1 char:728
-+ ... hira-main"; & $cargo build -p prpr-port --target $target "-Zjson-targ ...
-+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+所在位置 E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\build-port.ps1:78 字符: 1
++ & $cargo @cargoArgs 2>&1 | Out-File -FilePath $cargoLog -Encoding utf ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~
     + CategoryInfo          : NotSpecified: (warning: unused...ore-foundation`:String) [], RemoteException
     + FullyQualifiedErrorId : NativeCommandError
  
@@ -158,104 +158,104 @@ help: to clarify your intent to not inherit, add:
    |
 warning: `phira-main` (manifest) generated 1 warning
 warning: function `glTexParameteri` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:732:19
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:771:19
     |
-732 |     pub unsafe fn glTexParameteri(_target: u32, _pname: u32, _param: i32) {}
+771 |     pub unsafe fn glTexParameteri(_target: u32, _pname: u32, _param: i32) {}
     |                   ^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_tex_parameteri`
     |
     = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
 
 warning: function `glBindTexture` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:734:19
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:773:19
     |
-734 |     pub unsafe fn glBindTexture(_target: u32, _texture: u32) {}
+773 |     pub unsafe fn glBindTexture(_target: u32, _texture: u32) {}
     |                   ^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_bind_texture`
 
 warning: function `glTexSubImage2D` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:735:19
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:774:19
     |
-735 |     pub unsafe fn glTexSubImage2D(
+774 |     pub unsafe fn glTexSubImage2D(
     |                   ^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_tex_sub_image2_d`
 
 warning: function `glGetIntegerv` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:740:19
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:779:19
     |
-740 |     pub unsafe fn glGetIntegerv(_pname: u32, _params: *mut i32) {}
+779 |     pub unsafe fn glGetIntegerv(_pname: u32, _params: *mut i32) {}
     |                   ^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_get_integerv`
 
 warning: function `glGenerateMipmap` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:741:19
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:780:19
     |
-741 |     pub unsafe fn glGenerateMipmap(_target: u32) {}
+780 |     pub unsafe fn glGenerateMipmap(_target: u32) {}
     |                   ^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_generate_mipmap`
 
 warning: function `glDeleteRenderbuffers` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:742:19
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:781:19
     |
-742 |     pub unsafe fn glDeleteRenderbuffers(_n: i32, _ids: *const u32) {}
+781 |     pub unsafe fn glDeleteRenderbuffers(_n: i32, _ids: *const u32) {}
     |                   ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_delete_renderbuffers`
 
 warning: function `glDeleteFramebuffers` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:743:19
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:782:19
     |
-743 |     pub unsafe fn glDeleteFramebuffers(_n: i32, _ids: *const u32) {}
+782 |     pub unsafe fn glDeleteFramebuffers(_n: i32, _ids: *const u32) {}
     |                   ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_delete_framebuffers`
 
 warning: function `glBindFramebuffer` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:745:19
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:784:19
     |
-745 |     pub unsafe fn glBindFramebuffer(_target: u32, _fb: u32) {}
+784 |     pub unsafe fn glBindFramebuffer(_target: u32, _fb: u32) {}
     |                   ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_bind_framebuffer`
 
 warning: function `glBlitFramebuffer` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:746:19
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:785:19
     |
-746 |     pub unsafe fn glBlitFramebuffer(
+785 |     pub unsafe fn glBlitFramebuffer(
     |                   ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_blit_framebuffer`
 
 warning: function `glGetError` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:752:19
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:791:19
     |
-752 |     pub unsafe fn glGetError() -> u32 {
+791 |     pub unsafe fn glGetError() -> u32 {
     |                   ^^^^^^^^^^ help: convert the identifier to snake case: `gl_get_error`
 
 warning: function `glGenRenderbuffers` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:755:19
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:794:19
     |
-755 |     pub unsafe fn glGenRenderbuffers(_n: i32, _out: *mut u32) {}
+794 |     pub unsafe fn glGenRenderbuffers(_n: i32, _out: *mut u32) {}
     |                   ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_gen_renderbuffers`
 
 warning: function `glBindRenderbuffer` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:756:19
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:795:19
     |
-756 |     pub unsafe fn glBindRenderbuffer(_target: u32, _rb: u32) {}
+795 |     pub unsafe fn glBindRenderbuffer(_target: u32, _rb: u32) {}
     |                   ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_bind_renderbuffer`
 
 warning: function `glRenderbufferStorageMultisample` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:757:19
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:796:19
     |
-757 |     pub unsafe fn glRenderbufferStorageMultisample(
+796 |     pub unsafe fn glRenderbufferStorageMultisample(
     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_renderbuffer_s
 torage_multisample`
 
 warning: function `glGenFramebuffers` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:761:19
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:800:19
     |
-761 |     pub unsafe fn glGenFramebuffers(_n: i32, _out: *mut u32) {}
+800 |     pub unsafe fn glGenFramebuffers(_n: i32, _out: *mut u32) {}
     |                   ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_gen_framebuffers`
 
 warning: function `glFramebufferRenderbuffer` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:762:19
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:801:19
     |
-762 |     pub unsafe fn glFramebufferRenderbuffer(_target: u32, _att: u32, _rbt: u32, _rb: u32) {}
+801 |     pub unsafe fn glFramebufferRenderbuffer(_target: u32, _att: u32, _rbt: u32, _rb: u32) {}
     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_framebuffer_renderbuf
 fer`
 
 warning: `miniquad` (lib) generated 15 warnings
 warning: ambiguous import visibility: pub or pub(in crate::window)
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:543:13
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:604:13
     |
-543 |     pub use miniquad;
+604 |     pub use miniquad;
     |             ^^^^^^^^
     |
     = note: ambiguous because of a conflict between a name from a glob import and an outer scope during import or macro
@@ -263,9 +263,9 @@ warning: ambiguous import visibility: pub or pub(in crate::window)
     = note: `miniquad` could refer to a crate passed with `--extern`
     = help: use `::miniquad` to refer to this crate unambiguously
 note: `miniquad` could also refer to the crate imported here
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:536:9
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:597:9
     |
-536 |     use super::*;
+597 |     use super::*;
     |         ^^^^^^^^
     = help: consider adding an explicit import of `miniquad` to disambiguate
     = help: or use `self::miniquad` to refer to this crate unambiguously
@@ -285,6 +285,7 @@ warning: variable does not need to be mutable
     |
     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
+warning: `rfd` (lib) generated 1 warning (run `cargo fix --lib -p rfd` to apply 1 suggestion)
 warning: suspicious definition of the runtime `strlen` symbol used by the standard library
    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\compat\src\lib.rs:813:1
     |
@@ -298,9 +299,7 @@ len")]`, or `#[link_name = "strlen"]`
     = help: allow this lint if the signature is compatible
     = note: `#[warn(suspicious_runtime_symbol_definitions)]` on by default
 
-warning: `rfd` (lib) generated 1 warning (run `cargo fix --lib -p rfd` to apply 1 suggestion)
 warning: `wp81-compat` (lib) generated 1 warning
-   Compiling prpr v0.8.2 (E:\Users\admin\Documents\visual studio 2013\Phirura\phira-main\phira-main\prpr)
 warning: unused import: `macroquad::prelude::*`
  --> prpr\src\core\object.rs:2:5
   |
@@ -317,493 +316,15 @@ warning: use of deprecated constant `std::f32::INFINITY`: replaced by the `INFIN
     |
     = note: `#[warn(deprecated)]` on by default
 
-error[E0308]: mismatched types
-   --> prpr\src\ext.rs:205:9
-    |
-205 |         (0, 0, w, h)
-    |         ^^^^^^^^^^^^ expected `Rect`, found `({integer}, {integer}, i32, i32)`
-    |
-    = note: expected struct `macroquad::Rect`
-                found tuple `({integer}, {integer}, i32, i32)`
-
-error[E0308]: mismatched types
-   --> prpr\src\ext.rs:196:5
-    |
-194 |   pub fn get_viewport() -> (i32, i32, i32, i32) {
-    |                            -------------------- expected `(i32, i32, i32, i32)` because of return type
-195 |       let gl = unsafe { get_internal_gl() };
-196 | /     gl.quad_gl.get_viewport().unwrap_or_else(|| {
-197 | |         let (w, h) = gl
-198 | |             .quad_gl
-199 | |             .get_active_render_pass()
-...   |
-205 | |         (0, 0, w, h)
-206 | |     })
-    | |______^ expected `(i32, i32, i32, i32)`, found `Rect`
-    |
-    = note: expected tuple `(i32, i32, i32, i32)`
-              found struct `macroquad::Rect`
-
-error[E0308]: mismatched types
-   --> prpr\src\particle.rs:432:85
-    |
-432 | ...x_buffer = Buffer::stream(ctx, BufferType::VertexBuffer, Self::MAX_PARTICLES * std::mem::size_of::<GpuParticle
->());
-    |               --------------                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-^^^ expected `&[_]`, found `usize`
-    |               |
-    |               arguments to this function are incorrect
-    |
-    = note: expected reference `&[_]`
-                    found type `usize`
-note: associated function defined here
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:679:12
-    |
-679 |     pub fn stream<T>(_ctx: &mut Context, _buffer_type: BufferType, data: &[T]) -> Self {
-    |            ^^^^^^
-
-error[E0061]: this function takes 4 arguments but 5 arguments were supplied
-   --> prpr\src\particle.rs:455:24
-    |
-455 |         let pipeline = Pipeline::with_params(
-    |                        ^^^^^^^^^^^^^^^^^^^^^
-...
-473 |             shader,
-    |             ------ unexpected argument #4 of type `miniquad::Shader`
-    |
-note: expected `BufferLayout`, found `&[BufferLayout; 2]`
-   --> prpr\src\particle.rs:457:13
-    |
-457 | /             &[
-458 | |                 BufferLayout::default(),
-459 | |                 BufferLayout {
-460 | |                     step_func: VertexStep::PerInstance,
-461 | |                     ..Default::default()
-462 | |                 },
-463 | |             ],
-    | |_____________^
-    = note: expected struct `macroquad::BufferLayout`
-            found reference `&[macroquad::BufferLayout; 2]`
-note: expected `ShaderMeta`, found `&[VertexAttribute; 7]`
-   --> prpr\src\particle.rs:464:13
-    |
-464 | /             &[
-465 | |                 VertexAttribute::with_buffer("in_attr_pos", VertexFormat::Float3, 0),
-466 | |                 VertexAttribute::with_buffer("in_attr_uv", VertexFormat::Float2, 0),
-467 | |                 VertexAttribute::with_buffer("in_attr_color", VertexFormat::Float4, 0),
-...   |
-471 | |                 VertexAttribute::with_buffer("in_attr_inst_color", VertexFormat::Float4, 1),
-472 | |             ],
-    | |_____________^
-    = note: expected struct `macroquad::ShaderMeta`
-            found reference `&[macroquad::VertexAttribute; 7]`
-note: associated function defined here
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:612:12
-    |
-612 |     pub fn with_params(
-    |            ^^^^^^^^^^^
-help: remove the extra argument
-    |
-457 ~             /* BufferLayout */,
-458 ~             /* ShaderMeta */,
-    |
-
-error[E0061]: this function takes 4 arguments but 5 arguments were supplied
-   --> prpr\src\particle.rs:484:40
-    |
-484 |         let post_processing_pipeline = Pipeline::with_params(
-    |                                        ^^^^^^^^^^^^^^^^^^^^^
-...
-491 |             post_processing_shader,
-    |             ---------------------- unexpected argument #4 of type `miniquad::Shader`
-    |
-note: expected `BufferLayout`, found `&[BufferLayout; 2]`
-   --> prpr\src\particle.rs:486:13
-    |
-486 |             &[BufferLayout::default(), BufferLayout::default()],
-    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    = note: expected struct `macroquad::BufferLayout`
-            found reference `&[macroquad::BufferLayout; 2]`
-note: expected `ShaderMeta`, found `&[VertexAttribute; 2]`
-   --> prpr\src\particle.rs:487:13
-    |
-487 | /             &[
-488 | |                 VertexAttribute::with_buffer("pos", VertexFormat::Float2, 0),
-489 | |                 VertexAttribute::with_buffer("uv", VertexFormat::Float2, 0),
-490 | |             ],
-    | |_____________^
-    = note: expected struct `macroquad::ShaderMeta`
-            found reference `&[macroquad::VertexAttribute; 2]`
-note: associated function defined here
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:612:12
-    |
-612 |     pub fn with_params(
-    |            ^^^^^^^^^^^
-help: remove the extra argument
-    |
-486 ~             /* BufferLayout */,
-487 ~             /* ShaderMeta */,
-    |
-
-error[E0599]: no method named `apply_uniforms` found for mutable reference `&mut miniquad::Context` in the current scop
-e
-   --> prpr\src\particle.rs:730:13
-    |
-730 |         ctx.apply_uniforms(&shader::Uniforms {
-    |             ^^^^^^^^^^^^^^ method not found in `&mut miniquad::Context`
-
-error[E0599]: no method named `set_blend` found for struct `miniquad::Pipeline` in the current scope
-   --> prpr\src\particle.rs:741:27
-    |
-741 |             self.pipeline.set_blend(ctx, Some(self.config.blend_mode.blend_state()));
-    |                           ^^^^^^^^^ method not found in `miniquad::Pipeline`
-
-error[E0061]: function takes 1 argument but 4 arguments were supplied
-   --> prpr\src\particle.rs:753:55
-    |
-753 |             ctx.begin_pass(self.post_processing_pass, PassAction::clear_color(0.0, 0.0, 0.0, 0.0));
-    |                                                       ^^^^^^^^^^^^^^^^^^^^^^^
-    |
-note: associated function defined here
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:120:16
-    |
-120 |         pub fn clear_color(color: (f32, f32, f32, f32)) -> Self {
-    |                ^^^^^^^^^^^
-help: wrap these arguments in parentheses to construct a tuple
-    |
-753 |             ctx.begin_pass(self.post_processing_pass, PassAction::clear_color((0.0, 0.0, 0.0, 0.0)));
-    |                                                                               +                  +
-
-error[E0308]: mismatched types
-   --> prpr\src\particle.rs:760:32
-    |
-760 |             .unwrap_or_else(|| (0, 0, screen_width() as _, screen_height() as _));
-    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Rect`, found `({intege
-r}, {integer}, _, _)`
-    |
-    = note: expected struct `macroquad::Rect`
-                found tuple `({integer}, {integer}, _, _)`
-
-error[E0308]: mismatched types
-   --> prpr\src\particle.rs:758:13
-    |
-758 |           let (x, y, w, h) = quad_gl
-    |  _____________^^^^^^^^^^^^___-
-    | |             |
-    | |             expected `Rect`, found `(_, _, _, _)`
-759 | |             .get_viewport()
-760 | |             .unwrap_or_else(|| (0, 0, screen_width() as _, screen_height() as _));
-    | |_________________________________________________________________________________- this expression has type `mac
-roquad::Rect`
-    |
-    = note: expected struct `macroquad::Rect`
-                found tuple `(_, _, _, _)`
-
-error[E0308]: mismatched types
-   --> prpr\src\particle.rs:778:36
-    |
-778 |                 .unwrap_or_else(|| (0, 0, screen_width() as _, screen_height() as _));
-    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Rect`, found `({in
-teger}, {integer}, _, _)`
-    |
-    = note: expected struct `macroquad::Rect`
-                found tuple `({integer}, {integer}, _, _)`
-
-error[E0308]: mismatched types
-   --> prpr\src\particle.rs:776:17
-    |
-776 |               let (x, y, w, h) = quad_gl
-    |  _________________^^^^^^^^^^^^___-
-    | |                 |
-    | |                 expected `Rect`, found `(_, _, _, _)`
-777 | |                 .get_viewport()
-778 | |                 .unwrap_or_else(|| (0, 0, screen_width() as _, screen_height() as _));
-    | |_____________________________________________________________________________________- this expression has type 
-`macroquad::Rect`
-    |
-    = note: expected struct `macroquad::Rect`
-                found tuple `(_, _, _, _)`
-
-error[E0308]: mismatched types
-   --> prpr\src\particle.rs:800:32
-    |
-800 |         self.setup_render_pass(quad_gl, ctx);
-    |              ----------------- ^^^^^^^ expected `&QuadGl`, found `QuadGl`
-    |              |
-    |              arguments to this method are incorrect
-    |
-note: method defined here
-   --> prpr\src\particle.rs:739:12
-    |
-739 |     pub fn setup_render_pass(&mut self, quad_gl: &QuadGl, ctx: &mut Context) {
-    |            ^^^^^^^^^^^^^^^^^            ----------------
-help: consider borrowing here
-    |
-800 |         self.setup_render_pass(&quad_gl, ctx);
-    |                                +
-
-error[E0308]: mismatched types
-   --> prpr\src\particle.rs:801:34
-    |
-801 |         self.perform_render_pass(quad_gl, ctx);
-    |              ------------------- ^^^^^^^ expected `&QuadGl`, found `QuadGl`
-    |              |
-    |              arguments to this method are incorrect
-    |
-note: method defined here
-   --> prpr\src\particle.rs:728:8
-    |
-728 |     fn perform_render_pass(&mut self, quad_gl: &QuadGl, ctx: &mut Context) {
-    |        ^^^^^^^^^^^^^^^^^^^            ----------------
-help: consider borrowing here
-    |
-801 |         self.perform_render_pass(&quad_gl, ctx);
-    |                                  +
-
-error[E0308]: mismatched types
-   --> prpr\src\particle.rs:802:30
-    |
-802 |         self.end_render_pass(quad_gl, ctx);
-    |              --------------- ^^^^^^^ expected `&QuadGl`, found `QuadGl`
-    |              |
-    |              arguments to this method are incorrect
-    |
-note: method defined here
-   --> prpr\src\particle.rs:764:12
-    |
-764 |     pub fn end_render_pass(&mut self, quad_gl: &QuadGl, ctx: &mut Context) {
-    |            ^^^^^^^^^^^^^^^            ----------------
-help: consider borrowing here
-    |
-802 |         self.end_render_pass(&quad_gl, ctx);
-    |                              +
-
-error[E0599]: no method named `render_pass` found for struct `macroquad::Camera2D` in the current scope
-    --> prpr\src\scene\game.rs:1195:40
-     |
-1195 |                 .or_else(|| res.camera.render_pass()),
-     |                                        ^^^^^^^^^^^ method not found in `macroquad::Camera2D`
-
-error[E0599]: no method named `clipboard_set` found for mutable reference `&mut miniquad::Context` in the current scope
-  --> prpr\src\ui\dialog.rs:91:63
-   |
-91 |                     unsafe { get_internal_gl() }.quad_context.clipboard_set(&error);
-   |                                                               ^^^^^^^^^^^^^ method not found in `&mut miniquad::Co
-ntext`
-
-error[E0277]: the trait bound `[f32; 4]: From<macroquad::Color>` is not satisfied
-   --> prpr\src\ui\text.rs:127:45
-    |
-127 | ...                   .with_color(self.color)
-    |                        ---------- ^^^^^^^^^^ the trait `From<macroquad::Color>` is not implemented for `[f32; 4]`
-    |                        |
-    |                        required by a bound introduced by this call
-    |
-    = help: `[f32; 4]` implements trait `From<T>`:
-              From<Quat>
-              From<macroquad::Vec4>
-              From<simba::simd::auto_simd_impl::AutoSimd<[f32; 4]>>
-              From<simba::simd::wide_simd_impl::WideF32x4>
-              From<wide::f32x4_::f32x4>
-    = note: required for `macroquad::Color` to implement `Into<[f32; 4]>`
-note: required by a bound in `glyph_brush::Text::<'_>::with_color`
-   --> C:\Users\admin\.workbuddy-ai\binaries\rust\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\glyph_brush-0.7.1
-2\src\section\refed.rs:224:26
-    |
-222 | impl Text<'_, Extra> {
-223 |     #[inline]
-224 |     pub fn with_color<C: Into<Color>>(mut self, color: C) -> Self {
-    |                          ^^^^^^^^^^^ required by this bound in `Text::<'_>::with_color`
-
-error[E0277]: the trait bound `[f32; 4]: From<macroquad::Color>` is not satisfied
-   --> prpr\src\ui\text.rs:139:37
-    |
-139 |                         .with_color(self.color)
-    |                          ---------- ^^^^^^^^^^ the trait `From<macroquad::Color>` is not implemented for `[f32; 4
-]`
-    |                          |
-    |                          required by a bound introduced by this call
-    |
-    = help: `[f32; 4]` implements trait `From<T>`:
-              From<Quat>
-              From<macroquad::Vec4>
-              From<simba::simd::auto_simd_impl::AutoSimd<[f32; 4]>>
-              From<simba::simd::wide_simd_impl::WideF32x4>
-              From<wide::f32x4_::f32x4>
-    = note: required for `macroquad::Color` to implement `Into<[f32; 4]>`
-note: required by a bound in `glyph_brush::Text::<'_>::with_color`
-   --> C:\Users\admin\.workbuddy-ai\binaries\rust\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\glyph_brush-0.7.1
-2\src\section\refed.rs:224:26
-    |
-222 | impl Text<'_, Extra> {
-223 |     #[inline]
-224 |     pub fn with_color<C: Into<Color>>(mut self, color: C) -> Self {
-    |                          ^^^^^^^^^^^ required by this bound in `Text::<'_>::with_color`
-
-error[E0277]: the trait bound `[f32; 4]: From<macroquad::Color>` is not satisfied
-   --> prpr\src\ui\text.rs:144:85
-    |
-144 |             section = section.add_text(Text::new(text).with_scale(scale).with_color(self.color));
-    |                                                                          ---------- ^^^^^^^^^^ the trait `From<ma
-croquad::Color>` is not implemented for `[f32; 4]`
-    |                                                                          |
-    |                                                                          required by a bound introduced by this c
-all
-    |
-    = help: `[f32; 4]` implements trait `From<T>`:
-              From<Quat>
-              From<macroquad::Vec4>
-              From<simba::simd::auto_simd_impl::AutoSimd<[f32; 4]>>
-              From<simba::simd::wide_simd_impl::WideF32x4>
-              From<wide::f32x4_::f32x4>
-    = note: required for `macroquad::Color` to implement `Into<[f32; 4]>`
-note: required by a bound in `glyph_brush::Text::<'_>::with_color`
-   --> C:\Users\admin\.workbuddy-ai\binaries\rust\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\glyph_brush-0.7.1
-2\src\section\refed.rs:224:26
-    |
-222 | impl Text<'_, Extra> {
-223 |     #[inline]
-224 |     pub fn with_color<C: Into<Color>>(mut self, color: C) -> Self {
-    |                          ^^^^^^^^^^^ required by this bound in `Text::<'_>::with_color`
-
-error[E0277]: the trait bound `[f32; 4]: From<macroquad::Color>` is not satisfied
-   --> prpr\src\ui\text.rs:182:81
-    |
-182 |                     Text::new(&text[..byte_index]).with_scale(scale).with_color(self.color),
-    |                                                                      ---------- ^^^^^^^^^^ the trait `From<macroq
-uad::Color>` is not implemented for `[f32; 4]`
-    |                                                                      |
-    |                                                                      required by a bound introduced by this call
-    |
-    = help: `[f32; 4]` implements trait `From<T>`:
-              From<Quat>
-              From<macroquad::Vec4>
-              From<simba::simd::auto_simd_impl::AutoSimd<[f32; 4]>>
-              From<simba::simd::wide_simd_impl::WideF32x4>
-              From<wide::f32x4_::f32x4>
-    = note: required for `macroquad::Color` to implement `Into<[f32; 4]>`
-note: required by a bound in `glyph_brush::Text::<'_>::with_color`
-   --> C:\Users\admin\.workbuddy-ai\binaries\rust\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\glyph_brush-0.7.1
-2\src\section\refed.rs:224:26
-    |
-222 | impl Text<'_, Extra> {
-223 |     #[inline]
-224 |     pub fn with_color<C: Into<Color>>(mut self, color: C) -> Self {
-    |                          ^^^^^^^^^^^ required by this bound in `Text::<'_>::with_color`
-
-error[E0277]: the trait bound `[f32; 4]: From<macroquad::Color>` is not satisfied
-   --> prpr\src\ui\text.rs:183:65
-    |
-183 |                     Text::new("…").with_scale(scale).with_color(self.color),
-    |                                                      ---------- ^^^^^^^^^^ the trait `From<macroquad::Color>` is 
-not implemented for `[f32; 4]`
-    |                                                      |
-    |                                                      required by a bound introduced by this call
-    |
-    = help: `[f32; 4]` implements trait `From<T>`:
-              From<Quat>
-              From<macroquad::Vec4>
-              From<simba::simd::auto_simd_impl::AutoSimd<[f32; 4]>>
-              From<simba::simd::wide_simd_impl::WideF32x4>
-              From<wide::f32x4_::f32x4>
-    = note: required for `macroquad::Color` to implement `Into<[f32; 4]>`
-note: required by a bound in `glyph_brush::Text::<'_>::with_color`
-   --> C:\Users\admin\.workbuddy-ai\binaries\rust\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\glyph_brush-0.7.1
-2\src\section\refed.rs:224:26
-    |
-222 | impl Text<'_, Extra> {
-223 |     #[inline]
-224 |     pub fn with_color<C: Into<Color>>(mut self, color: C) -> Self {
-    |                          ^^^^^^^^^^^ required by this bound in `Text::<'_>::with_color`
-
-error[E0277]: the trait bound `macroquad::Color: From<[f32; 4]>` is not satisfied
-   --> prpr\src\ui\text.rs:352:63
-    |
-352 |                     let mut color: Color = vertex.extra.color.into();
-    |                                                               ^^^^ the trait `From<[f32; 4]>` is not implemented 
-for `macroquad::Color`
-    |
-help: `macroquad::Color` implements trait `From<T>`
-   --> prpr\src\parse\rpe.rs:124:1
-    |
-124 | impl From<RGBColor> for Color {
-    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<RGBColor>`
-    |
-   ::: E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:200:1
-    |
-200 | impl From<[u8; 4]> for Color {
-    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<[u8; 4]>`
-    = note: required for `[f32; 4]` to implement `Into<macroquad::Color>`
-
-error[E0599]: no method named `xy` found for struct `macroquad::Vec4` in the current scope
-   --> prpr\src\ui.rs:200:17
-    |
-200 |             pos.xy() / pos.w
-    |                 ^^
-    |
-   ::: C:\Users\admin\.workbuddy-ai\binaries\rust\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\glam-0.30.10\src\
-swizzles\vec_traits.rs:489:8
-    |
-489 |     fn xy(self) -> Self::Vec2;
-    |        -- the method is available for `macroquad::Vec4` here
-    |
-    = help: items from traits can only be used if the trait is in scope
-help: trait `Vec4Swizzles` which provides `xy` is implemented but not in scope; perhaps you want to import it
-    |
-  2 + use macroquad::glam::Vec4Swizzles;
-    |
-help: there is a method `wxy` with a similar name
-    |
-200 |             pos.wxy() / pos.w
-    |                 +
-
-error[E0559]: variant `miniquad::PassAction::Clear` has no field named `depth`
-   --> prpr\src\ui.rs:687:13
-    |
-687 |             depth: None,
-    |             ^^^^^ `miniquad::PassAction::Clear` does not have this field
-    |
-    = note: all struct fields are already assigned
-
-error[E0559]: variant `miniquad::PassAction::Clear` has no field named `stencil`
-   --> prpr\src\ui.rs:688:13
-    |
-688 |             stencil: Some(0),
-    |             ^^^^^^^ `miniquad::PassAction::Clear` does not have this field
-    |
-    = note: all struct fields are already assigned
-
-error[E0308]: mismatched types
-   --> prpr\src\ui.rs:922:20
-    |
-922 |         gl.scissor(self.scissor);
-    |            ------- ^^^^^^^^^^^^ expected `Option<Rect>`, found `Option<(i32, i32, i32, i32)>`
-    |            |
-    |            arguments to this method are incorrect
-    |
-    = note: expected enum `Option<macroquad::Rect>`
-               found enum `Option<(i32, i32, i32, i32)>`
-note: method defined here
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:469:12
-    |
-469 |     pub fn scissor(&mut self, rect: Option<Rect>) {
-    |            ^^^^^^^
-
-error[E0308]: mismatched types
-   --> prpr\src\ui.rs:925:20
-    |
-925 |         gl.scissor(old);
-    |            ------- ^^^ expected `Option<Rect>`, found `Option<(i32, i32, i32, i32)>`
-    |            |
-    |            arguments to this method are incorrect
-    |
-    = note: expected enum `Option<macroquad::Rect>`
-               found enum `Option<(i32, i32, i32, i32)>`
-note: method defined here
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:469:12
-    |
-469 |     pub fn scissor(&mut self, rect: Option<Rect>) {
-    |            ^^^^^^^
+warning: variable does not need to be mutable
+   --> prpr\src\core\effect.rs:159:13
+    |
+159 |         let mut gl = unsafe { get_internal_gl() };
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
 warning: unnecessary `unsafe` block
    --> prpr\src\core\resource.rs:397:62
@@ -814,174 +335,519 @@ mat::RGBA8) })));
     |
     = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
 
-error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
-   --> prpr\src\core\resource.rs:394:13
+warning: variable does not need to be mutable
+   --> prpr\src\core\resource.rs:392:13
     |
-394 | ...   let gl = gl.quad_gl;
-    |           ^^ not mutable
-395 | ...   gl.draw_mode(DrawMode::Triangles);
-    |       -- cannot borrow as mutable
-396 | ...   for ((_, tex_id), meshes) in std::mem::take(&mut self.0).into_iter() {
-397 | ...       gl.texture(Some(Texture2D::from_miniquad_texture(unsafe { Texture::from_raw_id(tex_id, miniquad::Textur
-eFormat::RGBA8) })));
-    |           -- cannot borrow as mutable
-398 | ...       for mesh in meshes {
-399 | ...           gl.geometry(&mesh.0, &mesh.1);
-    |               -- cannot borrow as mutable
-    |
-help: consider changing this to be mutable
-    |
-394 |         let mut gl = gl.quad_gl;
-    |             +++
+392 |         let mut gl = unsafe { get_internal_gl() };
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
 
-error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
-   --> prpr\src\ext.rs:275:9
+warning: variable does not need to be mutable
+   --> prpr\src\particle.rs:790:13
     |
-275 |     let gl = unsafe { get_internal_gl() }.quad_gl;
-    |         ^^ not mutable
-...
-284 |         gl.texture(Some(tex));
-    |         -- cannot borrow as mutable
-...
-292 |         gl.texture(None);
-    |         -- cannot borrow as mutable
-...
-300 |     gl.draw_mode(DrawMode::Triangles);
-    |     -- cannot borrow as mutable
-301 |     gl.geometry(&v, &[0, 2, 3, 0, 1, 3]);
-    |     -- cannot borrow as mutable
-    |
-help: consider changing this to be mutable
-    |
-275 |     let mut gl = unsafe { get_internal_gl() }.quad_gl;
-    |         +++
+790 |         let mut gl = unsafe { get_internal_gl() };
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
 
-error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
-   --> prpr\src\ext.rs:325:9
+warning: variable does not need to be mutable
+   --> prpr\src\scene.rs:524:17
     |
-325 |     let gl = unsafe { get_internal_gl() }.quad_gl;
-    |         ^^ not mutable
-326 |     gl.texture(None);
-    |     -- cannot borrow as mutable
-327 |     gl.draw_mode(DrawMode::Triangles);
-    |     -- cannot borrow as mutable
-328 |     gl.geometry(&p, &[0, 1, 2, 1, 2, 3, 0, 1, 5, 0, 5, 4, 4, 5, 6, 5, 6, 7, 6, 7, 2, 7, 2, 3]);
-    |     -- cannot borrow as mutable
-    |
-help: consider changing this to be mutable
-    |
-325 |     let mut gl = unsafe { get_internal_gl() }.quad_gl;
-    |         +++
+524 |             let mut gl = unsafe { get_internal_gl() };
+    |                 ----^^
+    |                 |
+    |                 help: remove this `mut`
 
-error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
-   --> prpr\src\ext.rs:346:9
+warning: `prpr` (lib) generated 7 warnings (run `cargo fix --lib -p prpr` to apply 5 suggestions)
+   Compiling prpr-port v0.1.0 (E:\Users\admin\Documents\visual studio 2013\Phirura\phira-main\phira-main\prpr-port)
+warning: unnecessary `unsafe` block
+   --> prpr-port\src\lib.rs:408:9
     |
-346 |     let gl = unsafe { get_internal_gl() }.quad_gl;
-    |         ^^ not mutable
-347 |     gl.texture(None);
-    |     -- cannot borrow as mutable
-348 |     gl.draw_mode(DrawMode::Triangles);
-    |     -- cannot borrow as mutable
-349 |     gl.geometry(&p, &[0, 1, 2, 1, 2, 3, 0, 2, 4, 4, 0, 6, 4, 5, 6, 5, 6, 7, 1, 3, 5, 5, 1, 7]);
-    |     -- cannot borrow as mutable
+408 |         unsafe { core::ptr::addr_of!(wp81_compat::_tls_index) as usize },
+    |         ^^^^^^ unnecessary `unsafe` block
     |
-help: consider changing this to be mutable
-    |
-346 |     let mut gl = unsafe { get_internal_gl() }.quad_gl;
-    |         +++
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
 
-error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
-   --> prpr\src\ext.rs:449:5
+warning: creating a shared reference to mutable static
+   --> prpr-port\src\lib.rs:276:11
     |
-449 |     gl.make_pipeline(
-    |     ^^ cannot borrow as mutable
+276 |     match PARSED.as_ref() {
+    |           ^^^^^^^^^^^^^^^ shared reference to mutable static
     |
-help: consider changing this to be mutable
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if 
+a mutable reference is created for it while the shared reference lives
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+help: this type already provides "interior mutability", so its binding doesn't need to be declared as mutable when borr
+owed with a shared reference
     |
-446 |         quad_gl: mut gl,
-    |                  +++
+316 - static mut PARSED: Option<prpr::core::Chart> = None;
+316 + static PARSED: Option<prpr::core::Chart> = None;
+    |
 
-error[E0507]: cannot move out of index of `Vec<miniquad::Buffer>`
-   --> prpr\src\particle.rs:626:38
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:368:37
     |
-626 |                 .build_bindings(ctx, self.bindings.vertex_buffers[1], self.config.texture);
-    |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ move occurs because value has type `miniquad
-::Buffer`, which does not implement the `Copy` trait
+368 |         wp81_compat::GetConsoleMode as usize,
+    |                                     ^^^^^^^^
     |
-help: you can `clone` the value and consume it, but this might not be your desired behavior
+    = note: `#[warn(function_casts_as_integer)]` on by default
+help: first cast to a pointer `as *const ()`
     |
-626 |                 .build_bindings(ctx, <miniquad::Buffer as Clone>::clone(&self.bindings.vertex_buffers[1]), self.c
-onfig.texture);
-    |                                      ++++++++++++++++++++++++++++++++++++                               +
+368 |         wp81_compat::GetConsoleMode as *const () as usize,
+    |                                     ++++++++++++
 
-error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
-   --> prpr\src\ui\text.rs:391:13
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:369:41
     |
-391 |         let gl = unsafe { get_internal_gl() }.quad_gl;
-    |             ^^ not mutable
-392 |         gl.texture(Some(self.cache_texture));
-    |         -- cannot borrow as mutable
-...
-400 |             gl.geometry(&vertices, &[0, 2, 3, 0, 1, 3]);
-    |             -- cannot borrow as mutable
+369 |         wp81_compat::GetConsoleOutputCP as usize,
+    |                                         ^^^^^^^^
     |
-help: consider changing this to be mutable
+help: first cast to a pointer `as *const ()`
     |
-391 |         let mut gl = unsafe { get_internal_gl() }.quad_gl;
-    |             +++
+369 |         wp81_compat::GetConsoleOutputCP as *const () as usize,
+    |                                         ++++++++++++
 
-error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
-   --> prpr\src\ui.rs:142:13
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:370:35
     |
-142 |         let gl = unsafe { get_internal_gl() }.quad_gl;
-    |             ^^ not mutable
-143 |         gl.texture(self.shading.texture());
-    |         -- cannot borrow as mutable
-144 |         gl.draw_mode(DrawMode::Triangles);
-    |         -- cannot borrow as mutable
-145 |         gl.geometry(&self.vertices, &self.indices);
-    |         -- cannot borrow as mutable
+370 |         wp81_compat::ReadConsoleW as usize,
+    |                                   ^^^^^^^^
     |
-help: consider changing this to be mutable
+help: first cast to a pointer `as *const ()`
     |
-142 |         let mut gl = unsafe { get_internal_gl() }.quad_gl;
-    |             +++
+370 |         wp81_compat::ReadConsoleW as *const () as usize,
+    |                                   ++++++++++++
 
-error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
-   --> prpr\src\ui.rs:796:13
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:371:36
     |
-796 |         let gl = unsafe { get_internal_gl() }.quad_gl;
-    |             ^^ not mutable
-797 |         gl.texture(texture);
-    |         -- cannot borrow as mutable
-798 |         gl.draw_mode(DrawMode::Triangles);
-    |         -- cannot borrow as mutable
-799 |         gl.geometry(&std::mem::take(&mut self.vertex_buffers.vertices), &std::mem::take(&mut self.vertex_buffers.
-indices));
-    |         -- cannot borrow as mutable
+371 |         wp81_compat::WriteConsoleW as usize,
+    |                                    ^^^^^^^^
     |
-help: consider changing this to be mutable
+help: first cast to a pointer `as *const ()`
     |
-796 |         let mut gl = unsafe { get_internal_gl() }.quad_gl;
-    |             +++
+371 |         wp81_compat::WriteConsoleW as *const () as usize,
+    |                                    ++++++++++++
 
-error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
-   --> prpr\src\ui.rs:880:13
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:372:35
     |
-880 |         let gl = unsafe { get_internal_gl() }.quad_gl;
-    |             ^^ not mutable
-881 |         gl.push_model_matrix(transform);
-    |         -- cannot borrow as mutable
-...
-885 |         gl.pop_model_matrix();
-    |         -- cannot borrow as mutable
+372 |         wp81_compat::GetStdHandle as usize,
+    |                                   ^^^^^^^^
     |
-help: consider changing this to be mutable
+help: first cast to a pointer `as *const ()`
     |
-880 |         let mut gl = unsafe { get_internal_gl() }.quad_gl;
-    |             +++
+372 |         wp81_compat::GetStdHandle as *const () as usize,
+    |                                   ++++++++++++
 
-Some errors have detailed explanations: E0061, E0277, E0308, E0507, E0559, E0596, E0599.
-For more information about an error, try `rustc --explain E0061`.
-warning: `prpr` (lib) generated 3 warnings
-error: could not compile `prpr` (lib) due to 38 previous errors; 3 warnings emitted
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:373:35
+    |
+373 |         wp81_compat::SetStdHandle as usize,
+    |                                   ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+373 |         wp81_compat::SetStdHandle as *const () as usize,
+    |                                   ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:374:35
+    |
+374 |         wp81_compat::GetConsoleCP as usize,
+    |                                   ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+374 |         wp81_compat::GetConsoleCP as *const () as usize,
+    |                                   ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:375:44
+    |
+375 |         wp81_compat::SetConsoleCtrlHandler as usize,
+    |                                            ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+375 |         wp81_compat::SetConsoleCtrlHandler as *const () as usize,
+    |                                            ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:377:38
+    |
+377 |         wp81_compat::GetCommandLineW as usize,
+    |                                      ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+377 |         wp81_compat::GetCommandLineW as *const () as usize,
+    |                                      ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:378:45
+    |
+378 |         wp81_compat::GetEnvironmentStringsW as usize,
+    |                                             ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+378 |         wp81_compat::GetEnvironmentStringsW as *const () as usize,
+    |                                             ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:379:46
+    |
+379 |         wp81_compat::FreeEnvironmentStringsW as usize,
+    |                                              ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+379 |         wp81_compat::FreeEnvironmentStringsW as *const () as usize,
+    |                                              ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:380:47
+    |
+380 |         wp81_compat::GetUserProfileDirectoryW as usize,
+    |                                               ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+380 |         wp81_compat::GetUserProfileDirectoryW as *const () as usize,
+    |                                               ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:381:46
+    |
+381 |         wp81_compat::GetEnvironmentVariableW as usize,
+    |                                              ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+381 |         wp81_compat::GetEnvironmentVariableW as *const () as usize,
+    |                                              ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:382:46
+    |
+382 |         wp81_compat::SetEnvironmentVariableW as usize,
+    |                                              ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+382 |         wp81_compat::SetEnvironmentVariableW as *const () as usize,
+    |                                              ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:383:43
+    |
+383 |         wp81_compat::GetCurrentDirectoryW as usize,
+    |                                           ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+383 |         wp81_compat::GetCurrentDirectoryW as *const () as usize,
+    |                                           ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:384:43
+    |
+384 |         wp81_compat::SetCurrentDirectoryW as usize,
+    |                                           ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+384 |         wp81_compat::SetCurrentDirectoryW as *const () as usize,
+    |                                           ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:385:46
+    |
+385 |         wp81_compat::GetActiveProcessorCount as usize,
+    |                                              ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+385 |         wp81_compat::GetActiveProcessorCount as *const () as usize,
+    |                                              ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:387:45
+    |
+387 |         wp81_compat::WaitForMultipleObjects as usize,
+    |                                             ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+387 |         wp81_compat::WaitForMultipleObjects as *const () as usize,
+    |                                             ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:388:33
+    |
+388 |         wp81_compat::CreatePipe as usize,
+    |                                 ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+388 |         wp81_compat::CreatePipe as *const () as usize,
+    |                                 ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:390:35
+    |
+390 |         wp81_compat::NtCreateFile as usize,
+    |                                   ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+390 |         wp81_compat::NtCreateFile as *const () as usize,
+    |                                   ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:391:33
+    |
+391 |         wp81_compat::NtOpenFile as usize,
+    |                                 ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+391 |         wp81_compat::NtOpenFile as *const () as usize,
+    |                                 ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:392:33
+    |
+392 |         wp81_compat::NtReadFile as usize,
+    |                                 ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+392 |         wp81_compat::NtReadFile as *const () as usize,
+    |                                 ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:393:34
+    |
+393 |         wp81_compat::NtWriteFile as usize,
+    |                                  ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+393 |         wp81_compat::NtWriteFile as *const () as usize,
+    |                                  ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:394:43
+    |
+394 |         wp81_compat::NtSetInformationFile as usize,
+    |                                           ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+394 |         wp81_compat::NtSetInformationFile as *const () as usize,
+    |                                           ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:395:44
+    |
+395 |         wp81_compat::NtCreateNamedPipeFile as usize,
+    |                                            ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+395 |         wp81_compat::NtCreateNamedPipeFile as *const () as usize,
+    |                                            ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:396:44
+    |
+396 |         wp81_compat::RtlNtStatusToDosError as usize,
+    |                                            ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+396 |         wp81_compat::RtlNtStatusToDosError as *const () as usize,
+    |                                            ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:397:40
+    |
+397 |         wp81_compat::wp81_close_handle as usize,
+    |                                        ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+397 |         wp81_compat::wp81_close_handle as *const () as usize,
+    |                                        ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:399:34
+    |
+399 |         wp81_compat::ProcessPrng as usize,
+    |                                  ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+399 |         wp81_compat::ProcessPrng as *const () as usize,
+    |                                  ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:400:35
+    |
+400 |         wp81_compat::LoadLibraryA as usize,
+    |                                   ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+400 |         wp81_compat::LoadLibraryA as *const () as usize,
+    |                                   ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:401:31
+    |
+401 |         wp81_compat::lstrlenW as usize,
+    |                               ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+401 |         wp81_compat::lstrlenW as *const () as usize,
+    |                               ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:402:29
+    |
+402 |         wp81_compat::strlen as usize,
+    |                             ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+402 |         wp81_compat::strlen as *const () as usize,
+    |                             ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:403:29
+    |
+403 |         wp81_compat::wcslen as usize,
+    |                             ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+403 |         wp81_compat::wcslen as *const () as usize,
+    |                             ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:404:29
+    |
+404 |         wp81_compat::atexit as usize,
+    |                             ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+404 |         wp81_compat::atexit as *const () as usize,
+    |                             ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:415:32
+    |
+415 |         wp81_compat::__rt_udiv as usize,
+    |                                ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+415 |         wp81_compat::__rt_udiv as *const () as usize,
+    |                                ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:416:31
+    |
+416 |         wp81_compat::__i64tod as usize,
+    |                               ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+416 |         wp81_compat::__i64tod as *const () as usize,
+    |                               ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:417:31
+    |
+417 |         wp81_compat::__i64tos as usize,
+    |                               ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+417 |         wp81_compat::__i64tos as *const () as usize,
+    |                               ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:418:31
+    |
+418 |         wp81_compat::__dtoi64 as usize,
+    |                               ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+418 |         wp81_compat::__dtoi64 as *const () as usize,
+    |                               ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:419:31
+    |
+419 |         wp81_compat::__dtou64 as usize,
+    |                               ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+419 |         wp81_compat::__dtou64 as *const () as usize,
+    |                               ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:420:31
+    |
+420 |         wp81_compat::__stoi64 as usize,
+    |                               ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+420 |         wp81_compat::__stoi64 as *const () as usize,
+    |                               ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:421:31
+    |
+421 |         wp81_compat::__stou64 as usize,
+    |                               ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+421 |         wp81_compat::__stou64 as *const () as usize,
+    |                               ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:422:31
+    |
+422 |         wp81_compat::__u64tod as usize,
+    |                               ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+422 |         wp81_compat::__u64tod as *const () as usize,
+    |                               ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> prpr-port\src\lib.rs:423:31
+    |
+423 |         wp81_compat::__u64tos as usize,
+    |                               ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+423 |         wp81_compat::__u64tos as *const () as usize,
+    |                               ++++++++++++
+
+warning: `prpr-port` (lib) generated 44 warnings (run `cargo fix --lib -p prpr-port` to apply 42 suggestions)
+    Finished `release` profile [optimized] target(s) in 18.44s
