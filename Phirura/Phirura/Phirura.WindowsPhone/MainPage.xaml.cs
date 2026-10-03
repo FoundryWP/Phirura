@@ -71,6 +71,48 @@ namespace Phirura
             this.Frame.Navigate(typeof(OnlinePage));
         }
 
+        /// <summary>
+        /// Runs the Rust-port self-test and shows the result.
+        ///
+        /// The PEC sample is deliberately non-trivial - two holds, a flick, a drag and an easing
+        /// note - because `wp81_parse_pec` returning 0 notes proves only that the DLL loaded. The
+        /// line/note/duration numbers it reports come out of the real `prpr` parser, so they are
+        /// what says the port is wired up correctly.
+        /// </summary>
+        private void DiagnosticsButton_Click(object sender, RoutedEventArgs e)
+        {
+            StatusText.Text = "正在运行 Rust 端口自检 …";
+            AppLog.Write("MainPage: running prpr port self-test");
+            PrprPort.RunSelfTest(SamplePec);
+        }
+
+        /// <summary>
+        /// A tiny PEC chart, run through the real Rust parser.
+        ///
+        /// Format is `prpr`'s (see `prpr/src/parse/pec.rs`), which is NOT the generic PEC
+        /// convention: `n1`=Click, `n2`=Hold (carries an end time), `n3`=Flick, `n4`=Drag.
+        /// Line 1 is the chart offset in **milliseconds** (`offset = ms/1000 - 0.15`), and every
+        /// command line is a strict token count - the parser rejects any trailing token with
+        /// `unexpected-extra`, so a sample that "looks right" but has one field too many fails.
+        ///
+        ///   bp &lt;bpm&gt; &lt;beats&gt;                 exactly 2 tokens
+        ///   n1 &lt;line&gt; &lt;beat&gt; &lt;x&gt; &lt;above&gt; &lt;fake&gt;   x is in 1024ths of screen width
+        ///   n2 ... &lt;endBeat&gt; &lt;x&gt; &lt;above&gt; &lt;fake&gt;   the extra token is the hold's end
+        ///   cp &lt;line&gt; &lt;beat&gt; &lt;x&gt; &lt;y&gt;          4 tokens; cv is cp's speed sibling
+        ///
+        /// Beat values are all 0 here, so the chart ends at `max_time + 1` rather than needing
+        /// real timing to be well-formed.
+        /// </summary>
+        private const string SamplePec =
+            "0\n" +
+            "bp 120 4\n" +
+            "n1 0 0 512 0 0\n" +
+            "n2 0 0 256 0 0 512\n" +
+            "n3 0 0 0 1 0\n" +
+            "n4 0 0 768 0 1\n" +
+            "cv 0 0 1\n" +
+            "cp 0 0 0 0\n";
+
         private async void LoadCharts()
         {
             if (_loading)

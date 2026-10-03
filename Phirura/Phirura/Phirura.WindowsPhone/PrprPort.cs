@@ -30,6 +30,31 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_chart_info(out ChartInfo info);
 
+        // --- the renderer drain -------------------------------------------
+        //
+        // The Rust macroquad shim records every draw call instead of issuing GL. Once per frame
+        // the shell flattens that recording (`encode`), reads the records through the two
+        // pointers, replays them, then clears (`reset`). The pointers address the DLL's own
+        // statics, so they are re-read every frame and never cached.
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint wp81_draw_encode();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr wp81_draw_commands();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr wp81_draw_vertices();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr wp81_draw_indices();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void wp81_draw_reset();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void wp81_draw_selftest();
+
         // --- the Rust -> C# direction -------------------------------------
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -117,6 +142,183 @@ namespace Phirura
             public uint lines;
             public uint notes;
             public long duration_ms;
+        }
+
+        // --- the drain's wire types ---------------------------------------
+        //
+        // `#[repr(C)]` tag-then-payload records, matching `PortCmd` / `PortVertex` in the macroquad
+        // shim. Both are 32 bytes with no 8-byte members, which is what keeps the ARM marshaller
+        // from inventing padding. Field order is the ABI: a mismatch does not fail to compile, it
+        // silently scrambles every drawn frame.
+
+        /// <summary>Kind tags, matching the <c>KIND_*</c> constants in Rust.</summary>
+        public enum PortKind : uint
+        {
+            Texture = 0,
+            Rect = 1,
+            Line = 2,
+            Circle = 3,
+            Geometry = 4,
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct PortCmd
+        {
+            public uint kind;
+            public uint flags;
+            public uint vstart;
+            public uint vcount;
+            public uint istart;
+            public uint icount;
+
+            // The payload is fixed at 8 floats so the record size is uniform. Which slots are
+            // meaningful depends on `kind`; the rest are zero.
+            public float f0, f1, f2, f3, f4, f5, f6, f7;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct PortVertex
+        {
+            public float x, y, z, u, v, r, g, b;
+        }
+
+        /// <summary>One frame of recorded draw calls, already flattened for replay.</summary>
+        public sealed class DrainFrame
+        {
+            public int Count;
+            public PortCmd[] Commands;
+
+            /// <summary>Vertices for <see cref="PortKind.Geometry"/> records, indexed by <c>vstart</c>.</summary>
+            public PortVertex[] Vertices;
+
+            /// <summary>u16 indices for <see cref="PortKind.Geometry"/> records.</summary>
+            public ushort[] Indices;
+        }
+
+        /// <summary>
+        /// Pulls the frame the Rust shim recorded and resets it.
+        ///
+        /// Everything is copied out into managed arrays before the reset, because the reset clears
+        /// the arenas the pointers address. Copying is also what makes the data safe to touch from
+        /// the XAML draw callback on the UI thread.
+        /// </summary>
+        public static DrainFrame Drain(uint vertexCapacity, uint indexCapacity)
+        {
+            int n = (int)wp81_draw_encode();
+            if (n <= 0)
+            {
+                // Nothing recorded this frame. Still reset so stale commands cannot leak into the
+                // next one if encode ever bails early on a full buffer.
+                wp81_draw_reset();
+                return new DrainFrame { Count = 0, Commands = new PortCmd[0], Vertices = new PortVertex[0], Indices = new ushort[0] };
+            }
+
+            PortCmd[] cmds = new PortCmd[n];
+            IntPtr cmdPtr = wp81_draw_commands();
+            // Copy by field rather than Marshal.PtrToStructure on the whole array: the latter
+            // needs the exact managed size and is slower here than a manual loop over a known
+            // 32-byte record.
+            for (int i = 0; i < n; i++)
+            {
+                cmds[i] = ReadCmd(cmdPtr, i);
+            }
+
+            PortVertex[] verts = new PortVertex[0];
+            if (vertexCapacity > 0)
+            {
+                verts = new PortVertex[vertexCapacity];
+                IntPtr vptr = wp81_draw_vertices();
+                for (int i = 0; i < vertexCapacity; i++)
+                {
+                    verts[i] = ReadVertex(vptr, i);
+                }
+            }
+
+            ushort[] idx = new ushort[0];
+            if (indexCapacity > 0)
+            {
+                idx = new ushort[indexCapacity];
+                IntPtr iptr = wp81_draw_indices();
+                for (int i = 0; i < indexCapacity; i++)
+                {
+                    idx[i] = (ushort)Marshal.ReadInt16(iptr, i * 2);
+                }
+            }
+
+            wp81_draw_reset();
+            return new DrainFrame { Count = n, Commands = cmds, Vertices = verts, Indices = idx };
+        }
+
+        private static PortCmd ReadCmd(IntPtr basePtr, int index)
+        {
+            int off = index * CmdStride;
+            PortCmd c = new PortCmd();
+            c.kind = (uint)Marshal.ReadInt32(basePtr, off + 0);
+            c.flags = (uint)Marshal.ReadInt32(basePtr, off + 4);
+            c.vstart = (uint)Marshal.ReadInt32(basePtr, off + 8);
+            c.vcount = (uint)Marshal.ReadInt32(basePtr, off + 12);
+            c.istart = (uint)Marshal.ReadInt32(basePtr, off + 16);
+            c.icount = (uint)Marshal.ReadInt32(basePtr, off + 20);
+            c.f0 = ReadF(basePtr, off + 24);
+            c.f1 = ReadF(basePtr, off + 28);
+            c.f2 = ReadF(basePtr, off + 32);
+            c.f3 = ReadF(basePtr, off + 36);
+            c.f4 = ReadF(basePtr, off + 40);
+            c.f5 = ReadF(basePtr, off + 44);
+            c.f6 = ReadF(basePtr, off + 48);
+            c.f7 = ReadF(basePtr, off + 52);
+            return c;
+        }
+
+        /// <summary>
+        /// Byte size of one <c>PortCmd</c> in the DLL's array.
+        ///
+        /// Six u32 tag fields (24 B) plus eight f32 payload slots (32 B) = 56 B. This is NOT the
+        /// size of the managed struct - <see cref="PortCmd"/>'s eight named floats are laid out
+        /// identically, but the pointer arithmetic has to use the *native* record size, so it is
+        /// derived here rather than from <c>Marshal.SizeOf</c>.
+        /// </summary>
+        private const int CmdStride = 6 * 4 + 8 * 4;
+
+        /// <summary>Byte size of one <c>PortVertex</c>: eight f32 = 32 B.</summary>
+        private const int VertexStride = 8 * 4;
+
+        /// <summary>
+        /// Fails loudly (in the log and the self-test summary) if the managed structs stop matching
+        /// the native record sizes.
+        ///
+        /// This is the cheap guard for the one failure mode that is invisible at compile time: a
+        /// field added to either side changes the stride, and the reader then walks off the end of
+        /// every record and draws garbage. It cost a cycle the first time it happened (the C#
+        /// reader assumed a 32-byte `PortCmd` when the native record is 56), so it is asserted
+        /// rather than trusted.
+        /// </summary>
+        public static bool WireLayoutOk()
+        {
+            return Marshal.SizeOf<PortCmd>() == CmdStride
+                && Marshal.SizeOf<PortVertex>() == VertexStride;
+        }
+
+        private static PortVertex ReadVertex(IntPtr basePtr, int index)
+        {
+            int off = index * VertexStride;
+            PortVertex v = new PortVertex();
+            v.x = ReadF(basePtr, off + 0);
+            v.y = ReadF(basePtr, off + 4);
+            v.z = ReadF(basePtr, off + 8);
+            v.u = ReadF(basePtr, off + 12);
+            v.v = ReadF(basePtr, off + 16);
+            v.r = ReadF(basePtr, off + 20);
+            v.g = ReadF(basePtr, off + 24);
+            v.b = ReadF(basePtr, off + 28);
+            return v;
+        }
+
+        // Int32-bits-to-float rather than Marshal.PtrToStructure<float>: no struct marshalling and
+        // no dependence on the marshaller agreeing with the native alignment.
+        private static float ReadF(IntPtr p, int off)
+        {
+            return BitConverter.ToSingle(BitConverter.GetBytes(Marshal.ReadInt32(p, off)), 0);
         }
 
         // The delegates are held in static fields on purpose. If they were locals the GC could
@@ -266,6 +468,58 @@ namespace Phirura
         // ===========================================================================
 
         /// <summary>
+        /// Drives one synthetic draw call through the drain and checks it came back intact.
+        ///
+        /// This is the renderer path's equivalent of the PEC parse: the shim records a triangle,
+        /// the shell reads it as a <see cref="PortCmd"/>, and the check confirms the kind, the
+        /// vertex count and one vertex coordinate. A layout mismatch between the two sides shows
+        /// up here as a wrong tag or garbage floats rather than as a blank screen on the device.
+        /// </summary>
+        public static string DrainSelfTest()
+        {
+            try
+            {
+                if (!WireLayoutOk())
+                {
+                    return "drain: FAILED (managed/native record size mismatch)";
+                }
+
+                wp81_draw_selftest();
+                DrainFrame frame = Drain(16, 16);
+
+                if (frame.Count != 1)
+                {
+                    return "drain: FAILED (expected 1 command, got " + frame.Count + ")";
+                }
+
+                PortCmd c = frame.Commands[0];
+                if (c.kind != (uint)PortKind.Geometry)
+                {
+                    return "drain: FAILED (kind=" + c.kind + ", expected Geometry)";
+                }
+                if (c.vcount != 3)
+                {
+                    return "drain: FAILED (vcount=" + c.vcount + ", expected 3)";
+                }
+
+                // Vertex 1 is (0.5, 0.5) with green at full red channel 0 - if the two structures
+                // disagree on layout this reads a neighbouring field instead.
+                PortVertex v = frame.Vertices[c.vstart + 1];
+                if (Math.Abs(v.x - 0.5f) > 0.001f || Math.Abs(v.g - 1.0f) > 0.001f)
+                {
+                    return "drain: FAILED (vertex mismatch x=" + v.x + " g=" + v.g + ")";
+                }
+
+                return "drain: OK (" + frame.Count + " cmd, " + c.vcount + " verts)";
+            }
+            catch (Exception ex)
+            {
+                AppLog.WriteSync("PrprPort: drain self-test failed", ex);
+                return "drain: FAILED " + ex.GetType().Name;
+            }
+        }
+
+        /// <summary>
         /// Proves the whole chain: the DLL loads, the callback table installs, and the real Rust
         /// chart parser runs. Logged rather than shown, so the result survives a crash.
         /// </summary>
@@ -291,6 +545,10 @@ namespace Phirura
                 summary = "Rust prpr: " + (notes >= 0 ? "OK" : "FAILED") + "\nparse returned " + notes
                     + "\nlines=" + info.lines + " notes=" + info.notes
                     + "\nduration=" + info.duration_ms + " ms";
+
+                // The drain is verified here too: the real scene is not driven from Rust yet, so
+                // this is the only way to prove the command records actually cross the boundary.
+                summary += "\n" + DrainSelfTest();
             }
             catch (Exception ex)
             {

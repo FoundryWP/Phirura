@@ -33,14 +33,14 @@ warning: missing `[lints]` to inherit `[workspace.lints]`
    = note: `cargo::missing_lints_inheritance` is set to `warn` by default
 help: to inherit `workspace.lints, add:
    |
-38 ~ libm = "0.2"
-39 + [lints]
-40 + workspace = true
+45 ~ libm = "0.2"
+46 + [lints]
+47 + workspace = true
    |
 help: to clarify your intent to not inherit, add:
    |
-38 ~ libm = "0.2"
-39 + [lints]
+45 ~ libm = "0.2"
+46 + [lints]
    |
 warning: `prpr-port` (manifest) generated 1 warning
 warning: missing `[lints]` to inherit `[workspace.lints]`
@@ -157,6 +157,7 @@ help: to clarify your intent to not inherit, add:
 13 + [lints]
    |
 warning: `phira-main` (manifest) generated 1 warning
+    Updating git repository `https://github.com/Mivik/prpr-macroquad`
 warning: function `glTexParameteri` should have a snake case name
    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:771:19
     |
@@ -252,29 +253,7 @@ warning: function `glFramebufferRenderbuffer` should have a snake case name
 fer`
 
 warning: `miniquad` (lib) generated 15 warnings
-warning: ambiguous import visibility: pub or pub(in crate::window)
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:604:13
-    |
-604 |     pub use miniquad;
-    |             ^^^^^^^^
-    |
-    = note: ambiguous because of a conflict between a name from a glob import and an outer scope during import or macro
- resolution
-    = note: `miniquad` could refer to a crate passed with `--extern`
-    = help: use `::miniquad` to refer to this crate unambiguously
-note: `miniquad` could also refer to the crate imported here
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:597:9
-    |
-597 |     use super::*;
-    |         ^^^^^^^^
-    = help: consider adding an explicit import of `miniquad` to disambiguate
-    = help: or use `self::miniquad` to refer to this crate unambiguously
-    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a f
-uture release!
-    = note: for more information, see issue #149145 <https://github.com/rust-lang/rust/issues/149145>
-    = note: `#[warn(ambiguous_import_visibilities)]` (part of `#[warn(future_incompatible)]`) on by default
-
-warning: `macroquad` (lib) generated 1 warning
+   Compiling macroquad v0.3.25 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad)
 warning: variable does not need to be mutable
    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\rfd\src\lib.rs:111:23
     |
@@ -300,6 +279,50 @@ len")]`, or `#[link_name = "strlen"]`
     = note: `#[warn(suspicious_runtime_symbol_definitions)]` on by default
 
 warning: `wp81-compat` (lib) generated 1 warning
+warning: ambiguous import visibility: pub or pub(in crate::window)
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:604:13
+    |
+604 |     pub use miniquad;
+    |             ^^^^^^^^
+    |
+    = note: ambiguous because of a conflict between a name from a glob import and an outer scope during import or macro
+ resolution
+    = note: `miniquad` could refer to a crate passed with `--extern`
+    = help: use `::miniquad` to refer to this crate unambiguously
+note: `miniquad` could also refer to the crate imported here
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:597:9
+    |
+597 |     use super::*;
+    |         ^^^^^^^^
+    = help: consider adding an explicit import of `miniquad` to disambiguate
+    = help: or use `self::miniquad` to refer to this crate unambiguously
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a f
+uture release!
+    = note: for more information, see issue #149145 <https://github.com/rust-lang/rust/issues/149145>
+    = note: `#[warn(ambiguous_import_visibilities)]` (part of `#[warn(future_incompatible)]`) on by default
+
+warning: unnecessary `unsafe` block
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:1226:9
+     |
+1226 |         unsafe { core::ptr::addr_of!(PORT_CMDS) as *const PortCmd }
+     |         ^^^^^^ unnecessary `unsafe` block
+     |
+     = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:1231:9
+     |
+1231 |         unsafe { core::ptr::addr_of!(PORT_VERTS) as *const PortVertex }
+     |         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:1236:9
+     |
+1236 |         unsafe { core::ptr::addr_of!(INDICES) as *const u16 }
+     |         ^^^^^^ unnecessary `unsafe` block
+
+   Compiling prpr v0.8.2 (E:\Users\admin\Documents\visual studio 2013\Phirura\phira-main\phira-main\prpr)
+warning: `macroquad` (lib) generated 4 warnings
 warning: unused import: `macroquad::prelude::*`
  --> prpr\src\core\object.rs:2:5
   |
@@ -362,9 +385,9 @@ warning: variable does not need to be mutable
 warning: `prpr` (lib) generated 7 warnings (run `cargo fix --lib -p prpr` to apply 5 suggestions)
    Compiling prpr-port v0.1.0 (E:\Users\admin\Documents\visual studio 2013\Phirura\phira-main\phira-main\prpr-port)
 warning: unnecessary `unsafe` block
-   --> prpr-port\src\lib.rs:408:9
+   --> prpr-port\src\lib.rs:542:9
     |
-408 |         unsafe { core::ptr::addr_of!(wp81_compat::_tls_index) as usize },
+542 |         unsafe { core::ptr::addr_of!(wp81_compat::_tls_index) as usize },
     |         ^^^^^^ unnecessary `unsafe` block
     |
     = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
@@ -387,467 +410,467 @@ owed with a shared reference
     |
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:368:37
+   --> prpr-port\src\lib.rs:502:37
     |
-368 |         wp81_compat::GetConsoleMode as usize,
+502 |         wp81_compat::GetConsoleMode as usize,
     |                                     ^^^^^^^^
     |
     = note: `#[warn(function_casts_as_integer)]` on by default
 help: first cast to a pointer `as *const ()`
     |
-368 |         wp81_compat::GetConsoleMode as *const () as usize,
+502 |         wp81_compat::GetConsoleMode as *const () as usize,
     |                                     ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:369:41
+   --> prpr-port\src\lib.rs:503:41
     |
-369 |         wp81_compat::GetConsoleOutputCP as usize,
+503 |         wp81_compat::GetConsoleOutputCP as usize,
     |                                         ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-369 |         wp81_compat::GetConsoleOutputCP as *const () as usize,
+503 |         wp81_compat::GetConsoleOutputCP as *const () as usize,
     |                                         ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:370:35
+   --> prpr-port\src\lib.rs:504:35
     |
-370 |         wp81_compat::ReadConsoleW as usize,
+504 |         wp81_compat::ReadConsoleW as usize,
     |                                   ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-370 |         wp81_compat::ReadConsoleW as *const () as usize,
+504 |         wp81_compat::ReadConsoleW as *const () as usize,
     |                                   ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:371:36
+   --> prpr-port\src\lib.rs:505:36
     |
-371 |         wp81_compat::WriteConsoleW as usize,
+505 |         wp81_compat::WriteConsoleW as usize,
     |                                    ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-371 |         wp81_compat::WriteConsoleW as *const () as usize,
+505 |         wp81_compat::WriteConsoleW as *const () as usize,
     |                                    ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:372:35
+   --> prpr-port\src\lib.rs:506:35
     |
-372 |         wp81_compat::GetStdHandle as usize,
+506 |         wp81_compat::GetStdHandle as usize,
     |                                   ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-372 |         wp81_compat::GetStdHandle as *const () as usize,
+506 |         wp81_compat::GetStdHandle as *const () as usize,
     |                                   ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:373:35
+   --> prpr-port\src\lib.rs:507:35
     |
-373 |         wp81_compat::SetStdHandle as usize,
+507 |         wp81_compat::SetStdHandle as usize,
     |                                   ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-373 |         wp81_compat::SetStdHandle as *const () as usize,
+507 |         wp81_compat::SetStdHandle as *const () as usize,
     |                                   ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:374:35
+   --> prpr-port\src\lib.rs:508:35
     |
-374 |         wp81_compat::GetConsoleCP as usize,
+508 |         wp81_compat::GetConsoleCP as usize,
     |                                   ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-374 |         wp81_compat::GetConsoleCP as *const () as usize,
+508 |         wp81_compat::GetConsoleCP as *const () as usize,
     |                                   ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:375:44
+   --> prpr-port\src\lib.rs:509:44
     |
-375 |         wp81_compat::SetConsoleCtrlHandler as usize,
+509 |         wp81_compat::SetConsoleCtrlHandler as usize,
     |                                            ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-375 |         wp81_compat::SetConsoleCtrlHandler as *const () as usize,
+509 |         wp81_compat::SetConsoleCtrlHandler as *const () as usize,
     |                                            ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:377:38
+   --> prpr-port\src\lib.rs:511:38
     |
-377 |         wp81_compat::GetCommandLineW as usize,
+511 |         wp81_compat::GetCommandLineW as usize,
     |                                      ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-377 |         wp81_compat::GetCommandLineW as *const () as usize,
+511 |         wp81_compat::GetCommandLineW as *const () as usize,
     |                                      ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:378:45
+   --> prpr-port\src\lib.rs:512:45
     |
-378 |         wp81_compat::GetEnvironmentStringsW as usize,
+512 |         wp81_compat::GetEnvironmentStringsW as usize,
     |                                             ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-378 |         wp81_compat::GetEnvironmentStringsW as *const () as usize,
+512 |         wp81_compat::GetEnvironmentStringsW as *const () as usize,
     |                                             ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:379:46
+   --> prpr-port\src\lib.rs:513:46
     |
-379 |         wp81_compat::FreeEnvironmentStringsW as usize,
+513 |         wp81_compat::FreeEnvironmentStringsW as usize,
     |                                              ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-379 |         wp81_compat::FreeEnvironmentStringsW as *const () as usize,
+513 |         wp81_compat::FreeEnvironmentStringsW as *const () as usize,
     |                                              ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:380:47
+   --> prpr-port\src\lib.rs:514:47
     |
-380 |         wp81_compat::GetUserProfileDirectoryW as usize,
+514 |         wp81_compat::GetUserProfileDirectoryW as usize,
     |                                               ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-380 |         wp81_compat::GetUserProfileDirectoryW as *const () as usize,
+514 |         wp81_compat::GetUserProfileDirectoryW as *const () as usize,
     |                                               ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:381:46
+   --> prpr-port\src\lib.rs:515:46
     |
-381 |         wp81_compat::GetEnvironmentVariableW as usize,
+515 |         wp81_compat::GetEnvironmentVariableW as usize,
     |                                              ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-381 |         wp81_compat::GetEnvironmentVariableW as *const () as usize,
+515 |         wp81_compat::GetEnvironmentVariableW as *const () as usize,
     |                                              ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:382:46
+   --> prpr-port\src\lib.rs:516:46
     |
-382 |         wp81_compat::SetEnvironmentVariableW as usize,
+516 |         wp81_compat::SetEnvironmentVariableW as usize,
     |                                              ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-382 |         wp81_compat::SetEnvironmentVariableW as *const () as usize,
+516 |         wp81_compat::SetEnvironmentVariableW as *const () as usize,
     |                                              ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:383:43
+   --> prpr-port\src\lib.rs:517:43
     |
-383 |         wp81_compat::GetCurrentDirectoryW as usize,
+517 |         wp81_compat::GetCurrentDirectoryW as usize,
     |                                           ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-383 |         wp81_compat::GetCurrentDirectoryW as *const () as usize,
+517 |         wp81_compat::GetCurrentDirectoryW as *const () as usize,
     |                                           ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:384:43
+   --> prpr-port\src\lib.rs:518:43
     |
-384 |         wp81_compat::SetCurrentDirectoryW as usize,
+518 |         wp81_compat::SetCurrentDirectoryW as usize,
     |                                           ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-384 |         wp81_compat::SetCurrentDirectoryW as *const () as usize,
+518 |         wp81_compat::SetCurrentDirectoryW as *const () as usize,
     |                                           ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:385:46
+   --> prpr-port\src\lib.rs:519:46
     |
-385 |         wp81_compat::GetActiveProcessorCount as usize,
+519 |         wp81_compat::GetActiveProcessorCount as usize,
     |                                              ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-385 |         wp81_compat::GetActiveProcessorCount as *const () as usize,
+519 |         wp81_compat::GetActiveProcessorCount as *const () as usize,
     |                                              ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:387:45
+   --> prpr-port\src\lib.rs:521:45
     |
-387 |         wp81_compat::WaitForMultipleObjects as usize,
+521 |         wp81_compat::WaitForMultipleObjects as usize,
     |                                             ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-387 |         wp81_compat::WaitForMultipleObjects as *const () as usize,
+521 |         wp81_compat::WaitForMultipleObjects as *const () as usize,
     |                                             ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:388:33
+   --> prpr-port\src\lib.rs:522:33
     |
-388 |         wp81_compat::CreatePipe as usize,
+522 |         wp81_compat::CreatePipe as usize,
     |                                 ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-388 |         wp81_compat::CreatePipe as *const () as usize,
+522 |         wp81_compat::CreatePipe as *const () as usize,
     |                                 ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:390:35
+   --> prpr-port\src\lib.rs:524:35
     |
-390 |         wp81_compat::NtCreateFile as usize,
+524 |         wp81_compat::NtCreateFile as usize,
     |                                   ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-390 |         wp81_compat::NtCreateFile as *const () as usize,
+524 |         wp81_compat::NtCreateFile as *const () as usize,
     |                                   ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:391:33
+   --> prpr-port\src\lib.rs:525:33
     |
-391 |         wp81_compat::NtOpenFile as usize,
+525 |         wp81_compat::NtOpenFile as usize,
     |                                 ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-391 |         wp81_compat::NtOpenFile as *const () as usize,
+525 |         wp81_compat::NtOpenFile as *const () as usize,
     |                                 ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:392:33
+   --> prpr-port\src\lib.rs:526:33
     |
-392 |         wp81_compat::NtReadFile as usize,
+526 |         wp81_compat::NtReadFile as usize,
     |                                 ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-392 |         wp81_compat::NtReadFile as *const () as usize,
+526 |         wp81_compat::NtReadFile as *const () as usize,
     |                                 ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:393:34
+   --> prpr-port\src\lib.rs:527:34
     |
-393 |         wp81_compat::NtWriteFile as usize,
+527 |         wp81_compat::NtWriteFile as usize,
     |                                  ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-393 |         wp81_compat::NtWriteFile as *const () as usize,
+527 |         wp81_compat::NtWriteFile as *const () as usize,
     |                                  ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:394:43
+   --> prpr-port\src\lib.rs:528:43
     |
-394 |         wp81_compat::NtSetInformationFile as usize,
+528 |         wp81_compat::NtSetInformationFile as usize,
     |                                           ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-394 |         wp81_compat::NtSetInformationFile as *const () as usize,
+528 |         wp81_compat::NtSetInformationFile as *const () as usize,
     |                                           ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:395:44
+   --> prpr-port\src\lib.rs:529:44
     |
-395 |         wp81_compat::NtCreateNamedPipeFile as usize,
+529 |         wp81_compat::NtCreateNamedPipeFile as usize,
     |                                            ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-395 |         wp81_compat::NtCreateNamedPipeFile as *const () as usize,
+529 |         wp81_compat::NtCreateNamedPipeFile as *const () as usize,
     |                                            ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:396:44
+   --> prpr-port\src\lib.rs:530:44
     |
-396 |         wp81_compat::RtlNtStatusToDosError as usize,
+530 |         wp81_compat::RtlNtStatusToDosError as usize,
     |                                            ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-396 |         wp81_compat::RtlNtStatusToDosError as *const () as usize,
+530 |         wp81_compat::RtlNtStatusToDosError as *const () as usize,
     |                                            ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:397:40
+   --> prpr-port\src\lib.rs:531:40
     |
-397 |         wp81_compat::wp81_close_handle as usize,
+531 |         wp81_compat::wp81_close_handle as usize,
     |                                        ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-397 |         wp81_compat::wp81_close_handle as *const () as usize,
+531 |         wp81_compat::wp81_close_handle as *const () as usize,
     |                                        ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:399:34
+   --> prpr-port\src\lib.rs:533:34
     |
-399 |         wp81_compat::ProcessPrng as usize,
+533 |         wp81_compat::ProcessPrng as usize,
     |                                  ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-399 |         wp81_compat::ProcessPrng as *const () as usize,
+533 |         wp81_compat::ProcessPrng as *const () as usize,
     |                                  ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:400:35
+   --> prpr-port\src\lib.rs:534:35
     |
-400 |         wp81_compat::LoadLibraryA as usize,
+534 |         wp81_compat::LoadLibraryA as usize,
     |                                   ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-400 |         wp81_compat::LoadLibraryA as *const () as usize,
+534 |         wp81_compat::LoadLibraryA as *const () as usize,
     |                                   ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:401:31
+   --> prpr-port\src\lib.rs:535:31
     |
-401 |         wp81_compat::lstrlenW as usize,
+535 |         wp81_compat::lstrlenW as usize,
     |                               ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-401 |         wp81_compat::lstrlenW as *const () as usize,
+535 |         wp81_compat::lstrlenW as *const () as usize,
     |                               ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:402:29
+   --> prpr-port\src\lib.rs:536:29
     |
-402 |         wp81_compat::strlen as usize,
+536 |         wp81_compat::strlen as usize,
     |                             ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-402 |         wp81_compat::strlen as *const () as usize,
+536 |         wp81_compat::strlen as *const () as usize,
     |                             ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:403:29
+   --> prpr-port\src\lib.rs:537:29
     |
-403 |         wp81_compat::wcslen as usize,
+537 |         wp81_compat::wcslen as usize,
     |                             ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-403 |         wp81_compat::wcslen as *const () as usize,
+537 |         wp81_compat::wcslen as *const () as usize,
     |                             ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:404:29
+   --> prpr-port\src\lib.rs:538:29
     |
-404 |         wp81_compat::atexit as usize,
+538 |         wp81_compat::atexit as usize,
     |                             ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-404 |         wp81_compat::atexit as *const () as usize,
+538 |         wp81_compat::atexit as *const () as usize,
     |                             ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:415:32
+   --> prpr-port\src\lib.rs:549:32
     |
-415 |         wp81_compat::__rt_udiv as usize,
+549 |         wp81_compat::__rt_udiv as usize,
     |                                ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-415 |         wp81_compat::__rt_udiv as *const () as usize,
+549 |         wp81_compat::__rt_udiv as *const () as usize,
     |                                ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:416:31
+   --> prpr-port\src\lib.rs:550:31
     |
-416 |         wp81_compat::__i64tod as usize,
+550 |         wp81_compat::__i64tod as usize,
     |                               ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-416 |         wp81_compat::__i64tod as *const () as usize,
+550 |         wp81_compat::__i64tod as *const () as usize,
     |                               ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:417:31
+   --> prpr-port\src\lib.rs:551:31
     |
-417 |         wp81_compat::__i64tos as usize,
+551 |         wp81_compat::__i64tos as usize,
     |                               ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-417 |         wp81_compat::__i64tos as *const () as usize,
+551 |         wp81_compat::__i64tos as *const () as usize,
     |                               ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:418:31
+   --> prpr-port\src\lib.rs:552:31
     |
-418 |         wp81_compat::__dtoi64 as usize,
+552 |         wp81_compat::__dtoi64 as usize,
     |                               ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-418 |         wp81_compat::__dtoi64 as *const () as usize,
+552 |         wp81_compat::__dtoi64 as *const () as usize,
     |                               ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:419:31
+   --> prpr-port\src\lib.rs:553:31
     |
-419 |         wp81_compat::__dtou64 as usize,
+553 |         wp81_compat::__dtou64 as usize,
     |                               ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-419 |         wp81_compat::__dtou64 as *const () as usize,
+553 |         wp81_compat::__dtou64 as *const () as usize,
     |                               ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:420:31
+   --> prpr-port\src\lib.rs:554:31
     |
-420 |         wp81_compat::__stoi64 as usize,
+554 |         wp81_compat::__stoi64 as usize,
     |                               ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-420 |         wp81_compat::__stoi64 as *const () as usize,
+554 |         wp81_compat::__stoi64 as *const () as usize,
     |                               ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:421:31
+   --> prpr-port\src\lib.rs:555:31
     |
-421 |         wp81_compat::__stou64 as usize,
+555 |         wp81_compat::__stou64 as usize,
     |                               ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-421 |         wp81_compat::__stou64 as *const () as usize,
+555 |         wp81_compat::__stou64 as *const () as usize,
     |                               ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:422:31
+   --> prpr-port\src\lib.rs:556:31
     |
-422 |         wp81_compat::__u64tod as usize,
+556 |         wp81_compat::__u64tod as usize,
     |                               ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-422 |         wp81_compat::__u64tod as *const () as usize,
+556 |         wp81_compat::__u64tod as *const () as usize,
     |                               ++++++++++++
 
 warning: direct cast of function item into an integer
-   --> prpr-port\src\lib.rs:423:31
+   --> prpr-port\src\lib.rs:557:31
     |
-423 |         wp81_compat::__u64tos as usize,
+557 |         wp81_compat::__u64tos as usize,
     |                               ^^^^^^^^
     |
 help: first cast to a pointer `as *const ()`
     |
-423 |         wp81_compat::__u64tos as *const () as usize,
+557 |         wp81_compat::__u64tos as *const () as usize,
     |                               ++++++++++++
 
 warning: `prpr-port` (lib) generated 44 warnings (run `cargo fix --lib -p prpr-port` to apply 42 suggestions)
-    Finished `release` profile [optimized] target(s) in 18.44s
+    Finished `release` profile [optimized] target(s) in 1m 21s

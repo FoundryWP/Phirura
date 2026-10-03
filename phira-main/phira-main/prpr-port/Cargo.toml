@@ -24,6 +24,13 @@ crate-type = ["staticlib", "lib"]
 [dependencies]
 prpr = { path = "../prpr", default-features = false }
 
+# The renderer drain reads the macroquad shim's own command arena directly (`draw::encode`,
+# `draw::port_commands`, ...), so the shim has to be a *direct* dependency here rather than merely
+# reachable through `prpr`. It must be declared against the same git source as the workspace
+# manifest, or the `[patch."https://github.com/Mivik/prpr-macroquad"]` block would not apply to it
+# and cargo would pull the real (GL-only) macroquad beside the shim.
+macroquad = { git = "https://github.com/Mivik/prpr-macroquad", rev = "2150130", default-features = false }
+
 # `wp81-compat` must be in this crate's dependency graph, not merely in the workspace.
 #
 # The patched std references compat's symbols (`_tls_index`, `atexit`, the Win32 shims), but compat

@@ -319,8 +319,142 @@ static mut PARSED: Option<prpr::core::Chart> = None;
 #[no_mangle]
 pub extern "C" fn wp81_port_version() -> u32 {
     // Bump when the ABI changes; the shell logs it next to the DLL size.
-    1
+    // 2: added the renderer drain (wp81_draw_* below).
+    2
 }
+
+// ===========================================================================
+// the renderer drain
+//
+// `prpr`'s drawing all goes through the macroquad shim's `draw_*` functions and its `QuadGl`
+// batcher, both of which *record* rather than draw. The shell polls this pair once per frame,
+// replays the commands through the same Win2D renderer the C# port already uses, then calls
+// `wp81_draw_reset` so the next frame starts clean.
+//
+// The two calls are split because the C# side needs the count before it can size its read:
+//
+//   let n = wp81_draw_encode();          // translate the frame's commands
+//   let cmds = wp81_draw_commands();     // -> PortCmd[n]
+//   let verts = wp81_draw_vertices();    // -> PortVertex[...]  (only for Geometry records)
+//
+// The returned pointers are into the DLL's own static arenas and stay valid until the next
+// `wp81_draw_encode`, so the shell must not cache them across frames.
+// ===========================================================================
+
+/// Flatten this frame's recorded draw commands and return how many there are.
+///
+/// Returns 0 when nothing was drawn (which is the normal state until the Rust scene is driven
+/// from the shell - see the note below).
+#[no_mangle]
+pub extern "C" fn wp81_draw_encode() -> u32 {
+    macroquad::draw::encode()
+}
+
+/// Pointer to the flat command array. Re-read after every `wp81_draw_encode`.
+#[no_mangle]
+pub extern "C" fn wp81_draw_commands() -> *const macroquad::draw::PortCmd {
+    macroquad::draw::port_commands()
+}
+
+/// Pointer to the flat vertex array, indexed by a `Geometry` record's `vstart`.
+#[no_mangle]
+pub extern "C" fn wp81_draw_vertices() -> *const macroquad::draw::PortVertex {
+    macroquad::draw::port_vertices()
+}
+
+/// Pointer to the u16 index arena, read by a `Geometry` record's `istart`/`icount`.
+#[no_mangle]
+pub extern "C" fn wp81_draw_indices() -> *const u16 {
+    macroquad::draw::port_indices()
+}
+
+/// Clear the frame's buffers. Call once the commands have been replayed.
+#[no_mangle]
+pub extern "C" fn wp81_draw_reset() {
+    macroquad::draw::drain_reset();
+}
+
+/// Record a test triangle so the drain can be verified end to end on the device.
+///
+/// The real scene is not driven from the shell yet, so without this the drain has nothing to
+/// prove: `wp81_draw_encode` would always return 0 and a broken pointer would look like an idle
+/// frame. This pushes one `Geometry` batch with a triangle-sized payload, which is exactly the
+/// path `prpr`'s note rendering uses.
+///
+/// Called from the C# diagnostics path only; it is inert unless invoked.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_draw_selftest() {
+    use macroquad::draw::*;
+    let verts = [
+        macroquad::Vertex::new(0.0, -0.5, 0.0, 0.0, 0.0, macroquad::Color::new(1.0, 0.0, 0.0, 1.0)),
+        macroquad::Vertex::new(0.5, 0.5, 0.0, 1.0, 0.0, macroquad::Color::new(0.0, 1.0, 0.0, 1.0)),
+        macroquad::Vertex::new(-0.5, 0.5, 0.0, 0.0, 1.0, macroquad::Color::new(0.0, 0.0, 1.0, 1.0)),
+    ];
+    let indices: [u16; 3] = [0, 1, 2];
+    set_texture(None);
+    set_draw_mode(macroquad::DrawMode::Triangles);
+    push_geometry(&verts, &indices);
+}
+
+/// The PEC sample the C# shell feeds to `RunSelfTest`, kept here so the two cannot drift.
+///
+/// `MainPage.xaml.cs` holds the same text as a `const string`. If either copy is edited the other
+/// has to follow, and the test below is what catches it: the shell's self-test only reports
+/// "parse returned -2", which is indistinguishable from a deployment problem, whereas this test
+/// names the line and the token that the parser rejected.
+///
+/// PEC in `prpr` is not the generic PEC dialect - see `prpr/src/parse/pec.rs`:
+/// `n1`=Click, `n2`=Hold (an extra end-time token), `n3`=Flick, `n4`=Drag; line 1 is the offset in
+/// milliseconds; and every command is a *strict* token count, because the parser rejects any
+/// trailing token with `unexpected-extra`.
+#[cfg(test)]
+const SAMPLE_PEC: &str = "0\nbp 120 4\nn1 0 0 512 0 0\nn2 0 0 256 0 0 512\nn3 0 0 0 1 0\nn4 0 0 768 0 1\ncv 0 0 1\ncp 0 0 0 0\n";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sample must parse, and must produce the four notes the shell expects to see. Asserting
+    /// the count matters: a chart that parses but yields 0 notes would still report success.
+    #[test]
+    fn sample_pec_parses() {
+        let chart = prpr::parse::parse_pec(SAMPLE_PEC, prpr::core::ChartExtra::default())
+            .expect("the shell's sample PEC must parse - see the error above for the line");
+        let notes: usize = chart.lines.iter().map(|l| l.notes.len()).sum();
+        assert_eq!(notes, 4, "click + hold + flick + drag");
+        assert_eq!(chart.lines.len(), 1, "all four notes are on judge line 0");
+    }
+
+    /// The entry points the C# side calls, exercised through the same path the DLL uses.
+    ///
+    /// `wp81_parse_pec` is `unsafe` and dereferences a raw pointer, so the test builds the byte
+    /// slice explicitly rather than reaching for `as_ptr()` on a temporary.
+    #[test]
+    fn entry_points_agree_with_the_parser() {
+        let bytes = SAMPLE_PEC.as_bytes();
+        let notes = unsafe { wp81_parse_pec(bytes.as_ptr(), bytes.len()) };
+        assert_eq!(notes, 4, "wp81_parse_pec should report the same 4 notes");
+
+        let mut info = ChartInfo::default();
+        let rc = unsafe { wp81_chart_info(&mut info) };
+        assert_eq!(rc, 0);
+        assert_eq!(info.lines, 1);
+        assert_eq!(info.notes, 4);
+        // Every note is at beat 0 of a 120 BPM chart, so the chart is essentially instant; the
+        // exact value is not the point, "it was computed rather than left at 0" is.
+        assert!(info.duration_ms >= 0);
+    }
+
+    /// A malformed chart must be reported as an error, not silently accepted - `wp81_parse_pec`'s
+    /// `-2` is the only signal the shell gets, so it has to be reliable.
+    #[test]
+    fn bad_pec_is_rejected() {
+        let bad = b"0\nnot-a-command 1 2 3\n";
+        let rc = unsafe { wp81_parse_pec(bad.as_ptr(), bad.len()) };
+        assert_eq!(rc, -2);
+    }
+}
+
 
 // ===========================================================================
 // the compat anchor

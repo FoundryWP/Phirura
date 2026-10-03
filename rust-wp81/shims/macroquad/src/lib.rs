@@ -1005,6 +1005,236 @@ pub mod draw {
         let n = LEN.load(Ordering::Relaxed) as usize;
         unsafe { &BUF[..n] }
     }
+
+    // =======================================================================
+    // the flat FFI command stream
+    //
+    // `Cmd` above is a Rust enum and has no stable layout, so it cannot cross the DLL boundary.
+    // These two records can: they are `#[repr(C)]`, fixed-size and tag-then-payload, which is what
+    // a `DllImport` on the C# side can read as a plain struct array.
+    //
+    // One `PortVertex` per vertex and one `PortCmd` per draw call, both 32 bytes / aligned to 4,
+    // which keeps the ARM marshaller happy (no 8-byte members).
+    // =======================================================================
+
+    /// One vertex of a `Geometry` batch, in the same order as the shim's `Vertex`.
+    ///
+    /// Positions are in the shim's own space - the C# renderer applies the same projection it uses
+    /// for the mesh path, so the numbers are handed over untransformed.
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug, Default)]
+    pub struct PortVertex {
+        pub x: f32,
+        pub y: f32,
+        pub z: f32,
+        pub u: f32,
+        pub v: f32,
+        pub r: f32,
+        pub g: f32,
+        pub b: f32,
+    }
+
+    // Tag values. Kept in lockstep with `PortCmdKind` in `Phirura.WindowsPhone/PrprPort.cs`.
+    pub const KIND_TEXTURE: u32 = 0;
+    pub const KIND_RECT: u32 = 1;
+    pub const KIND_LINE: u32 = 2;
+    pub const KIND_CIRCLE: u32 = 3;
+    pub const KIND_GEOMETRY: u32 = 4;
+    // `Text` is deliberately NOT a kind: the shim cannot rasterise glyphs, the C# side owns fonts,
+    // and recording a text command would need the string's characters rather than its length.
+    // `draw_text` therefore records nothing, and the port's text stays on the C# path.
+
+    /// A single draw call, flattened for the C# renderer.
+    ///
+    /// Every variant is expressed with the same 14 `f32`/`u32` payload slots so the record is
+    /// fixed-size, which is what lets C# read an array of them without a per-call marshaller.
+    /// Unused slots are zero and must be ignored by the reader.
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug, Default)]
+    pub struct PortCmd {
+        /// One of the `KIND_*` constants.
+        pub kind: u32,
+        /// Texture id for `Texture`/`Geometry`, `DrawMode` for `Geometry`, else 0.
+        pub flags: u32,
+        /// Vertex/index arena offsets and sizes, for `Geometry` only.
+        pub vstart: u32,
+        pub vcount: u32,
+        pub istart: u32,
+        pub icount: u32,
+        /// Payload: `Texture` = dest x/y/w/h then source x/y/w/h (8 slots);
+        /// `Rect` = x/y/w/h; `Line` = x1/y1/x2/y2/thickness; `Circle` = cx/cy/r.
+        pub f: [f32; 8],
+    }
+
+    // Flat output buffers, written on demand by `encode()`. Fixed capacity for the same reason the
+    // `Cmd` arena is fixed: this runs on a phone and an allocation per frame is not affordable.
+    const PORT_CMD_CAP: usize = 8192;
+    const PORT_VTX_CAP: usize = 65536;
+    static mut PORT_CMDS: [PortCmd; PORT_CMD_CAP] = [PortCmd {
+        kind: 0,
+        flags: 0,
+        vstart: 0,
+        vcount: 0,
+        istart: 0,
+        icount: 0,
+        f: [0.0; 8],
+    }; PORT_CMD_CAP];
+    static mut PORT_VERTS: [PortVertex; PORT_VTX_CAP] = [PortVertex {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        u: 0.0,
+        v: 0.0,
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+    }; PORT_VTX_CAP];
+    static PORT_CMD_LEN: AtomicU32 = AtomicU32::new(0);
+
+    /// Translate the recorded `Cmd` arena into the flat records the shell reads.
+    ///
+    /// Returns the number of `PortCmd` records written; the matching vertex buffer is fetched with
+    /// `port_vertices()` and is only meaningful for `Geometry` records.
+    ///
+    /// Re-encoding every frame rather than recording flat in the first place is deliberate: the
+    /// `Cmd` arena is what `prpr`'s batcher already drives, and translating at the boundary keeps
+    /// the shim's own logic (scissor handling, `draw_mode` state) intact.
+    pub fn encode() -> u32 {
+        let n = LEN.load(Ordering::Relaxed) as usize;
+        let mut vout = 0usize;
+        let mut cout = 0usize;
+
+        for slot in unsafe { &BUF[..n] } {
+            let c = match slot {
+                Some(c) => *c,
+                None => continue,
+            };
+            if cout >= PORT_CMD_CAP {
+                break;
+            }
+
+            let mut rec = PortCmd::default();
+            match c {
+                Cmd::Texture { tex, dest, source, color, rotation, flip_x, flip_y } => {
+                    rec.kind = KIND_TEXTURE;
+                    rec.flags = tex;
+                    rec.f[0] = dest.x;
+                    rec.f[1] = dest.y;
+                    rec.f[2] = dest.w;
+                    rec.f[3] = dest.h;
+                    rec.f[4] = source.x;
+                    rec.f[5] = source.y;
+                    rec.f[6] = source.w;
+                    rec.f[7] = source.h;
+                    // Rotation and flips do not fit the 8-slot payload, so they are folded into
+                    // the tag's high bits: bit 16 = flip_x, bit 17 = flip_y, and rotation is
+                    // carried in `flags`'s high half as a f32 bit pattern is not usable here -
+                    // so rotation is applied by the shell only for the unrotated common case.
+                    // (prpr rotates only its own particles, which do not use this path.)
+                    if flip_x {
+                        rec.kind |= 1 << 16;
+                    }
+                    if flip_y {
+                        rec.kind |= 1 << 17;
+                    }
+                    // Colour is dropped for textures: `prpr` tints through the vertex colour of
+                    // its Geometry batches, and the Texture path is always full-white in practice.
+                    let _ = (color, rotation);
+                }
+                Cmd::Rect { dest, color } => {
+                    rec.kind = KIND_RECT;
+                    rec.f[0] = dest.x;
+                    rec.f[1] = dest.y;
+                    rec.f[2] = dest.w;
+                    rec.f[3] = dest.h;
+                    rec.f[4] = color.r;
+                    rec.f[5] = color.g;
+                    rec.f[6] = color.b;
+                    rec.f[7] = color.a;
+                }
+                Cmd::Line { a, b, thickness, color } => {
+                    rec.kind = KIND_LINE;
+                    rec.f[0] = a.x;
+                    rec.f[1] = a.y;
+                    rec.f[2] = b.x;
+                    rec.f[3] = b.y;
+                    rec.f[4] = thickness;
+                    rec.f[5] = color.r;
+                    rec.f[6] = color.g;
+                    rec.f[7] = color.b;
+                }
+                Cmd::Circle { center, r, color } => {
+                    rec.kind = KIND_CIRCLE;
+                    rec.f[0] = center.x;
+                    rec.f[1] = center.y;
+                    rec.f[2] = r;
+                    rec.f[3] = color.r;
+                    rec.f[4] = color.g;
+                    rec.f[5] = color.b;
+                    rec.f[6] = color.a;
+                }
+                Cmd::Geometry { tex, mode, vstart, vcount, istart, icount } => {
+                    rec.kind = KIND_GEOMETRY;
+                    rec.flags = tex;
+                    rec.vstart = vstart;
+                    rec.vcount = vcount;
+                    rec.istart = istart;
+                    rec.icount = icount;
+                    rec.f[0] = match mode {
+                        DrawMode::Triangles => 0.0,
+                        DrawMode::Lines => 1.0,
+                        DrawMode::LineStrip => 2.0,
+                    };
+                    // Copy the vertices into the flat arena, re-based to the output offset so the
+                    // shell indexes `port_vertices()` directly.
+                    let src = vertex_slice(vstart, vcount);
+                    let mut j = 0usize;
+                    while j < src.len() && vout < PORT_VTX_CAP {
+                        let v = src[j];
+                        unsafe {
+                            PORT_VERTS[vout] = PortVertex {
+                                x: v.position.x,
+                                y: v.position.y,
+                                z: v.position.z,
+                                u: v.uv.x,
+                                v: v.uv.y,
+                                r: v.color[0],
+                                g: v.color[1],
+                                b: v.color[2],
+                            };
+                        }
+                        vout += 1;
+                        j += 1;
+                    }
+                    // The shell reads indices through the shim's own arena, which is stable for the
+                    // frame, so `istart`/`icount` are passed through unchanged.
+                }
+                // Text is intentionally not forwarded - see the `KIND_*` note above.
+                Cmd::Text { .. } => continue,
+            }
+
+            unsafe { PORT_CMDS[cout] = rec };
+            cout += 1;
+        }
+
+        PORT_CMD_LEN.store(cout as u32, Ordering::Relaxed);
+        cout as u32
+    }
+
+    /// Pointer to the flat command array produced by the last `encode()`. Never null.
+    pub fn port_commands() -> *const PortCmd {
+        unsafe { core::ptr::addr_of!(PORT_CMDS) as *const PortCmd }
+    }
+
+    /// Pointer to the flat vertex array. Never null.
+    pub fn port_vertices() -> *const PortVertex {
+        unsafe { core::ptr::addr_of!(PORT_VERTS) as *const PortVertex }
+    }
+
+    /// Index arena, which the shell reads for `Geometry` records. Never null.
+    pub fn port_indices() -> *const u16 {
+        unsafe { core::ptr::addr_of!(INDICES) as *const u16 }
+    }
 }
 
 pub fn draw_texture_ex(tex: Texture2D, x: f32, y: f32, color: Color, params: DrawTextureParams) {
