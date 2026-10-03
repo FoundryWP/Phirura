@@ -61,6 +61,33 @@ namespace Phirura
             _watchdog.Interval = TimeSpan.FromMilliseconds(200);
             _watchdog.Tick += OnWatchdogTick;
             _watchdog.Start();
+
+            // The DispatcherTimer above runs on the UI thread, but the CoreWindow bring-up is a
+            // *synchronous* native call made **from** the UI thread - so while it is stuck inside
+            // native, the DispatcherTimer never ticks and a crash there leaves no trace at all.
+            // (That is exactly what hid the CoreWindow failure for several runs.) A thread-pool
+            // timer is independent of the UI thread, so it keeps sampling and its last write is
+            // the crash's address.
+            _bgWatchdog = new System.Threading.Timer(OnBackgroundWatchdog, null,
+                TimeSpan.FromMilliseconds(150), TimeSpan.FromMilliseconds(150));
+        }
+
+        private System.Threading.Timer _bgWatchdog;
+
+        private void OnBackgroundWatchdog(object state)
+        {
+            try
+            {
+                if (RustRenderer.SampleTick())
+                {
+                    AppLog.WriteSync("RustStage1: [bg] tick -> " + RustRenderer.LastSeenTick
+                        + " (" + RustRenderer.LastSeenTickName + ")");
+                }
+            }
+            catch (Exception)
+            {
+                // The timer must never take the process down on its own.
+            }
         }
 
         private void OnWatchdogTick(object sender, object e)
@@ -151,7 +178,29 @@ namespace Phirura
                 else
                 {
                     AppLog.WriteSync("RustStage1: composition route failed; trying CoreWindow route");
-                    ok = RustRenderer.StartCoreWindow(w, h);
+                    // Resolve the CoreWindow on the UI thread (thread-affine API), then run the
+                    // native bring-up on a pool thread so the UI thread keeps flushing the log if
+                    // the native call hard-faults. Doing it inline on the UI thread is what made the
+                    // CoreWindow crash leave no trace at all for several runs.
+                    IntPtr cwPtr = RustRenderer.ResolveCoreWindow();
+                    if (cwPtr == IntPtr.Zero)
+                    {
+                        ok = false;
+                    }
+                    else
+                    {
+                        try
+                        {
+                            await System.Threading.Tasks.Task.Run(delegate
+                            {
+                                ok = RustRenderer.StartCoreWindowNative(cwPtr, w, h);
+                            });
+                        }
+                        finally
+                        {
+                            RustRenderer.ReleaseNativePointer(cwPtr);
+                        }
+                    }
                     AppLog.WriteSync("RustStage1: CoreWindow route started=" + ok + " " + RustRenderer.Diagnose());
                     if (ok)
                     {
@@ -249,6 +298,11 @@ namespace Phirura
                 _watchdog.Stop();
                 _watchdog.Tick -= OnWatchdogTick;
                 _watchdog = null;
+            }
+            if (_bgWatchdog != null)
+            {
+                _bgWatchdog.Dispose();
+                _bgWatchdog = null;
             }
             if (_hookAttached)
             {

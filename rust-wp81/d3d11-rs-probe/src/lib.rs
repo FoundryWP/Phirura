@@ -558,8 +558,15 @@ pub unsafe extern "C" fn wp81_rs_start_corewindow(
     height: u32,
 ) -> i32 {
     let s = st();
+
+    // First observable act: mark entry. If the log's last line is "calling native" and the tick
+    // never even reaches 250, the fault is in the prologue below (release_all / the QI probe)
+    // rather than in any D3D call, which is otherwise indistinguishable without a debugger.
+    unsafe { bump(s, 250); } // corewindow: entered native
+
     release_all(s);
     reset_sc_hrs();
+    bump(s, 251); // release_all done
     s.width = width;
     s.height = height;
     s.limit = 0;
@@ -588,6 +595,7 @@ pub unsafe extern "C" fn wp81_rs_start_corewindow(
             bump(s, if hr == 0 { 201 } else { 202 });
         }
     }
+    bump(s, 252); // pointer probed
 
     bump(s, 2);
     let (device, context, _level, _desc) = match create_device() {
@@ -1107,6 +1115,10 @@ pub unsafe extern "C" fn wp81_rs_tick_name() -> *const u8 {
         200 => b"corewindow: pWindow was NULL\0",
         201 => b"corewindow: QI(IUnknown) on pWindow = S_OK (valid COM object)\0",
         202 => b"corewindow: QI(IUnknown) on pWindow FAILED (not the object DXGI wants)\0",
+        250 => b"corewindow: entered native\0",
+        251 => b"corewindow: release_all done\0",
+        252 => b"corewindow: pointer probed\0",
+        253 => b"corewindow: about to create_swapchain_for_corewindow\0",
         _ => b"(unknown tick)\0",
     };
     s.as_ptr()

@@ -364,6 +364,69 @@ namespace Phirura
         private static bool _cwProbeLogged;
 
         /// <summary>
+        /// Probe a raw <c>IUnknown*</c> before it is handed to native, and log everything observable
+        /// about it. Must run on the UI thread (it is), and must log synchronously: the native call
+        /// that follows can hard-fault the process, and the log's last flushed line is then the only
+        /// evidence of what the pointer was.
+        ///
+        /// Three questions are answered, in order of how much they prove:
+        ///   1. <c>QI(IUnknown)</c> - does a COM object answer at all? (It always does if it is one.)
+        ///   2. <c>Marshal.GetObjectForIUnknown</c> - what managed type does the runtime project it
+        ///      back to? A real CoreWindow round-trips to <c>Windows.UI.Core.CoreWindow</c>; a proxy
+        ///      or an unrelated object does not.
+        ///   3. A <c>QueryInterface</c> for the CoreWindow runtime class' identity - the last word on
+        ///      whether DXGI's own QI inside <c>CreateSwapChainForCoreWindow</c> will succeed.
+        /// </summary>
+        private static void LogCoreWindowPointer(IntPtr p)
+        {
+            var sb = new StringBuilder();
+            sb.Append("RustRenderer.cw-probe: ptr=0x").Append(p.ToInt32().ToString("X8"));
+
+            // (1) QI(IUnknown) - the pointer must at least be a COM object.
+            try
+            {
+                IntPtr unk;
+                Guid iidUnknown = new Guid(0x00000000, 0x0000, 0x0000,
+                    0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+                int hr = Marshal.QueryInterface(p, ref iidUnknown, out unk);
+                sb.Append(" qi(IUnknown)=0x").Append(hr.ToString("X8"));
+                if (hr == 0 && unk != IntPtr.Zero)
+                {
+                    Marshal.Release(unk);
+                }
+            }
+            catch (Exception ex)
+            {
+                sb.Append(" qi(IUnknown)=threw(").Append(ex.GetType().Name).Append(')');
+            }
+
+            // (2) What does the object actually project back to as a managed type?
+            try
+            {
+                object o = Marshal.GetObjectForIUnknown(p);
+                sb.Append(" as=").Append(o == null ? "(null)" : o.GetType().FullName);
+            }
+            catch (Exception ex)
+            {
+                sb.Append(" as=threw(").Append(ex.GetType().Name).Append(')');
+            }
+
+            // (3) Does it expose the CoreWindow runtime class itself?
+            try
+            {
+                object o = Marshal.GetObjectForIUnknown(p);
+                bool isCw = o is Windows.UI.Core.CoreWindow;
+                sb.Append(" isCoreWindow=").Append(isCw ? "yes" : "no");
+            }
+            catch (Exception ex)
+            {
+                sb.Append(" isCoreWindow=threw(").Append(ex.GetType().Name).Append(')');
+            }
+
+            AppLog.WriteSync(sb.ToString());
+        }
+
+        /// <summary>
         /// Log the vtable snapshot Rust recorded for the DXGI factory (see `dump_vtable`).
         ///
         /// This is the one question that cannot be asked any other way on the phone: does the object
@@ -657,53 +720,81 @@ namespace Phirura
         /// XAML tree is bypassed entirely.
         ///
         /// Must be called on the UI thread, because `CoreWindow.GetForCurrentThread()` is a
-        /// thread-affine API.
+        /// thread-affine API. This half only *resolves and probes* the pointer; the native call is
+        /// made by <see cref="StartCoreWindowNative"/> on a pool thread, so the UI thread stays free
+        /// to keep flushing the log if the native call hard-faults.
         /// </summary>
         public static bool StartCoreWindow(uint pixelWidth, uint pixelHeight)
         {
-            if (_started)
+            IntPtr window = ResolveCoreWindow();
+            if (window == IntPtr.Zero)
             {
-                return true;
+                return false;
             }
-            IntPtr window;
+            try
+            {
+                return StartCoreWindowNative(window, pixelWidth, pixelHeight);
+            }
+            finally
+            {
+                ReleaseNativePointer(window);
+            }
+        }
+
+        /// <summary>Release a raw COM reference obtained from <see cref="ResolveCoreWindow"/>.</summary>
+        public static void ReleaseNativePointer(IntPtr p)
+        {
+            if (p != IntPtr.Zero)
+            {
+                Marshal.Release(p);
+            }
+        }
+
+        /// <summary>
+        /// Resolve the app's <c>CoreWindow</c> to a raw <c>IUnknown*</c>; **UI thread only**.
+        ///
+        /// Returns the **ICoreWindow interface pointer**, not the runtime class' default IUnknown.
+        /// Microsoft's C++ sample does exactly this:
+        ///
+        ///     reinterpret_cast<IUnknown*>(m_window.Get())   // m_window is ComPtr<ICoreWindow>
+        ///
+        /// DXGI QIs the <c>pWindow</c> argument for the CoreWindow's own interface, and a WinRT
+        /// runtime-class RCW is not agile, so taking the IUnknown of the *interface-typed* reference
+        /// is the form that matches the sample. Returns <see cref="IntPtr.Zero"/> on failure; the
+        /// caller owns the returned reference and must release it via
+        /// <see cref="ReleaseNativePointer"/>. It also logs the C#-side pointer probe, which is the
+        /// last guaranteed flush before the native call.
+        /// </summary>
+        public static IntPtr ResolveCoreWindow()
+        {
             try
             {
                 var cw = Windows.UI.Core.CoreWindow.GetForCurrentThread();
                 if (cw == null)
                 {
-                    AppLog.WriteSync("RustRenderer.StartCoreWindow: GetForCurrentThread returned null");
-                    return false;
+                    AppLog.WriteSync("RustRenderer.ResolveCoreWindow: GetForCurrentThread returned null");
+                    return IntPtr.Zero;
                 }
-
-                // Pass the **ICoreWindow interface pointer**, not the runtime class' default
-                // IUnknown. Microsoft's C++ sample does exactly this:
-                //
-                //     reinterpret_cast<IUnknown*>(m_window.Get())   // m_window is ComPtr<ICoreWindow>
-                //
-                // DXGI QIs the pWindow argument for the CoreWindow's own interface. A WinRT
-                // runtime-class RCW is *not agile* (CoreWindow is MarshalingBehavior.Standard), so
-                // `GetIUnknownForObject(cw)` can hand back a proxy whose QI never resolves to the
-                // real ICoreWindow - which is exactly the E_INVALIDARG we measured at CW_CREATE.
-                // Taking the IUnknown of the *interface-typed* reference forces the RCW to expose
-                // that interface's vtable directly.
                 var iface = (Windows.UI.Core.ICoreWindow)cw;
-                window = Marshal.GetIUnknownForObject(iface);
-                IntPtr classPtr = Marshal.GetIUnknownForObject(cw);
-                AppLog.WriteSync("RustRenderer.StartCoreWindow: raw class IUnknown=0x"
-                    + classPtr.ToString("X8") + " interface IUnknown=0x" + window.ToString("X8"));
-                Marshal.Release(classPtr);
+                IntPtr window = Marshal.GetIUnknownForObject(iface);
+                AppLog.WriteSync("RustRenderer.ResolveCoreWindow: interface IUnknown=0x"
+                    + window.ToString("X8"));
+                LogCoreWindowPointer(window);
+                return window;
             }
             catch (Exception ex)
             {
-                AppLog.WriteSync("RustRenderer.StartCoreWindow: cannot get CoreWindow", ex);
-                return false;
+                AppLog.WriteSync("RustRenderer.ResolveCoreWindow: cannot get CoreWindow", ex);
+                return IntPtr.Zero;
             }
-            if (window == IntPtr.Zero)
-            {
-                AppLog.WriteSync("RustRenderer.StartCoreWindow: GetIUnknownForObject returned null");
-                return false;
-            }
+        }
 
+        /// <summary>
+        /// The native half of the CoreWindow route; **any thread**. The pointer must already have
+        /// been resolved on the UI thread (see <see cref="ResolveCoreWindow"/>).
+        /// </summary>
+        public static bool StartCoreWindowNative(IntPtr window, uint pixelWidth, uint pixelHeight)
+        {
             try
             {
                 int rc;
@@ -717,10 +808,6 @@ namespace Phirura
                 {
                     AppLog.WriteSync("RustRenderer.StartCoreWindow: native threw", ex);
                     return false;
-                }
-                finally
-                {
-                    Marshal.Release(window);
                 }
                 AppLog.WriteSync("RustRenderer.StartCoreWindow: native returned rc=" + rc
                     + " " + Diagnose());
