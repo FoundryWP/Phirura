@@ -54,6 +54,10 @@ pub(crate) unsafe fn limit_is(_n: i32) -> bool {
 /// The factory soundness probe is phone-only too; the harness's HWND path succeeds and needs none.
 pub(crate) unsafe fn record_factory_probe(_is_current: i32, _qi_hr: i32) {}
 
+/// Which XAML panel-interop interface answered is only meaningful on the phone; the harness uses a
+/// real `HWND` and no panel at all, so this records nothing.
+pub(crate) unsafe fn record_panel_iface(_which: i32) {}
+
 // --------------------------------------------------------------------------
 // minimal user32 binding: just enough for a hidden window
 // --------------------------------------------------------------------------

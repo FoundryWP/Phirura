@@ -52,6 +52,9 @@ namespace Phirura
         private static extern int wp81_rs_factory_qi_hr();
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_panel_iface();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_rs_clear(float r, float g, float b, float a);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -159,6 +162,30 @@ namespace Phirura
                     return p == IntPtr.Zero ? "" : Marshal.PtrToStringAnsi(p);
                 }
                 catch (Exception) { return ""; }
+            }
+        }
+
+        /// <summary>Which XAML panel-interop interface answered: 0 = SwapChainPanel, 1 = BackgroundPanel.</summary>
+        public static int PanelIface
+        {
+            get
+            {
+                try { return wp81_rs_panel_iface(); }
+                catch (Exception) { return -1; }
+            }
+        }
+
+        /// <summary>Name for <see cref="PanelIface"/>.</summary>
+        public static string PanelIfaceName
+        {
+            get
+            {
+                switch (PanelIface)
+                {
+                    case 0: return "ISwapChainPanelNative";
+                    case 1: return "ISwapChainBackgroundPanelNative";
+                    default: return "(none)";
+                }
             }
         }
 
@@ -276,6 +303,13 @@ namespace Phirura
                 // means the factory object is good and only slot 24 faults.
                 AppLog.WriteSync("RustRenderer.factory: IsCurrent=" + wp81_rs_factory_is_current()
                     + " QI(IDXGIFactory2) hr=0x" + wp81_rs_factory_qi_hr().ToString("X8"));
+                // Which XAML interop interface the panel answered: 0 = SwapChainPanelNative,
+                // 1 = SwapChainBackgroundPanelNative, -1 = neither (the attach step has not run).
+                int iface = wp81_rs_panel_iface();
+                AppLog.WriteSync("RustRenderer.panel: iface=" + iface
+                    + (iface == 0 ? " (ISwapChainPanelNative)"
+                       : iface == 1 ? " (ISwapChainBackgroundPanelNative)"
+                       : " (none)"));
             }
             catch (Exception ex)
             {

@@ -541,6 +541,26 @@ pub const IID_ISWAPCHAINPANELNATIVE: Guid = Guid {
 /// `ISwapChainPanelNative::SetSwapChain` lives at slot 3 (the first method past IUnknown).
 pub const ISWAPCHAINPANELNATIVE_SETSWAPCHAIN: usize = 3;
 
+/// `ISwapChainBackgroundPanelNative` (windows.ui.xaml.media.dxinterop.h) - the Win8.0-era XAML side
+/// of composition, and still present in the WP8.1 kit's own header.
+///
+/// The kit gives the IID: `43B EBD4E-ADD5-4035-8F85-5608D08E9DC9`. Like `ISwapChainPanelNative` it
+/// derives from `IUnknown` and has exactly one method, `SetSwapChain(IDXGISwapChain*)`, at slot 3.
+///
+/// It exists here as a fallback because the phone's driver hard-faults inside
+/// `CreateSwapChainForComposition` (see `renderer.rs`), and the two panels differ in how strict
+/// they are about the swapchain they accept - a `SwapChainBackgroundPanel` is the one that works
+/// with the classic (non-flip) swap effects on the older composition path.
+pub const IID_ISWAPCHAINBACKGROUNDPANELNATIVE: Guid = Guid {
+    data1: 0x43be_bd4e,
+    data2: 0xadd5,
+    data3: 0x4035,
+    data4: [0x8f, 0x85, 0x56, 0x08, 0xd0, 0x8e, 0x9d, 0xc9],
+};
+
+/// `ISwapChainBackgroundPanelNative::SetSwapChain`, also slot 3.
+pub const ISWAPCHAINBACKGROUNDPANELNATIVE_SETSWAPCHAIN: usize = 3;
+
 // ===========================================================================
 // vtable slots (already offset past IUnknown - a real method starts at 3)
 // ===========================================================================

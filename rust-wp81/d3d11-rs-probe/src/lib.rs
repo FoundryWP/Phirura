@@ -228,6 +228,29 @@ pub unsafe extern "C" fn wp81_rs_factory_qi_hr() -> i32 {
     FACTORY_QI_HR
 }
 
+// ===========================================================================
+// panel-interop probe
+// ===========================================================================
+
+/// Which XAML panel-interop interface the last attach answered: 0 = `ISwapChainPanelNative`,
+/// 1 = `ISwapChainBackgroundPanelNative`, -1 = neither (not run).
+///
+/// The two panels are the only two ways to put a swapchain into WP8.1 XAML, and a caller cannot
+/// tell from the managed type which one a page should hand over, so the native side records which
+/// one it actually found.
+pub static mut PANEL_IFACE: i32 = -1;
+
+/// Record which panel-interop interface answered the `QueryInterface` (see [`PANEL_IFACE`]).
+pub(crate) unsafe fn record_panel_iface(which: i32) {
+    PANEL_IFACE = which;
+}
+
+/// The panel-interop interface the last attach used; -1 = none.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_panel_iface() -> i32 {
+    PANEL_IFACE
+}
+
 /// Record that tick `n` was reached, and report whether a limited run should stop **before**
 /// executing the call that follows it.
 ///

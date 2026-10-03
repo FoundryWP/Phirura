@@ -232,11 +232,14 @@ pub const SC_CREATE_OK: i32 = 26;
 
 /// The descriptor shapes tried by [`create_swapchain_for_panel_traced`], in order. Index into this
 /// with `wp81_rs_sc_variant()` to name the one the device accepted.
+///
+/// Order matters: the feature-level-9.3-safe effects (`DISCARD`, `SEQUENTIAL`) come first because
+/// `FLIP_SEQUENTIAL` is illegal below feature level 10.0 and this phone is 9.3.
 pub static SC_VARIANT_NAMES: [&[u8]; 4] = [
-    b"FLIP_SEQUENTIAL x2 PREMULTIPLIED\0",
-    b"FLIP_SEQUENTIAL x2 IGNORE\0",
     b"DISCARD x1 IGNORE\0",
     b"SEQUENTIAL x1 IGNORE\0",
+    b"FLIP_SEQUENTIAL x2 IGNORE\0",
+    b"FLIP_SEQUENTIAL x2 PREMULTIPLIED\0",
 ];
 
 pub unsafe fn create_swapchain_for_panel_traced(
@@ -303,19 +306,16 @@ pub unsafe fn create_swapchain_for_panel_traced(
     // table actually is and whether slot 24 looks like code.
     crate::dump_vtable(factory);
 
-    // Honour a bisect stop at the factory stage: `limit == 13` means "have the factory, do not
-    // call anything on it". This is the only way to read the vtable on the phone, because the very
-    // next call is the one that dies.
-    if crate::limit_is(13) {
-        crate::set_tick(13);
-        return None;
-    }
-
-    // Before the call that faults, prove the factory object itself is sound: `IsCurrent` (slot 13)
-    // takes no arguments and simply returns a BOOL, and `IDXGIFactory2::GetParent` via QI exercises
-    // the same vtable. If those return sanely and only slot 24 crashes, the fault is specific to
-    // `CreateSwapChainForComposition` (a missing/unsupported entry on this driver) rather than a
-    // corrupt factory pointer - which is the difference between "wrong slot" and "unsupported API".
+    // Before touching anything risky, prove the factory object itself is sound. `IsCurrent` (slot
+    // 13) takes no arguments and simply returns a BOOL, and a round-trip `QueryInterface` for
+    // `IDXGIFactory2` exercises the vtable's own IUnknown slots. If both return sanely and only
+    // slot 24 dies, the fault is specific to `CreateSwapChainForComposition` (an unsupported entry
+    // on this driver) rather than a corrupt factory pointer - which is the whole difference between
+    // "wrong slot number" and "the API is not implemented here".
+    //
+    // These run BEFORE the `limit == 13` stop, so a `limit=13` run now *proves* slot 13 works and
+    // leaves the fault isolated to the very next call (slot 24).
+    crate::set_tick(12); // still "GetParent" tick; the probe below is inside it
     let is_current: extern "system" fn(*mut c_void) -> BOOL = factory.method(13);
     let current = is_current(factory.vtbl as *mut c_void);
     let mut round_trip = ComPtr::NULL;
@@ -325,16 +325,22 @@ pub unsafe fn create_swapchain_for_panel_traced(
     );
     round_trip.release();
     crate::record_factory_probe(current, hr_qi);
-    // A walk of the same adapter path the desktop harness uses, to confirm slot 6 on this adapter
-    // really does hand back an IDXGIFactory2 and not something else that merely answered the QI.
-    let _ = current;
-    let _ = hr_qi;
 
-    // `CreateSwapChainForComposition` takes a `DXGI_SWAP_CHAIN_DESC1`, NOT the legacy
-    // `DXGI_SWAP_CHAIN_DESC`. Pass the wrong one and the fields are read from the wrong offsets,
-    // which the runtime reports as `DXGI_ERROR_INVALID_CALL` (0x887A0001) - indistinguishable at
-    // the call site from "unsupported". Try the effect/buffer-count combinations in order so the
-    // log records which shape this driver accepts.
+    // Honour a bisect stop at the factory stage: `limit == 13` means "the factory is in hand and
+    // has been proven sound; do not call slot 24". This is the only way to read the vtable (and the
+    // probe results) on the phone, because the very next call is the one that dies.
+    if crate::limit_is(13) {
+        crate::set_tick(13);
+        return None;
+    }
+
+    // The Lumia 925's Adreno 225 is feature level **9.3**, and `DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL`
+    // is only legal from 10.0 onward. A spec-invalid effect is *supposed* to come back as
+    // `DXGI_ERROR_INVALID_CALL`, but a 2014 phone driver that never implements the flip model can
+    // equally just hard-fault - which is exactly the observed symptom (`GetParent` + QI fine, the
+    // very next call kills the process). So the FL-9.3-friendly effects are tried FIRST: if the
+    // flip model is the trigger, the DISCARD variant now returns a clean HRESULT (or even succeeds)
+    // instead of taking the process down, and `wp81_rs_sc_variant()` names the winner.
     struct Variant {
         swap_effect: UINT,
         buffer_count: UINT,
@@ -342,18 +348,6 @@ pub unsafe fn create_swapchain_for_panel_traced(
         name: &'static [u8],
     }
     let variants: [Variant; 4] = [
-        Variant {
-            swap_effect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-            buffer_count: 2,
-            alpha_mode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-            name: b"FLIP_SEQUENTIAL x2 premultiplied\0",
-        },
-        Variant {
-            swap_effect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-            buffer_count: 2,
-            alpha_mode: DXGI_ALPHA_MODE_IGNORE,
-            name: b"FLIP_SEQUENTIAL x2 ignore-alpha\0",
-        },
         Variant {
             swap_effect: DXGI_SWAP_EFFECT_DISCARD,
             buffer_count: 1,
@@ -365,6 +359,18 @@ pub unsafe fn create_swapchain_for_panel_traced(
             buffer_count: 1,
             alpha_mode: DXGI_ALPHA_MODE_IGNORE,
             name: b"SEQUENTIAL x1 ignore-alpha\0",
+        },
+        Variant {
+            swap_effect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+            buffer_count: 2,
+            alpha_mode: DXGI_ALPHA_MODE_IGNORE,
+            name: b"FLIP_SEQUENTIAL x2 ignore-alpha\0",
+        },
+        Variant {
+            swap_effect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+            buffer_count: 2,
+            alpha_mode: DXGI_ALPHA_MODE_PREMULTIPLIED,
+            name: b"FLIP_SEQUENTIAL x2 premultiplied\0",
         },
     ];
 
@@ -427,18 +433,35 @@ pub unsafe fn create_swapchain_for_panel_traced(
     }
 
 
-    // Hand the swapchain to XAML.
+    // Hand the swapchain to XAML. Two interop interfaces exist and a given XAML object answers
+    // exactly one of them: `SwapChainPanel` -> `ISwapChainPanelNative`, `SwapChainBackgroundPanel`
+    // -> `ISwapChainBackgroundPanelNative`. Rather than make the caller pick, try both; whichever
+    // QIs is the one this panel is, and both have `SetSwapChain` at slot 3.
     crate::set_tick(14); // panel QI
-    let mut native = ComPtr::NULL;
     let panel_ptr = ComPtr { vtbl: panel as *const *const usize };
-    let hr = panel_ptr.query_interface(
+    let mut native = ComPtr::NULL;
+    let mut hr = panel_ptr.query_interface(
         &IID_ISWAPCHAINPANELNATIVE,
         &mut native.vtbl as *mut _ as *mut *mut c_void,
     );
-    if hr < 0 || native.is_null() {
-        swapchain.release();
-        note(trace, SC_PANEL_QI, hr);
-        return None;
+    if hr >= 0 && !native.is_null() {
+        crate::record_panel_iface(0); // ISwapChainPanelNative
+    } else {
+        if !native.is_null() {
+            native.release();
+            native = ComPtr::NULL;
+        }
+        hr = panel_ptr.query_interface(
+            &IID_ISWAPCHAINBACKGROUNDPANELNATIVE,
+            &mut native.vtbl as *mut _ as *mut *mut c_void,
+        );
+        if hr >= 0 && !native.is_null() {
+            crate::record_panel_iface(1); // ISwapChainBackgroundPanelNative
+        } else {
+            swapchain.release();
+            note(trace, SC_PANEL_QI, hr);
+            return None;
+        }
     }
     let set_swapchain: extern "system" fn(*mut c_void, *mut c_void) -> HRESULT =
         native.method(ISWAPCHAINPANELNATIVE_SETSWAPCHAIN);
