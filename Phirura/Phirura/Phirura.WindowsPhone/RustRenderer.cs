@@ -85,6 +85,15 @@ namespace Phirura
         private static extern int wp81_rs_attach_panel(IntPtr panel);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint wp81_rs_corewindow_vtbl();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint wp81_rs_corewindow_obj();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_corewindow_qi();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern uint wp81_rs_vertex_count();
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -231,7 +240,45 @@ namespace Phirura
             {
                 s += "  swapchain-step=" + ScStepName + " (code " + ScStep + ")";
             }
+            s += CoreWindowDiag();
             return s;
+        }
+
+        /// <summary>
+        /// The CoreWindow-pointer probe appended to <see cref="Diagnose"/>: object address, vtable
+        /// address and the HRESULT of <c>QI(IUnknown)</c> on the pointer the composition-free route
+        /// passed to <c>CreateSwapChainForCoreWindow</c>.
+        ///
+        /// This exists to tell a proxy apart from the real object when the call fails with
+        /// <c>E_INVALIDARG</c>. Returns an empty string if the route never ran.
+        /// </summary>
+        private static string CoreWindowDiag()
+        {
+            try
+            {
+                uint obj = wp81_rs_corewindow_obj();
+                if (obj == 0)
+                {
+                    return string.Empty;
+                }
+                uint vtbl = wp81_rs_corewindow_vtbl();
+                int qi = wp81_rs_corewindow_qi();
+                string qiName;
+                switch (qi)
+                {
+                    case 0: qiName = "S_OK"; break;
+                    case 1: qiName = "S_FALSE"; break;
+                    case unchecked((int)0x80004002): qiName = "E_NOINTERFACE"; break;
+                    case 0x7FFFFFFF: qiName = "(not probed)"; break;
+                    default: qiName = "0x" + qi.ToString("X8"); break;
+                }
+                return "  cw-obj=0x" + obj.ToString("X8") + " cw-vtbl=0x" + vtbl.ToString("X8")
+                    + " cw-qi=" + qiName;
+            }
+            catch (Exception)
+            {
+                return "  cw-probe=(unavailable)";
+            }
         }
 
         /// <summary>
@@ -607,7 +654,24 @@ namespace Phirura
                     AppLog.WriteSync("RustRenderer.StartCoreWindow: GetForCurrentThread returned null");
                     return false;
                 }
-                window = Marshal.GetIUnknownForObject(cw);
+
+                // Pass the **ICoreWindow interface pointer**, not the runtime class' default
+                // IUnknown. Microsoft's C++ sample does exactly this:
+                //
+                //     reinterpret_cast<IUnknown*>(m_window.Get())   // m_window is ComPtr<ICoreWindow>
+                //
+                // DXGI QIs the pWindow argument for the CoreWindow's own interface. A WinRT
+                // runtime-class RCW is *not agile* (CoreWindow is MarshalingBehavior.Standard), so
+                // `GetIUnknownForObject(cw)` can hand back a proxy whose QI never resolves to the
+                // real ICoreWindow - which is exactly the E_INVALIDARG we measured at CW_CREATE.
+                // Taking the IUnknown of the *interface-typed* reference forces the RCW to expose
+                // that interface's vtable directly.
+                var iface = (Windows.UI.Core.ICoreWindow)cw;
+                window = Marshal.GetIUnknownForObject(iface);
+                IntPtr classPtr = Marshal.GetIUnknownForObject(cw);
+                AppLog.WriteSync("RustRenderer.StartCoreWindow: raw class IUnknown=0x"
+                    + classPtr.ToString("X8") + " interface IUnknown=0x" + window.ToString("X8"));
+                Marshal.Release(classPtr);
             }
             catch (Exception ex)
             {

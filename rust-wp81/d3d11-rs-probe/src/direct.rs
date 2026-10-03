@@ -506,6 +506,14 @@ extern "system" {
 // WP8.1 kit's own headers. They were originally written from memory and six of them were wrong -
 // see the note at the top of this file. Do not "tidy" these.
 
+// IUnknown's own IID (objbase.h / guiddef.h) - the one QueryInterface can always answer.
+pub const IID_IUNKNOWN: Guid = Guid {
+    data1: 0x0000_0000,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
+
 // dxgi.h
 pub const IID_IDXGIFACTORY1: Guid = Guid {
     data1: 0x770a_ae78,

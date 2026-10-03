@@ -252,6 +252,51 @@ pub unsafe extern "C" fn wp81_rs_panel_iface() -> i32 {
 }
 
 // ===========================================================================
+// CoreWindow probe (the CreateSwapChainForCoreWindow route)
+// ===========================================================================
+
+/// Vtable address and object address of the `pWindow` pointer handed to
+/// `CreateSwapChainForCoreWindow`, and the HRESULT of `QI(IUnknown)` on it.
+///
+/// These exist to tell a *proxy* apart from the real object when the call comes back
+/// `E_INVALIDARG`. `CreateSwapChainForCoreWindow` QIs `pWindow` for the CoreWindow interface, and a
+/// non-agile WinRT RCW can hand C# a marshalled proxy whose vtable lives in combase, not in the
+/// CoreWindow implementation. A real object and a proxy are distinguishable by where their vtables
+/// point, which is what gets recorded here.
+pub static mut COREWINDOW_VTBL: u32 = 0;
+pub static mut COREWINDOW_OBJ: u32 = 0;
+pub static mut COREWINDOW_QI: i32 = 0x7FFF_FFFF;
+
+/// Record the CoreWindow pointer's vtable + object addresses (see [`COREWINDOW_VTBL`]).
+pub(crate) unsafe fn record_corewindow(vtbl: u32, obj: u32) {
+    COREWINDOW_VTBL = vtbl;
+    COREWINDOW_OBJ = obj;
+}
+
+/// Record the HRESULT of `QI(IUnknown)` on the CoreWindow pointer (see [`COREWINDOW_VTBL`]).
+pub(crate) unsafe fn record_corewindow_qi(hr: i32) {
+    COREWINDOW_QI = hr;
+}
+
+/// Vtable address of the last CoreWindow pointer; 0 = never probed.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_corewindow_vtbl() -> u32 {
+    COREWINDOW_VTBL
+}
+
+/// Object address of the last CoreWindow pointer; 0 = never probed.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_corewindow_obj() -> u32 {
+    COREWINDOW_OBJ
+}
+
+/// `QI(IUnknown)` HRESULT on the last CoreWindow pointer; `0x7FFFFFFF` = not probed.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_corewindow_qi() -> i32 {
+    COREWINDOW_QI
+}
+
+// ===========================================================================
 // per-variant swapchain HRESULTs
 // ===========================================================================
 

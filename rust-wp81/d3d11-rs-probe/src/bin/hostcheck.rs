@@ -62,6 +62,12 @@ pub(crate) unsafe fn record_panel_iface(_which: i32) {}
 /// works or the run stops at step 2.
 pub(crate) unsafe fn record_sc_hr(_i: usize, _hr: i32) {}
 
+/// The CoreWindow pointer probe belongs to the `CreateSwapChainForCoreWindow` route, which the
+/// harness never takes (it creates an HWND swapchain against a hidden window). No-op here, but the
+/// statics must exist so `renderer.rs` references resolve.
+pub(crate) unsafe fn record_corewindow(_vtbl: u32, _obj: u32) {}
+pub(crate) unsafe fn record_corewindow_qi(_hr: i32) {}
+
 // --------------------------------------------------------------------------
 // minimal user32 binding: just enough for a hidden window
 // --------------------------------------------------------------------------

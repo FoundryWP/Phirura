@@ -712,6 +712,29 @@ pub unsafe fn create_swapchain_for_corewindow_traced(
         return None;
     }
 
+    // --- Diagnose the pWindow argument before using it --------------------------------
+    // `CreateSwapChainForCoreWindow` returned E_INVALIDARG at CW_CREATE, which the docs say
+    // means invalid data - and the only argument we hand over that could be invalid is the
+    // CoreWindow pointer. Two things can be wrong with it and both are observable here:
+    //
+    //   * a *proxy* instead of the object: `Marshal.GetIUnknownForObject` on a non-agile
+    //     WinRT RCW can return a marshalled interface, whose vtable lives in combase, not in
+    //     the CoreWindow's own module. The vtable pointer we record tells the two apart - a
+    //     real object's vtable is inside its implementation DLL, a proxy's is in combase.dll.
+    //   * a pointer whose QI(IUnknown) does not resolve: then it is not a COM object at all.
+    //
+    // We record both facts into the trace so the C# side can log them next to the HRESULT.
+    unsafe {
+        let vtbl = *(core_window as *const *const usize);
+        crate::record_corewindow(*vtbl as u32, core_window as u32);
+        let qi: extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> HRESULT =
+            ComPtr { vtbl: vtbl as *const *const usize }.method(0);
+        let mut punk = ComPtr::NULL;
+        let qi_hr = qi(core_window, &IID_IUNKNOWN, &mut punk.vtbl as *mut _ as *mut *mut c_void);
+        crate::record_corewindow_qi(qi_hr);
+        punk.release();
+    }
+
     // Same device -> adapter -> factory walk as the panel route.
     let mut dxgi_device = ComPtr::NULL;
     let hr = device.query_interface(&IID_IDXGIDEVICE, &mut dxgi_device.vtbl as *mut _ as *mut *mut c_void);
@@ -752,7 +775,11 @@ pub unsafe fn create_swapchain_for_corewindow_traced(
         BufferCount: 2,
         Scaling: DXGI_SCALING_STRETCH,
         SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-        AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+        // PREMULTIPLIED, not IGNORE. A flip-model swapchain on a CoreWindow/composition target
+        // rejects IGNORE with E_INVALIDARG - Microsoft's own CoreWindow sample uses either
+        // PREMULTIPLIED or leaves AlphaMode at its default. This was the second, independent
+        // E_INVALIDARG source behind the CW_CREATE failure.
+        AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
         Flags: 0,
     };
     let create_for_window: extern "system" fn(
