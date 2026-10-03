@@ -75,6 +75,48 @@ First mind:实践是检验真理的唯一标准
 > **Still open:** whether the attach must move to the UI thread (the sample does), and whether the
 > factory must come from `IDXGIDevice3` rather than `IDXGIDevice`. The next run's `sc-hr` line
 > decides.
+>
+> ### Round 43 — `CreateSwapChainForComposition` does not work on this device. At all.
+>
+> The `sc-hr` table finally read out, and it settles the question:
+>
+> ```
+> RustRenderer.sc-hr: v0=0x887A0001 v1=0x887A0001 v2=0x887A0001 v3=0x887A0001
+> ```
+>
+> **All four descriptor shapes return `DXGI_ERROR_INVALID_CALL`** — including `DISCARD` and
+> `SEQUENTIAL`, which are the *non-flip* controls. The variants were reordered so the controls run
+> **first** (v0/v1) precisely because the flip model hard-faults and would otherwise stop the loop
+> before the controls were ever tried; with controls first the run survives and reports all four.
+>
+> Two device shapes were measured, and they fail *differently* — which is itself the evidence:
+>
+> | device shape | `CreateSwapChainForComposition` | `CreateSwapChainForCoreWindow` |
+> | --- | --- | --- |
+> | enumerated adapter + `DRIVER_TYPE_UNKNOWN` | returns `DXGI_ERROR_INVALID_CALL` | returns `E_INVALIDARG` |
+> | default adapter + `DRIVER_TYPE_HARDWARE` (the WP8.1 sample's) | **hard-faults the process** | — |
+>
+> And the factory is exonerated: `limit=19` builds the swapchain on a factory from a **direct
+> `CreateDXGIFactory1`** (not the `GetParent`-derived one) and behaves identically — same
+> `DXGI_ERROR_INVALID_CALL` for every variant, same fault if the flip model is first.
+>
+> **Conclusion: the composition-swapchain path is not implemented in this 2014 Adreno 225 driver.**
+> It is a feature-level-9.3 part; the flip model (which `CreateSwapChainForComposition` requires by
+> spec) is a feature-level-10+ concept, so `FLIP_SEQUENTIAL` faults inside the driver rather than
+> returning `DXGI_ERROR_UNSUPPORTED`. DXGI 1.2 entry points exist in the vtable (slot 24 is a real
+> code pointer, the `IsCurrent`/`QI` probes are clean), so nothing about the binding is wrong — the
+> implementation behind the slot is.
+>
+> **The live route is now `CreateSwapChainForCoreWindow`**, which fails with `E_INVALIDARG` at
+> `CW_CREATE` (`stage=134`). `E_INVALIDARG` there means the `pWindow` argument is not a valid
+> `ICoreWindow*`, i.e. the `IUnknown*` C# passed from
+> `Marshal.GetIUnknownForObject(CoreWindow.GetForCurrentThread())` is not what DXGI wants. That is a
+> fixable bug, and it is the next experiment.
+>
+> Also settled this round: `D3D11_CREATE_DEVICE_BGRA_SUPPORT` is now passed (the WP8.1 sample does);
+> `SetSwapChain` is split into its own export (`wp81_rs_attach_panel`) so C# can call it from the UI
+> thread, as the sample does; and `DXGI_ERROR_*` HRESULTs decode to names in the log
+> (`wp81_rs_last_hr_name`).
 
 ## The goal
 
