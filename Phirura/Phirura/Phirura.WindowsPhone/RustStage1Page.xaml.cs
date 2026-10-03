@@ -96,16 +96,24 @@ namespace Phirura
             AppLog.WriteSync("RustStage1: panel " + RustPanel.ActualWidth + "x" + RustPanel.ActualHeight
                 + " -> " + w + "x" + h + " px @ " + scale.ToString("0.0"));
 
-            bool ok = RustRenderer.Start(RustPanel, w, h);
-            AppLog.WriteSync("RustStage1: Start(" + w + "x" + h + " @ " + scale.ToString("0.0") + ") -> " + ok
-                + " " + RustRenderer.Diagnose());
+            // Run the native bring-up on a pool thread so the UI thread stays alive to flush the
+            // log if a native step hard-faults. Each step is logged before and after, so the last
+            // line in phirura.log names the call that killed the process.
+            AppLog.WriteSync("RustStage1: starting bisect on pool thread");
+            int reached = -1;
+            await System.Threading.Tasks.Task.Run(delegate
+            {
+                reached = RustRenderer.Bisect(RustPanel, w, h);
+            });
+
+            bool ok = RustRenderer.Started;
+            AppLog.WriteSync("RustStage1: bisect finished, reached=" + reached + " started=" + ok);
 
             StageText.Text = ok ? "启动成功 · stage=0" : "启动失败 · " + RustRenderer.Diagnose();
             HrText.Text = ok
                 ? "swapchain: " + RustRenderer.ScVariantName
                 : (RustRenderer.ScStep > 0 ? "swapchain 步: " + RustRenderer.ScStepName : "");
             SizeText.Text = w + " x " + h + " px  (scale " + scale.ToString("0.00") + ")";
-
             if (!ok)
             {
                 // Do not attach the frame loop to a renderer that never came up.

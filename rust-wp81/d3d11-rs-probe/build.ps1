@@ -117,6 +117,7 @@ $linkArgs = @(
     "/EXPORT:wp81_d3d11_rs_probe",
     "/EXPORT:wp81_d3d11_rs_report",
     "/EXPORT:wp81_rs_start",
+    "/EXPORT:wp81_rs_start_upto",
     "/EXPORT:wp81_rs_clear",
     "/EXPORT:wp81_rs_draw_test_quad",
     "/EXPORT:wp81_rs_present",
@@ -129,7 +130,8 @@ $linkArgs = @(
     "/EXPORT:wp81_rs_sc_variant",
     "/EXPORT:wp81_rs_sc_variant_name",
     "/EXPORT:wp81_rs_tick",
-    "/EXPORT:wp81_rs_tick_name"
+    "/EXPORT:wp81_rs_tick_name",
+    "/EXPORT:wp81_rs_reached"
 )
 $savedEap2 = $ErrorActionPreference
 $ErrorActionPreference = "Continue"

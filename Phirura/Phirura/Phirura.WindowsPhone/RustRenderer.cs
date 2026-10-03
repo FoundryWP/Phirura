@@ -33,6 +33,12 @@ namespace Phirura
         private static extern int wp81_rs_start(IntPtr panel, uint width, uint height);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_start_upto(IntPtr panel, uint width, uint height, int limit);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_reached();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_rs_clear(float r, float g, float b, float a);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -216,6 +222,88 @@ namespace Phirura
             _lastSeenTick = t;
             _lastSeenTickName = TickName;
             return true;
+        }
+
+        /// <summary>
+        /// Bisect a hard fault inside start-up by running the native bring-up in steps, logging each.
+        ///
+        /// Each call stops *before* the next risky native call. If the process survives step N but
+        /// dies at step N+1, the very last line in the log names the call that faulted. Returns the
+        /// highest step that completed; a value less than the last requested limit means a step
+        /// failed (or the process died and this line is the forensic record).
+        /// </summary>
+        public static int Bisect(SwapChainPanel panel, uint pixelWidth, uint pixelHeight)
+        {
+            AppLog.WriteSync("RustRenderer.Bisect: begin " + pixelWidth + "x" + pixelHeight);
+            if (panel == null)
+            {
+                AppLog.WriteSync("RustRenderer.Bisect: panel is null");
+                return -1;
+            }
+
+            // Steps, in order, and what the *next* call after each one does. Keep in sync with
+            // wp81_rs_start_upto in rust-wp81/d3d11-rs-probe/src/lib.rs.
+            int[] limits = new int[] { 2, 10, 16, 20, 21, 30, 40, 50, 99 };
+            string[] after = new string[]
+            {
+                "next: create_swapchain_for_panel_traced (QI/GetAdapter/GetParent/Create/attach)",
+                "next: enter the swapchain+panel-attach path",
+                "next: IDXGISwapChain::GetBuffer(0) + CreateRenderTargetView",
+                "next: ID3D11Device::CreateRenderTargetView",
+                "next: build_pipeline (D3DCompile + Create*Shader + CreateInputLayout + buffers/states)",
+                "next: create_test_texture (CreateTexture2D + CreateShaderResourceView)",
+                "next: RSSetViewports",
+                "next: (full start-up complete)",
+                "(final)",
+            };
+
+            IntPtr native = Marshal.GetIUnknownForObject(panel);
+            if (native == IntPtr.Zero)
+            {
+                AppLog.WriteSync("RustRenderer.Bisect: GetIUnknownForObject returned null");
+                return -1;
+            }
+
+            int lastOk = -1;
+            try
+            {
+                for (int i = 0; i < limits.Length; i++)
+                {
+                    int limit = limits[i];
+                    AppLog.WriteSync("RustRenderer.Bisect: step limit=" + limit + " -> calling native  ["
+                        + after[i] + "]");
+                    int rc;
+                    try
+                    {
+                        rc = wp81_rs_start_upto(native, pixelWidth, pixelHeight, limit);
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLog.WriteSync("RustRenderer.Bisect: native threw at limit=" + limit, ex);
+                        return lastOk;
+                    }
+                    int reached = -1;
+                    try { reached = wp81_rs_reached(); }
+                    catch (Exception) { }
+                    AppLog.WriteSync("RustRenderer.Bisect: step limit=" + limit + " returned rc=" + rc
+                        + " reached=" + reached);
+                    if (rc != 0)
+                    {
+                        AppLog.WriteSync("RustRenderer.Bisect: step limit=" + limit + " FAILED rc=" + rc
+                            + " " + Diagnose());
+                        return lastOk;
+                    }
+                    lastOk = reached;
+                }
+            }
+            finally
+            {
+                Marshal.Release(native);
+            }
+
+            AppLog.WriteSync("RustRenderer.Bisect: all steps completed, reached=" + lastOk);
+            _started = true;
+            return lastOk;
         }
 
         /// <summary>

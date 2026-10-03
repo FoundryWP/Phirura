@@ -70,6 +70,10 @@ struct State {
     /// [`wp81_rs_tick`] right after `wp81_rs_start` returns *and* from a watchdog that runs during
     /// the frame loop - so even a crash inside the native call leaves a number behind.
     tick: i32,
+    /// Early-stop limit for [`wp81_rs_start_upto`] (0 = run to completion).
+    limit: i32,
+    /// The highest tick this instance actually reached, frozen when a limited run stops.
+    reached: i32,
 }
 
 /// Added to the raw swapchain step (20..25) so `stage` cannot be confused with the coarse
@@ -92,6 +96,8 @@ static mut STATE: State = State {
     height: 0,
     vertex_count: 0,
     tick: 0,
+    limit: 0,
+    reached: 0,
 };
 
 #[inline]
@@ -116,6 +122,20 @@ pub(crate) unsafe fn set_tick(n: i32) {
     st().tick = n;
 }
 
+/// Record that tick `n` was reached, and report whether a limited run should stop **before**
+/// executing the call that follows it.
+///
+/// Returns true only when `limit != 0 && limit >= n`: the caller has just bumped to `n`, the
+/// limited run's target has been met, and the *next* call (which is what we want to test) must not
+/// run. `reached` is frozen at that point so C# can show how far the run got.
+#[inline]
+unsafe fn stop_here(s: &mut State, n: i32) -> bool {
+    if n > s.reached {
+        s.reached = n;
+    }
+    s.limit != 0 && s.limit >= n
+}
+
 // ===========================================================================
 // start-up
 // ===========================================================================
@@ -126,11 +146,43 @@ pub(crate) unsafe fn set_tick(n: i32) {
 /// `SwapChainPanel` object's native interface). `width`/`height` are the panel's physical pixels.
 #[no_mangle]
 pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u32) -> i32 {
+    wp81_rs_start_upto(panel, width, height, 0)
+}
+
+/// Bring-up with an **early-stop limit** for bisecting a hard fault on device.
+///
+/// `limit == 0` runs the whole path (identical to [`wp81_rs_start`]). A non-zero `limit` returns
+/// *successfully* as soon as the tick reaches it, before executing the next risky call. That turns
+/// "it crashes somewhere in start-up" into "it crashes at step N" without a debugger:
+///
+///   2  = stop right after create_device
+///   10 = stop right before touching the panel (swapchain+attach)
+///   16 = stop right after the panel attach
+///   20 = stop before GetBuffer
+///   21 = stop before CreateRenderTargetView
+///   30 = stop before build_pipeline (shader compile)
+///   40 = stop before create_test_texture
+///   50 = stop before RSSetViewports
+///
+/// The C# side calls it a few times with increasing limits, logging between each, so the last log
+/// line before the process dies names the step that faulted.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_start_upto(
+    panel: *mut c_void,
+    width: u32,
+    height: u32,
+    limit: i32,
+) -> i32 {
     let s = st();
     s.width = width;
     s.height = height;
+    s.limit = limit;
+    s.reached = 0;
     // tick 1 is set by the C# side before it even calls in; see RustRenderer.Start.
     bump(s, 2); // create_device: DXGI factory + adapter enumeration + D3D11CreateDevice
+    if stop_here(s, 2) {
+        return 0;
+    }
 
     let (device, context, level, _desc) = match create_device() {
         Some(v) => v,
@@ -144,6 +196,9 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
     let _ = level;
 
     bump(s, 10); // create_swapchain_for_panel_traced (QI/GetAdapter/GetParent/Create)
+    if stop_here(s, 10) {
+        return 0;
+    }
     let swapchain = match create_swapchain_for_panel_traced(device, panel, width, height, s.sc_trace.as_mut_ptr()) {
         Some(sc) => {
             // SC_CREATE_OK + the accepted variant index, for the log.
@@ -159,6 +214,9 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
         }
     };
     s.swapchain = swapchain;
+    if stop_here(s, 16) {
+        return 0; // swapchain created + attached to the panel, nothing else touched
+    }
 
     // Back buffer -> render target view.
     let get_buffer: extern "system" fn(
@@ -169,6 +227,9 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
     ) -> HRESULT = swapchain.method(IDXGISWAPCHAIN_GETBUFFER);
     let mut backbuffer = ComPtr::NULL;
     bump(s, 20); // IDXGISwapChain::GetBuffer(0)
+    if stop_here(s, 20) {
+        return 0;
+    }
     if get_buffer(
         swapchain.vtbl as *mut c_void,
         0,
@@ -188,6 +249,10 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
     ) -> HRESULT = device.method(D3D11DEVICE_CREATERENDERTARGETVIEW);
     let mut rtv = ComPtr::NULL;
     bump(s, 21); // ID3D11Device::CreateRenderTargetView(backbuffer)
+    if stop_here(s, 21) {
+        backbuffer.release();
+        return 0;
+    }
     let hr = create_rtv(
         device.vtbl as *mut c_void,
         backbuffer.vtbl as *mut c_void,
@@ -203,6 +268,9 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
     s.rtv = rtv;
 
     bump(s, 30); // build_pipeline: D3DCompile x2, Create*Shader, CreateInputLayout, buffers, states
+    if stop_here(s, 30) {
+        return 0;
+    }
     let pipeline = match build_pipeline(device, context) {
         Some(p) => p,
         None => {
@@ -212,6 +280,9 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
     };
     // ... and the 1x1 white texture the test quad samples.
     bump(s, 40); // create_test_texture: CreateTexture2D + CreateShaderResourceView
+    if stop_here(s, 40) {
+        return 0;
+    }
     if !create_test_texture(device, s) {
         s.stage = 6;
         return 6;
@@ -229,6 +300,9 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
     let set_viewports: extern "system" fn(*mut c_void, UINT, *const D3D11_VIEWPORT) =
         context.method(D3D11CONTEXT_RSSETVIEWPORTS);
     bump(s, 50); // RSSetViewports
+    if stop_here(s, 50) {
+        return 0;
+    }
     set_viewports(context.vtbl as *mut c_void, 1, &vp);
 
     bump(s, 99); // fully up
@@ -551,6 +625,16 @@ pub unsafe extern "C" fn wp81_rs_vertex_count() -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn wp81_rs_tick() -> i32 {
     st().tick
+}
+
+/// The highest tick a [`wp81_rs_start_upto`] run actually reached before it stopped or crashed.
+///
+/// Distinct from [`wp81_rs_tick`]: `tick` is bumped *before* a call (so it names the call being
+/// attempted), while `reached` is the furthest step that completed successfully. When a limited run
+/// returns 0, `reached == limit` means that step is proven good.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_reached() -> i32 {
+    st().reached
 }
 
 /// A short ASCII name for a progress tick. NUL-terminated, so C# can read it with `PtrToStringAnsi`.
