@@ -334,6 +334,24 @@ namespace Phirura
             int t;
             try { t = wp81_rs_tick(); }
             catch (Exception) { return false; }
+
+            // The CoreWindow prologue runs for a few microseconds and bumps ticks 200..202, which a
+            // 200 ms sampler can easily miss. The probe's *values* are persistent statics, though, so
+            // emit them the first time any of them is non-default - that way a crash immediately
+            // after the probe still records what the pointer looked like.
+            if (!_cwProbeLogged)
+            {
+                try
+                {
+                    if (wp81_rs_corewindow_obj() != 0 || wp81_rs_corewindow_qi() != 0x7FFFFFFF)
+                    {
+                        _cwProbeLogged = true;
+                        AppLog.WriteSync("RustRenderer.cw-probe: " + CoreWindowDiag());
+                    }
+                }
+                catch (Exception) { }
+            }
+
             if (t == _lastSeenTick)
             {
                 return false;
@@ -342,6 +360,8 @@ namespace Phirura
             _lastSeenTickName = TickName;
             return true;
         }
+
+        private static bool _cwProbeLogged;
 
         /// <summary>
         /// Log the vtable snapshot Rust recorded for the DXGI factory (see `dump_vtable`).

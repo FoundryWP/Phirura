@@ -565,6 +565,30 @@ pub unsafe extern "C" fn wp81_rs_start_corewindow(
     s.limit = 0;
     s.reached = 0;
 
+    // Probe the CoreWindow pointer FIRST, and encode the outcome into the tick counter so the
+    // managed watchdog (a 200 ms DispatcherTimer) records it even if the very next call hard-faults
+    // the process. The last run died between "calling native" and any log line, which is exactly
+    // the blind spot this closes: a crash here leaves the tick value as the only evidence.
+    //
+    // Tick code 200+n: 200 = null pointer, 201 = QI(IUnknown) returned S_OK, 202 = QI failed with
+    // the HRESULT in `COREWINDOW_QI`, 203 = the vtable read itself faulted (pointer is not a COM
+    // object at all).
+    unsafe {
+        if core_window.is_null() {
+            bump(s, 200);
+        } else {
+            let vtbl = *(core_window as *const *const usize);
+            record_corewindow(vtbl as u32, core_window as u32);
+            let qi: extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> HRESULT =
+                ComPtr { vtbl: core_window as *const *const usize }.method(0);
+            let mut punk = ComPtr::NULL;
+            let hr = qi(core_window, &IID_IUNKNOWN, &mut punk.vtbl as *mut _ as *mut *mut c_void);
+            record_corewindow_qi(hr);
+            punk.release();
+            bump(s, if hr == 0 { 201 } else { 202 });
+        }
+    }
+
     bump(s, 2);
     let (device, context, _level, _desc) = match create_device() {
         Some(v) => v,
@@ -1080,6 +1104,9 @@ pub unsafe extern "C" fn wp81_rs_tick_name() -> *const u8 {
         61 => b"frame: done\0",
         70 => b"IDXGISwapChain::Present\0",
         99 => b"fully up\0",
+        200 => b"corewindow: pWindow was NULL\0",
+        201 => b"corewindow: QI(IUnknown) on pWindow = S_OK (valid COM object)\0",
+        202 => b"corewindow: QI(IUnknown) on pWindow FAILED (not the object DXGI wants)\0",
         _ => b"(unknown tick)\0",
     };
     s.as_ptr()
