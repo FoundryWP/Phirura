@@ -56,10 +56,16 @@ struct State {
     pipeline: Option<Pipeline>,
     stage: i32,
     last_hr: i32,
+    /// (step, hresult) from the swapchain-attachment path, so a failure names its call.
+    sc_trace: [i32; 2],
     width: u32,
     height: u32,
     vertex_count: usize,
 }
+
+/// Added to the raw swapchain step (20..25) so `stage` cannot be confused with the coarse
+/// 1..6 codes used by the rest of start-up.
+const SC_BASE: i32 = 100;
 
 static mut STATE: State = State {
     device: ComPtr::NULL,
@@ -71,6 +77,7 @@ static mut STATE: State = State {
     pipeline: None,
     stage: -1,
     last_hr: 0,
+    sc_trace: [0, 0],
     width: 0,
     height: 0,
     vertex_count: 0,
@@ -106,10 +113,13 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
     s.context = context;
     let _ = level;
 
-    let swapchain = match create_swapchain_for_panel(device, panel, width, height) {
+    let swapchain = match create_swapchain_for_panel_traced(device, panel, width, height, s.sc_trace.as_mut_ptr()) {
         Some(sc) => sc,
         None => {
-            s.stage = 2;
+            // Report *which* call failed: s.stage carries the sub-step (20..25) and last_hr the
+            // HRESULT, so the phone's log names the failing call instead of a bare "stage 2".
+            s.stage = SC_BASE + s.sc_trace[0];
+            s.last_hr = s.sc_trace[1];
             return 2;
         }
     };
@@ -437,6 +447,32 @@ pub unsafe extern "C" fn wp81_rs_stage() -> i32 {
 #[no_mangle]
 pub unsafe extern "C" fn wp81_rs_last_hr() -> i32 {
     st().last_hr
+}
+
+/// A short ASCII name for a swapchain sub-step (see the `SC_*` codes in `renderer.rs`).
+///
+/// The returned pointer is a NUL-terminated static string, so C# can read it with
+/// `Marshal.PtrToStringAnsi` without a length. Returning a name rather than a number is what lets
+/// the phone's log say `GetParent` failed rather than `stage=122`.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_sc_step_name() -> *const u8 {
+    let step = st().sc_trace[0];
+    let s: &[u8] = match step {
+        20 => b"QI IDXGIDevice\0",
+        21 => b"IDXGIDevice::GetAdapter\0",
+        22 => b"IDXGIAdapter::GetParent(IDXGIFactory2)\0",
+        23 => b"CreateSwapChainForComposition\0",
+        24 => b"SwapChainPanel QI(ISwapChainPanelNative)\0",
+        25 => b"ISwapChainPanelNative::SetSwapChain\0",
+        _ => b"(none)\0",
+    };
+    s.as_ptr()
+}
+
+/// The raw swapchain sub-step code (20..25), for a caller that wants the number.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_sc_step() -> i32 {
+    st().sc_trace[0]
 }
 
 /// Vertices drawn by the last test quad (a sanity check the C# side can read).

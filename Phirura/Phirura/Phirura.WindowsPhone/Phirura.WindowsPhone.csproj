@@ -106,6 +106,9 @@
     <Compile Include="SfxPlayer.cs" />
     <Compile Include="Win2DChartRenderer.cs" />
     <Compile Include="RustRenderer.cs" />
+    <Compile Include="RustStage1Page.xaml.cs">
+      <DependentUpon>RustStage1Page.xaml</DependentUpon>
+    </Compile>
   </ItemGroup>
   <ItemGroup>
     <AppxManifest Include="Package.appxmanifest">
@@ -183,6 +186,10 @@
       <SubType>Designer</SubType>
     </Page>
     <Page Include="ResultPage.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <Page Include="RustStage1Page.xaml">
       <Generator>MSBuild:Compile</Generator>
       <SubType>Designer</SubType>
     </Page>

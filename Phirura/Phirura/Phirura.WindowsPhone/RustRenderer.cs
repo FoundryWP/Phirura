@@ -53,9 +53,72 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern uint wp81_rs_vertex_count();
 
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_sc_step();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr wp81_rs_sc_step_name();
+
         private static bool _started;
 
         public static bool Started { get { return _started; } }
+
+        /// <summary>How far Rust's start-up got: 0 = fully up, 1 = device failed, 2 = swapchain, …</summary>
+        public static int Stage
+        {
+            get
+            {
+                try { return wp81_rs_stage(); }
+                catch (Exception) { return -1000; }   // -1000 = the DLL did not even load
+            }
+        }
+
+        /// <summary>The last HRESULT the Rust side observed.</summary>
+        public static int LastHr
+        {
+            get
+            {
+                try { return wp81_rs_last_hr(); }
+                catch (Exception) { return 0; }
+            }
+        }
+
+        /// <summary>Raw swapchain-attachment sub-step code (20..25), 0 if it did not get that far.</summary>
+        public static int ScStep
+        {
+            get
+            {
+                try { return wp81_rs_sc_step(); }
+                catch (Exception) { return 0; }
+            }
+        }
+
+        /// <summary>The failing swapchain call by name, e.g. "IDXGIAdapter::GetParent(IDXGIFactory2)".</summary>
+        public static string ScStepName
+        {
+            get
+            {
+                try
+                {
+                    IntPtr p = wp81_rs_sc_step_name();
+                    return p == IntPtr.Zero ? "(null)" : Marshal.PtrToStringAnsi(p);
+                }
+                catch (Exception) { return "(unavailable)"; }
+            }
+        }
+
+        /// <summary>A one-line diagnosis of a failed Start(), for the log and the HUD.</summary>
+        public static string Diagnose()
+        {
+            int stage = Stage;
+            int hr = LastHr;
+            string s = "stage=" + stage + " hr=0x" + hr.ToString("X8");
+            if (stage >= 100)
+            {
+                s += "  swapchain-step=" + ScStepName + " (code " + ScStep + ")";
+            }
+            return s;
+        }
 
         /// <summary>
         /// Bring the Rust renderer up on a <see cref="SwapChainPanel"/>.
@@ -91,9 +154,7 @@ namespace Phirura
 
                 if (rc != 0)
                 {
-                    AppLog.WriteSync("RustRenderer.Start: failed rc=" + rc
-                        + " stage=" + wp81_rs_stage()
-                        + " hr=0x" + wp81_rs_last_hr().ToString("X8"));
+                    AppLog.WriteSync("RustRenderer.Start: failed rc=" + rc + " " + Diagnose());
                     return false;
                 }
 

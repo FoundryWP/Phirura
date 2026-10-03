@@ -93,6 +93,17 @@ namespace Phirura
         }
 
         /// <summary>
+        /// Path A, Stage 1 acceptance test: navigate to the page that hosts a real
+        /// <c>SwapChainPanel</c> and lets <b>Rust</b> own the D3D11 device swapchain and draw calls.
+        /// The plan forbids starting Stage 3 (porting prpr's scene) before this shows a quad on a
+        /// real device.
+        /// </summary>
+        private void RustStage1Button_Click(object sender, RoutedEventArgs e)
+        {
+            this.Frame.Navigate(typeof(RustStage1Page));
+        }
+
+        /// <summary>
         /// A tiny PEC chart, run through the real Rust parser.
         ///
         /// Format is `prpr`'s (see `prpr/src/parse/pec.rs`), which is NOT the generic PEC

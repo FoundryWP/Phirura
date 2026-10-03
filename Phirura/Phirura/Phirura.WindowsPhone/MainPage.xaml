@@ -70,6 +70,9 @@
                 <Button x:Name="OnlineButton" Content="在线谱面" Click="OnlineButton_Click" Margin="10,0,0,0" />
                 <Button x:Name="DiagnosticsButton" Content="诊断" Click="DiagnosticsButton_Click" Margin="10,0,0,0" />
             </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                <Button x:Name="RustStage1Button" Content="Rust 渲染测试" Click="RustStage1Button_Click" />
+            </StackPanel>
             <TextBlock Text="校准偏移 (毫秒)" FontSize="12" Foreground="#FF8A8A99" />
             <Grid>
                 <Grid.ColumnDefinitions>

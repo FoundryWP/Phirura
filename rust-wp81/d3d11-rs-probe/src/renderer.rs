@@ -208,40 +208,74 @@ pub unsafe fn create_device() -> Option<(ComPtr, ComPtr, u32, [u16; 128])> {
 ///
 /// `panel` is the `IInspectable*` of the `SwapChainPanel`; the native side is obtained with
 /// `QueryInterface(IID_ISwapChainPanelNative)`.
+///
+/// `trace` receives a (step, hresult) pair at each failure point, so the phone's log can say
+/// *which* call failed instead of a bare "stage 2". On-device this is the only debugger there is.
 pub unsafe fn create_swapchain_for_panel(
     device: ComPtr,
     panel: *mut c_void,
     width: u32,
     height: u32,
 ) -> Option<ComPtr> {
+    create_swapchain_for_panel_traced(device, panel, width, height, core::ptr::null_mut())
+}
+
+/// Step codes for [`create_swapchain_for_panel_traced`], surfaced through `wp81_rs_stage`.
+pub const SC_QI_DXGIDEVICE: i32 = 20;
+pub const SC_GET_ADAPTER: i32 = 21;
+pub const SC_GET_PARENT: i32 = 22;
+pub const SC_CREATE: i32 = 23;
+pub const SC_PANEL_QI: i32 = 24;
+pub const SC_SET_SWAPCHAIN: i32 = 25;
+
+pub unsafe fn create_swapchain_for_panel_traced(
+    device: ComPtr,
+    panel: *mut c_void,
+    width: u32,
+    height: u32,
+    trace: *mut i32,
+) -> Option<ComPtr> {
+    let mut note = |step: i32, hr: i32| {
+        if !trace.is_null() {
+            *trace = step;
+            *trace.add(1) = hr;
+        }
+    };
+
+    if panel.is_null() {
+        note(SC_PANEL_QI, -1);
+        return None;
+    }
+
     // IDXGIDevice is needed to get the adapter's factory.
     let mut dxgi_device = ComPtr::NULL;
-    if device.query_interface(&IID_IDXGIDEVICE, &mut dxgi_device.vtbl as *mut _ as *mut *mut c_void) < 0
-        || dxgi_device.is_null()
-    {
+    let hr = device.query_interface(&IID_IDXGIDEVICE, &mut dxgi_device.vtbl as *mut _ as *mut *mut c_void);
+    if hr < 0 || dxgi_device.is_null() {
+        note(SC_QI_DXGIDEVICE, hr);
         return None;
     }
     let mut adapter = ComPtr::NULL;
     // IDXGIDevice::GetAdapter is slot 7 (IUnknown 0..2, IDXGIObject 3..6).
     let get_adapter: extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT = dxgi_device.method(7);
-    if get_adapter(dxgi_device.vtbl as *mut c_void, &mut adapter.vtbl as *mut _ as *mut *mut c_void) < 0
-        || adapter.is_null()
-    {
+    let hr = get_adapter(dxgi_device.vtbl as *mut c_void, &mut adapter.vtbl as *mut _ as *mut *mut c_void);
+    if hr < 0 || adapter.is_null() {
         dxgi_device.release();
+        note(SC_GET_ADAPTER, hr);
         return None;
     }
     let mut factory = ComPtr::NULL;
     // IDXGIAdapter::GetParent(IID_IDXGIFactory2) is slot 6.
     let get_parent: extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> HRESULT =
         adapter.method(6);
-    get_parent(
+    let hr = get_parent(
         adapter.vtbl as *mut c_void,
         &IID_IDXGIFACTORY2,
         &mut factory.vtbl as *mut _ as *mut *mut c_void,
     );
     adapter.release();
     dxgi_device.release();
-    if factory.is_null() {
+    if hr < 0 || factory.is_null() {
+        note(SC_GET_PARENT, hr);
         return None;
     }
 
@@ -278,27 +312,20 @@ pub unsafe fn create_swapchain_for_panel(
     );
     factory.release();
     if hr < 0 || swapchain.is_null() {
+        note(SC_CREATE, hr);
         return None;
     }
 
     // Hand the swapchain to XAML.
     let mut native = ComPtr::NULL;
-    if swapchain.is_null() {
-        return None;
-    }
-    let sspn: extern "system" fn(
-        *mut c_void,
-        *const Guid,
-        *mut *mut c_void,
-    ) -> HRESULT = ComPtr { vtbl: panel as *const *const usize }.method(0);
-    if sspn(
-        panel,
+    let panel_ptr = ComPtr { vtbl: panel as *const *const usize };
+    let hr = panel_ptr.query_interface(
         &IID_ISWAPCHAINPANELNATIVE,
         &mut native.vtbl as *mut _ as *mut *mut c_void,
-    ) < 0
-        || native.is_null()
-    {
+    );
+    if hr < 0 || native.is_null() {
         swapchain.release();
+        note(SC_PANEL_QI, hr);
         return None;
     }
     let set_swapchain: extern "system" fn(*mut c_void, *mut c_void) -> HRESULT =
@@ -307,6 +334,7 @@ pub unsafe fn create_swapchain_for_panel(
     native.release();
     if hr < 0 {
         swapchain.release();
+        note(SC_SET_SWAPCHAIN, hr);
         return None;
     }
     Some(swapchain)
