@@ -82,6 +82,9 @@ namespace Phirura
         private static extern int wp81_rs_start_corewindow(IntPtr coreWindow, uint width, uint height);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_attach_panel(IntPtr panel);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern uint wp81_rs_vertex_count();
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -647,6 +650,50 @@ namespace Phirura
             {
                 AppLog.WriteSync("RustRenderer.StartCoreWindow: FAILED", ex);
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Attach the live swapchain to a <see cref="SwapChainPanel"/>. **Must run on the UI thread.**
+        ///
+        /// Microsoft's own WP8.1 sample performs this attach inside
+        /// <c>Dispatcher-&gt;RunAsync(CoreDispatcherPriority::High, …)</c>; touching a XAML object off
+        /// the UI thread is not guaranteed to work, so the attach is split out of the native bring-up
+        /// (which runs on a pool thread to keep the log flushable) and called from here instead.
+        /// Returns true on success.
+        /// </summary>
+        public static bool AttachPanel(SwapChainPanel panel)
+        {
+            if (panel == null)
+            {
+                AppLog.WriteSync("RustRenderer.AttachPanel: panel is null");
+                return false;
+            }
+            IntPtr native = IntPtr.Zero;
+            try
+            {
+                native = Marshal.GetIUnknownForObject(panel);
+                if (native == IntPtr.Zero)
+                {
+                    AppLog.WriteSync("RustRenderer.AttachPanel: GetIUnknownForObject returned null");
+                    return false;
+                }
+                int rc = wp81_rs_attach_panel(native);
+                AppLog.WriteSync("RustRenderer.AttachPanel: rc=" + rc
+                    + " panel-iface=" + PanelIfaceName);
+                return rc == 0;
+            }
+            catch (Exception ex)
+            {
+                AppLog.WriteSync("RustRenderer.AttachPanel: threw", ex);
+                return false;
+            }
+            finally
+            {
+                if (native != IntPtr.Zero)
+                {
+                    Marshal.Release(native);
+                }
             }
         }
 

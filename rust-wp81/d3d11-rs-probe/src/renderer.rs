@@ -132,67 +132,41 @@ pub struct Pipeline {
     pub raster: ComPtr,
 }
 
-/// Create the device and immediate context on the first non-software adapter.
+/// Create the device and immediate context.
 ///
 /// Returns `(device, context, feature_level, adapter_description)`.
+///
+/// This deliberately mirrors Microsoft's own WP8.1 XAML/DirectX sample (`DeviceResources.cpp`) rather
+/// than the "enumerate adapters, pick the first non-software one, create with an explicit adapter +
+/// `D3D_DRIVER_TYPE_UNKNOWN`" shape the probe used:
+///
+///     D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, 0, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+///                       levels[], …, D3D11_SDK_VERSION, &device, &level, &context);
+///
+/// That difference is not cosmetic. On device the adapter-enumerated + `UNKNOWN` shape produced a
+/// device that DXGI then refused for **both** swapchain routes:
+/// `CreateSwapChainForComposition` → `DXGI_ERROR_INVALID_CALL` on every descriptor variant, and
+/// `CreateSwapChainForCoreWindow` → `E_INVALIDARG`. Both failures point at the device, not the
+/// descriptor, so the device creation is what moved to the sample's shape.
+///
+/// `adapter_desc` is still filled in (via the device's own `IDXGIDevice::GetAdapter`), because the
+/// log's adapter name is the one piece of the old path worth keeping.
 pub unsafe fn create_device() -> Option<(ComPtr, ComPtr, u32, [u16; 128])> {
-    let mut factory = ComPtr::NULL;
-    if CreateDXGIFactory1(
-        &IID_IDXGIFACTORY1 as *const Guid,
-        &mut factory.vtbl as *mut _ as *mut *mut c_void,
-    ) < 0
-        || factory.is_null()
-    {
-        return None;
-    }
-
-    let enum_adapters1: extern "system" fn(*mut c_void, UINT, *mut *mut c_void) -> HRESULT =
-        factory.method(IDXGIFACTORY1_ENUMADAPTERS1);
-    let mut chosen = ComPtr::NULL;
-    let mut chosen_desc = DXGI_ADAPTER_DESC1::default();
-    let mut i = 0u32;
-    loop {
-        let mut ad = ComPtr::NULL;
-        if enum_adapters1(factory.vtbl as *mut c_void, i, &mut ad.vtbl as *mut _ as *mut *mut c_void) < 0
-            || ad.is_null()
-        {
-            break;
-        }
-        let get_desc1: extern "system" fn(*mut c_void, *mut DXGI_ADAPTER_DESC1) -> HRESULT =
-            ad.method(IDXGIADAPTER1_GETDESC1);
-        let mut desc = DXGI_ADAPTER_DESC1::default();
-        if get_desc1(ad.vtbl as *mut c_void, &mut desc) >= 0
-            && (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0
-        {
-            chosen = ad;
-            chosen_desc = desc;
-            break;
-        }
-        ad.release();
-        i += 1;
-    }
-    factory.release();
-    if chosen.is_null() {
-        return None;
-    }
-
     let levels = [
+        D3D_FEATURE_LEVEL_11_1,
         D3D_FEATURE_LEVEL_11_0,
         D3D_FEATURE_LEVEL_10_1,
         D3D_FEATURE_LEVEL_10_0,
         D3D_FEATURE_LEVEL_9_3,
+        D3D_FEATURE_LEVEL_9_2,
+        D3D_FEATURE_LEVEL_9_1,
     ];
     let mut device = ComPtr::NULL;
     let mut context = ComPtr::NULL;
     let mut level = 0u32;
-    // `D3D11_CREATE_DEVICE_BGRA_SUPPORT` is not optional here: a XAML `SwapChainPanel` surface is
-    // BGRA, and DXGI refuses `CreateSwapChainForComposition` (with `DXGI_ERROR_INVALID_CALL`, not a
-    // helpful "device lacks BGRA") when the device was created without this flag. Every WP8.1
-    // XAML/DirectX sample passes it; the first version of this file did not, which is a strong
-    // candidate for the on-device failure that survived the descriptor fix.
     let hr = D3D11CreateDevice(
-        chosen.vtbl as *mut c_void,
-        D3D_DRIVER_TYPE_UNKNOWN,
+        core::ptr::null_mut(), // default adapter
+        D3D_DRIVER_TYPE_HARDWARE,
         core::ptr::null_mut(),
         D3D11_CREATE_DEVICE_BGRA_SUPPORT,
         levels.as_ptr(),
@@ -202,11 +176,33 @@ pub unsafe fn create_device() -> Option<(ComPtr, ComPtr, u32, [u16; 128])> {
         &mut level,
         &mut context.vtbl as *mut _ as *mut *mut c_void,
     );
-    chosen.release();
     if hr < 0 || device.is_null() {
         return None;
     }
-    Some((device, context, level, chosen_desc.Description))
+
+    // Fill the description from the device's own adapter, purely for the log. A failure here is not
+    // fatal - the caller treats an all-zero description as "unknown adapter".
+    let mut desc_out = DXGI_ADAPTER_DESC1::default();
+    let mut dxgi_device = ComPtr::NULL;
+    if device.query_interface(&IID_IDXGIDEVICE, &mut dxgi_device.vtbl as *mut _ as *mut *mut c_void) >= 0
+        && !dxgi_device.is_null()
+    {
+        let mut adapter = ComPtr::NULL;
+        let get_adapter: extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT =
+            dxgi_device.method(7);
+        if get_adapter(dxgi_device.vtbl as *mut c_void, &mut adapter.vtbl as *mut _ as *mut *mut c_void) >= 0
+            && !adapter.is_null()
+        {
+            // IDXGIAdapter1::GetDesc1 is slot 10 (IDXGIAdapter::GetDesc is slot 8).
+            let get_desc1: extern "system" fn(*mut c_void, *mut DXGI_ADAPTER_DESC1) -> HRESULT =
+                adapter.method(IDXGIADAPTER1_GETDESC1);
+            let _ = get_desc1(adapter.vtbl as *mut c_void, &mut desc_out);
+            adapter.release();
+        }
+        dxgi_device.release();
+    }
+
+    Some((device, context, level, desc_out.Description))
 }
 
 /// Create a composition swapchain for a XAML `SwapChainPanel` and attach it.
@@ -461,10 +457,34 @@ pub unsafe fn create_swapchain_for_panel_traced(
     }
 
 
-    // Hand the swapchain to XAML. Two interop interfaces exist and a given XAML object answers
-    // exactly one of them: `SwapChainPanel` -> `ISwapChainPanelNative`, `SwapChainBackgroundPanel`
-    // -> `ISwapChainBackgroundPanelNative`. Rather than make the caller pick, try both; whichever
-    // QIs is the one this panel is, and both have `SetSwapChain` at slot 3.
+    // Hand the swapchain to XAML.
+    //
+    // This is deferred to its own function because on WP8.1 the attach is **the UI thread's job**:
+    // Microsoft's own sample does `m_swapChainPanel->Dispatcher->RunAsync(CoreDispatcherPriority::High,
+    // … panelNative->SetSwapChain(m_swapChain) …)`. Touching a XAML object from a pool thread is not
+    // guaranteed to work, so C# calls the exported `wp81_rs_attach_panel` from the UI thread after a
+    // successful create. Attaching here as well keeps this function usable standalone.
+    if !attach_swapchain_to_panel(swapchain, panel) {
+        swapchain.release();
+        note(trace, SC_PANEL_QI, -1);
+        return None;
+    }
+    crate::set_tick(16); // done
+    Some(swapchain)
+}
+
+/// Attach an already-created swapchain to a XAML panel, on whatever thread calls this.
+///
+/// Two interop interfaces exist and a given XAML object answers exactly one of them:
+/// `SwapChainPanel` → `ISwapChainPanelNative`, `SwapChainBackgroundPanel` →
+/// `ISwapChainBackgroundPanelNative`. Rather than make the caller pick, this tries both; whichever
+/// QIs is the one the panel is, and both have `SetSwapChain` at slot 3.
+///
+/// **Call this on the UI thread** (see the note in [`create_swapchain_for_panel_traced`]).
+pub unsafe fn attach_swapchain_to_panel(swapchain: ComPtr, panel: *mut c_void) -> bool {
+    if swapchain.is_null() || panel.is_null() {
+        return false;
+    }
     crate::set_tick(14); // panel QI
     let panel_ptr = ComPtr { vtbl: panel as *const *const usize };
     let mut native = ComPtr::NULL;
@@ -486,9 +506,7 @@ pub unsafe fn create_swapchain_for_panel_traced(
         if hr >= 0 && !native.is_null() {
             crate::record_panel_iface(1); // ISwapChainBackgroundPanelNative
         } else {
-            swapchain.release();
-            note(trace, SC_PANEL_QI, hr);
-            return None;
+            return false;
         }
     }
     let set_swapchain: extern "system" fn(*mut c_void, *mut c_void) -> HRESULT =
@@ -497,12 +515,10 @@ pub unsafe fn create_swapchain_for_panel_traced(
     let hr = set_swapchain(native.vtbl as *mut c_void, swapchain.vtbl as *mut c_void);
     native.release();
     if hr < 0 {
-        swapchain.release();
-        note(trace, SC_SET_SWAPCHAIN, hr);
-        return None;
+        return false;
     }
     crate::set_tick(16); // done
-    Some(swapchain)
+    true
 }
 
 /// Create a classic `HWND`-bound swapchain - the desktop verification path.

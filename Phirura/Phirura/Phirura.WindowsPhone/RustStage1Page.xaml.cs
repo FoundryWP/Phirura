@@ -137,7 +137,18 @@ namespace Phirura
                 // in the panel attach rather than in DXGI this still produces pixels. Must run on
                 // the UI thread - CoreWindow.GetForCurrentThread is thread-affine.
                 string route = "composition";
-                if (!ok)
+                if (ok)
+                {
+                    // The attach is the UI thread's job (see RustRenderer.AttachPanel); the native
+                    // bring-up above ran on a pool thread, so it deliberately did not attach.
+                    bool attached = RustRenderer.AttachPanel(RustPanel);
+                    AppLog.WriteSync("RustStage1: UI-thread attach -> " + attached);
+                    if (!attached)
+                    {
+                        AppLog.WriteSync("RustStage1: composition create ok but attach failed");
+                    }
+                }
+                else
                 {
                     AppLog.WriteSync("RustStage1: composition route failed; trying CoreWindow route");
                     ok = RustRenderer.StartCoreWindow(w, h);

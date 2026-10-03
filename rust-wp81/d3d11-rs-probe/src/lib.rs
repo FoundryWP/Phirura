@@ -552,6 +552,25 @@ pub unsafe extern "C" fn wp81_rs_start_corewindow(
     finish_up_from_swapchain(s)
 }
 
+/// Attach the live swapchain to a XAML panel. **Call this on the UI thread.**
+///
+/// The composition route creates the swapchain during bring-up, but on WP8.1 the `SetSwapChain`
+/// attach belongs to the UI thread (`Dispatcher->RunAsync` in Microsoft's own sample), so C# calls
+/// this from the UI thread after a successful `wp81_rs_start`/`wp81_rs_start_upto`. Returns 0 on
+/// success, 1 if there is no swapchain, 2 if no interop interface answered.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_attach_panel(panel: *mut c_void) -> i32 {
+    let s = st();
+    if s.swapchain.is_null() {
+        return 1;
+    }
+    if renderer::attach_swapchain_to_panel(s.swapchain, panel) {
+        0
+    } else {
+        2
+    }
+}
+
 /// The second half of bring-up, shared by both swapchain routes: back buffer -> RTV -> pipeline ->
 /// test texture -> viewport. Returns the same stage codes as [`wp81_rs_start`].
 unsafe fn finish_up_from_swapchain(s: &mut State) -> i32 {

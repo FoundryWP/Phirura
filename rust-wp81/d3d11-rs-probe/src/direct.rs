@@ -320,10 +320,13 @@ impl Default for DXGI_ADAPTER_DESC1 {
 // ===========================================================================
 
 // D3Dcommon.h
+pub const D3D_FEATURE_LEVEL_9_1: UINT = 0x9100;
+pub const D3D_FEATURE_LEVEL_9_2: UINT = 0x9200;
 pub const D3D_FEATURE_LEVEL_9_3: UINT = 0x9300;
 pub const D3D_FEATURE_LEVEL_10_0: UINT = 0xa000;
 pub const D3D_FEATURE_LEVEL_10_1: UINT = 0xa100;
 pub const D3D_FEATURE_LEVEL_11_0: UINT = 0xb000;
+pub const D3D_FEATURE_LEVEL_11_1: UINT = 0xb100;
 pub const D3D_DRIVER_TYPE_UNKNOWN: UINT = 0;
 pub const D3D_DRIVER_TYPE_HARDWARE: UINT = 1;
 pub const D3D11_SDK_VERSION: UINT = 7;
