@@ -8,9 +8,21 @@
 #   * only d3d11.dll / dxgi.dll      -> the binding is directly usable
 #   * api-ms-win-*                   -> also fine; map them onto the phone's API sets
 #   * kernel32.dll / anything else   -> the binding cannot ship, and needs a compat layer
+#
+# Two probes are built from `src/`:
+#   * `direct.rs` - binds D3D11/DXGI by hand to `d3d11.dll` / `dxgi.dll`. THIS is the one that
+#     ships, and the import table below is its.
+#   * `lib.rs`    - uses the real `windows` 0.62.2 crate. Kept because it documents what that crate
+#     drags in (kernel32, oleaut32, combase, rpcrt4, user32, ntdll), which is why `direct.rs`
+#     exists at all.
+#
+# `wp81-compat` is linked in, exactly as `build-port.ps1` does, so the 31 unresolved std symbols
+# (`GetEnvironmentStringsW`, `NtCreateFile`, ...) are supplied the same way they are in the real
+# port. Without it the link stops at LNK1120 and says nothing about the import table.
 
 param(
-    [switch]$NoDeps
+    [switch]$NoDeps,
+    [string]$CompatRlib = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,40 +64,66 @@ $cargoArgs = @(
     "-Zbuild-std-features=compiler-builtins-mem",
     "--release"
 )
-& $cargo @cargoArgs 2>&1 | Tee-Object -FilePath (Join-Path $here "cargo.log")
+# cargo writes its progress and its "Finished" line to *stderr*, and with $ErrorActionPreference set
+# to Stop a native command's stderr output is turned into a terminating NativeCommandError. The same
+# guard `build-port.ps1` uses: drop to Continue around the call and read $LASTEXITCODE instead.
+$savedEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $cargo @cargoArgs *> (Join-Path $here "cargo.log")
 $code = $LASTEXITCODE
+$ErrorActionPreference = $savedEap
 Pop-Location
-if ($code -ne 0) { throw "cargo build failed ($code)" }
+if ($code -ne 0) {
+    Get-Content (Join-Path $here "cargo.log") -Tail 30
+    throw "cargo build failed ($code)"
+}
 
 $staticlib = Join-Path $here "target\thumbv7a-pc-windows-msvc\release\d3d11_rs_probe.lib"
-if (-not (Test-Path $staticlib)) {
-    $staticlib = Join-Path $here "target\thumbv7a-pc-windows-msvc\release\libd3d11_rs_probe.lib"
-}
-if (-not (Test-Path $staticlib)) { throw "no staticlib found in target dir" }
+if (-not (Test-Path $staticlib)) { throw "no staticlib at $staticlib" }
 Write-Host "staticlib = $((Get-Item $staticlib).Length) bytes"
+
+# Locate the compat rlib the phira workspace already built. It is a build-script-style artifact,
+# so the path carries a content hash: `build/wp81-compat/<hash>/out/libwp81_compat-<hash>.rlib`.
+if (-not $CompatRlib) {
+    $compatRoot = "E:/Users/admin/Documents/visual studio 2013/Phirura/phira-main/phira-main/target/thumbv7a-pc-windows-msvc/release/build/wp81-compat"
+    $found = Get-ChildItem -Path $compatRoot -Recurse -Filter "libwp81_compat-*.rlib" -ErrorAction SilentlyContinue |
+             Select-Object -First 1
+    if ($found) { $CompatRlib = $found.FullName }
+}
+if (-not $CompatRlib) {
+    throw "cannot find the wp81-compat rlib; build the port first (build-port.ps1) or pass -CompatRlib"
+}
+Write-Host "compat rlib = $CompatRlib"
 
 Write-Host "`n=== 2. link ARMNT DLL ==="
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
-# No /NODEFAULTLIB and no compat here: this probe is allowed to import whatever the binding wants.
-# The point is to *read* the import table, not to make it shippable. A real build would add the
-# same /NODEFAULTLIB + compat treatment as build-port.ps1.
 $linkArgs = @(
-    "/DLL", "/MACHINE:ARM", "/SUBSYSTEM:WINDOWS",
+    "/DLL", "/NODEFAULTLIB", "/MACHINE:ARM", "/SUBSYSTEM:WINDOWS",
     "/ENTRY:_DllMainCRTStartup",
     "/FORCE:MULTIPLE",
     "/OUT:$dll",
     "/LIBPATH:$vcLibArm",
     "/LIBPATH:$wpLibArm",
     $staticlib,
+    $CompatRlib,
     $chkstk,
     "WindowsPhoneCore.lib",
     "ws2_32.lib",
-    "/EXPORT:wp81_d3d11_rs_touch"
+    "/EXPORT:wp81_d3d11_rs_probe",
+    "/EXPORT:wp81_d3d11_rs_report"
 )
-& $armLink @linkArgs *>&1 | Tee-Object -FilePath (Join-Path $here "link.log")
-if ($LASTEXITCODE -ne 0) { throw "link failed ($LASTEXITCODE)" }
+$savedEap2 = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $armLink @linkArgs *> (Join-Path $here "link.log")
+$linkCode = $LASTEXITCODE
+$ErrorActionPreference = $savedEap2
+if ($linkCode -ne 0) {
+    Get-Content (Join-Path $here "link.log") | Select-String -Pattern "error|LNK1120" | Select-Object -Last 15
+    throw "link failed ($linkCode)"
+}
+Write-Host "link OK - $((Get-Item $dll).Length) bytes"
 
 Write-Host "`n=== 3. import table (THE ANSWER) ==="
 & $py (Join-Path $here "..\tools\check_imports.py") $dll
-Write-Host "check_imports exit = $LASTEXITCODE  (1 = a non-API-set import; read the list above)"
+Write-Host "check_imports exit = $LASTEXITCODE  (0 = shippable; 1 = a library the phone does not have)"

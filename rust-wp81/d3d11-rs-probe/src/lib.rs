@@ -14,7 +14,17 @@
 
 #![allow(non_snake_case)]
 
-use windows::core::Interface;
+// Two probes live in this crate, and they answer different questions:
+//
+//   * `lib.rs` (below) uses the real `windows` 0.62.2 crate. It proves the *bindings* compile for
+//     this target and, through `dylib_imports.py`, shows what that crate drags into the import
+//     table (kernel32, oleaut32, combase, rpcrt4, user32, ntdll - none of which WP8.1 has).
+//
+//   * `direct.rs` skips the crates entirely and binds the D3D11 / DXGI entry points by hand to
+//     `d3d11.dll` / `dxgi.dll`. That is the *shippable* form, and the one that answers whether
+//     Path A (Rust renders itself) can actually ship.
+pub mod direct;
+
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_9_3, D3D_PRIMITIVE_TOPOLOGY,

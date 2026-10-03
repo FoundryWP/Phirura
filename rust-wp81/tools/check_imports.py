@@ -52,6 +52,19 @@ DENY = {
 
 API_SET_PREFIX = "api-ms-win-"
 
+# Libraries that are NOT named `api-ms-win-*` but ARE on the phone, proven by the WP8.1 SDK: the
+# kit ships a matching import lib for each in `Windows Phone Kits\8.1\lib\ARM\`. The GPU DLLs are
+# the reason this list exists - a D3D11 renderer in Rust must import `d3d11.dll` / `dxgi.dll`
+# directly (there is no API-set spelling for them), and the C++ probe already reached the Adreno
+# 225 through them on a real device.
+#
+# Add to this only with an import lib to point at. "It worked on desktop" is not evidence.
+PRESENT_ON_PHONE = {
+    "d3d11.dll",           # Windows Phone Kits\8.1\lib\ARM\d3d11.lib
+    "dxgi.dll",            # Windows Phone Kits\8.1\lib\ARM\dxgi.lib
+    "d3dcompiler_47.dll",  # Windows Phone Kits\8.1\lib\ARM\d3dcompiler.lib
+}
+
 
 def imported_libraries(path):
     d = open(path, "rb").read()
@@ -105,6 +118,8 @@ def main(argv):
         low = lib.lower()
         if low in allow:
             continue
+        if low in PRESENT_ON_PHONE:
+            continue
         if low.startswith(API_SET_PREFIX):
             continue
         bad.append(lib)
@@ -115,6 +130,8 @@ def main(argv):
         why = ""
         if lib in bad:
             why = "  <- not an API set" + (" (on the WP8.1 deny list)" if lib.lower() in DENY else "")
+        elif lib.lower() in PRESENT_ON_PHONE:
+            why = "  <- ships on WP8.1 (proven by the kit's ARM import lib)"
         print("   %s %s%s" % (mark, lib, why))
 
     if bad:
@@ -125,7 +142,7 @@ def main(argv):
         for lib in bad:
             print("    " + lib, file=sys.stderr)
         return 1
-    print("CHECK OK: every import is an API set")
+    print("CHECK OK: every import is an API set or a DLL the WP8.1 kit links against")
     return 0
 
 
