@@ -1,0 +1,38 @@
+[package]
+name = "prpr-port"
+version = "0.1.0"
+edition = "2021"
+
+# The bridge between `prpr` and the C# shell. Added by the port, not by upstream.
+#
+# Deliberately a member of the phira workspace rather than a workspace of its own. Two reasons, and
+# both cost real time before this was moved:
+#
+#   1. `[patch]` is only honoured in a workspace root. Standing alone, this crate would resolve
+#      `macroquad`, `miniquad`, `sasa` and `rfd` to the real crates - the ones that cannot build
+#      for WP8.1 - because the phira workspace's patch block would not apply.
+#   2. A separate workspace means a separate `Cargo.lock` and a separate `target/`, so every one of
+#      prpr's ~200 dependencies is resolved to different versions and recompiled from scratch.
+#      Inside the workspace it reuses everything already built.
+#
+# It has to be built as a staticlib because it is linked into the app with the VC11 ARM linker, the
+# same way wp81probe.dll is.
+
+[lib]
+crate-type = ["staticlib", "lib"]
+
+[dependencies]
+prpr = { path = "../prpr", default-features = false }
+
+# `wp81-compat` must be in this crate's dependency graph, not merely in the workspace.
+#
+# The patched std references compat's symbols (`_tls_index`, `atexit`, the Win32 shims), but compat
+# is not a dependency of prpr - it is a standalone crate that *defines* symbols std expects the CRT
+# to provide. Nothing pulls it in, so without this line the link fails with 36 `_tls_index` and
+# dozens of other unresolved externals even though the definitions exist one directory away.
+wp81-compat = { path = "../../../rust-wp81/compat" }
+
+# Float maths. `pxfm` (reached through prpr's image/blur path) calls the C libm entry points, and a
+# CRT-free link has no libm to resolve them against. `libm` is a pure-Rust implementation, so the
+# symbols can be supplied from here instead of from a CRT that cannot be linked.
+libm = "0.2"

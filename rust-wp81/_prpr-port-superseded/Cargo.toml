@@ -1,0 +1,30 @@
+[package]
+name = "prpr-port"
+version = "0.1.0"
+edition = "2021"
+
+# The bridge between `prpr` and the C# shell.
+#
+# Built as a staticlib and linked into the WP8.1 app, the same way `wp81probe.dll` is - the
+# toolchain for that is already proven (see rust-wp81/README.md).
+#
+# Two jobs:
+#   1. Export a small C-ABI surface for C# to P/Invoke into.
+#   2. Implement the `extern "C"` functions the shims declare (audio, file dialogs), by forwarding
+#      to callbacks the shell installs.
+#
+# Direction matters: C# can P/Invoke into Rust, but a C# app cannot export native entry points, so
+# anything Rust needs *from* C# has to arrive as a function pointer the shell hands over at startup.
+# That is what `wp81_install_callbacks` is for.
+
+[lib]
+crate-type = ["staticlib", "lib"]
+
+[dependencies]
+prpr = { path = "E:/Users/admin/Documents/visual studio 2013/Phirura/phira-main/phira-main/prpr", default-features = false }
+
+[profile.release]
+opt-level = 2
+panic = "abort"
+
+[workspace]

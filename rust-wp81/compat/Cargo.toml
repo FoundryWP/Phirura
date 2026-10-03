@@ -1,0 +1,15 @@
+[package]
+name = "wp81-compat"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# An rlib, NOT a staticlib: this crate is a *library* that is linked into the final Rust
+# artifact (prpr built as a staticlib). A staticlib is a final artifact and rustc would demand
+# a `#[panic_handler]` here, which would then collide with the one std/panic_abort provides.
+crate-type = ["lib"]
+
+[profile.release]
+opt-level = 2
+
+[workspace]

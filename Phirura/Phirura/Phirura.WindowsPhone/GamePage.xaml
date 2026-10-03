@@ -1,0 +1,144 @@
+<Page
+    x:Class="Phirura.GamePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Phirura"
+    xmlns:win2d="using:Microsoft.Graphics.Canvas.UI.Xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Background="#FF07070B">
+
+    <Grid x:Name="RootGrid" Background="#FF07070B">
+        <MediaElement x:Name="Player" AutoPlay="False" Opacity="0" IsHitTestVisible="False"
+                      AudioCategory="GameMedia"
+                      MediaOpened="OnMediaOpened"
+                      MediaFailed="OnMediaFailed"
+                      MediaEnded="OnMediaEnded" />
+
+        <!--
+            Chart surface. Win2D draws here through Direct2D, so the chart is no longer a
+            tree of XAML Image elements.
+
+            The pointer handlers live on the wrapper Grid rather than on the CanvasControl:
+            a Grid with a transparent background is reliably hit-testable across its whole
+            area, and because the HUD and the buttons are siblings of this Grid (not
+            children) their presses do not bubble into gameplay input.
+
+            UseSharedDevice keeps the control on CanvasDevice.GetSharedDevice(), which is the
+            device the textures are loaded against in GamePage.StartAsync.
+        -->
+        <Grid x:Name="GameSurface" Background="Transparent"
+              PointerPressed="OnPointerPressed"
+              PointerMoved="OnPointerMoved"
+              PointerReleased="OnPointerReleased"
+              PointerCanceled="OnPointerCanceled"
+              PointerCaptureLost="OnPointerCaptureLost">
+            <win2d:CanvasControl x:Name="GameCanvas" ClearColor="#FF07070B" UseSharedDevice="True" />
+        </Grid>
+
+        <!-- HUD -->
+        <Grid IsHitTestVisible="False" Margin="18,10,18,10">
+            <TextBlock x:Name="ScoreText" Text="0" FontSize="26" Foreground="#FFF2F2F6"
+                       HorizontalAlignment="Right" VerticalAlignment="Top" />
+            <TextBlock x:Name="AccText" Text="100.00%" FontSize="13" Foreground="#FF9A9AAA"
+                       HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,32,0,0" />
+
+            <!--
+                Combo. prpr/src/scene/game.rs draws the combo NUMBER at the top centre of the
+                playfield with a small "COMBO" (or "AUTOPLAY") caption underneath, and only
+                once the combo reaches 3. It is NOT a mid-screen element.
+            -->
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,8,0,0">
+                <TextBlock x:Name="ComboText" Text="" FontSize="44" FontWeight="Light"
+                           Foreground="#FFF2F2F6" HorizontalAlignment="Center" />
+                <TextBlock x:Name="ComboLabelText" Text="" FontSize="12" Foreground="#FF9A9AAA"
+                           HorizontalAlignment="Center" Margin="0,-6,0,0" />
+                <TextBlock x:Name="JudgeText" Text="" FontSize="18" HorizontalAlignment="Center"
+                           Foreground="#FF8FD4FF" Margin="0,6,0,0" />
+            </StackPanel>
+
+            <TextBlock x:Name="SongText" Text="" FontSize="13" Foreground="#FF8A8A99"
+                       HorizontalAlignment="Left" VerticalAlignment="Bottom" />
+        </Grid>
+
+        <!--
+            Hit-sound voices. WP8.1 exposes no low-latency audio API to C#/XAML
+            (Windows.Media.Audio.AudioGraph does not exist on this profile and there is no
+            XAudio2 binding), so the hit sounds are a small round-robin pool of MediaElements
+            that get restarted on each hit.
+        -->
+        <StackPanel x:Name="SfxHost" Opacity="0" IsHitTestVisible="False" />
+
+        <Button x:Name="PauseButton" Content="II" FontSize="16" Width="52" Height="40"
+                HorizontalAlignment="Left" VerticalAlignment="Top" Margin="14,10,0,0"
+                Click="PauseButton_Click" />
+
+        <!-- Pause overlay -->
+        <Grid x:Name="PauseOverlay" Background="#CC000000" Visibility="Collapsed">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                <TextBlock Text="已暂停" FontSize="28" Foreground="#FFF2F2F6" HorizontalAlignment="Center" />
+                <TextBlock x:Name="PauseInfoText" FontSize="13" Foreground="#FF9A9AAA"
+                           HorizontalAlignment="Center" Margin="0,8,0,0" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,20,0,0">
+                    <Button Content="继续" Click="ResumeButton_Click" />
+                    <Button Content="重开" Click="RetryButton_Click" Margin="12,0,0,0" />
+                    <Button Content="延迟校准" Click="CalibrateButton_Click" Margin="12,0,0,0" />
+                    <Button Content="退出" Click="QuitButton_Click" Margin="12,0,0,0" />
+                </StackPanel>
+            </StackPanel>
+        </Grid>
+
+        <!--
+            Offset calibrator.
+
+            This is Phira's page/offset.rs reduced to its essentials. cali.wav is a 2-second
+            looping metronome; a note falls onto the white bar once per loop and cali_hit.wav
+            fires exactly as it lands. Tap when you hear the beat and the measured error is
+            averaged; "应用误差" folds it into the offset.
+
+            It lives inside GamePage rather than on its own page so the run in progress is
+            never torn down: the chart's music is simply paused underneath while cali.wav
+            plays, and the game loop keeps ticking (see OnRendering).
+        -->
+        <Grid x:Name="CalibOverlay" Background="#F207070B" Visibility="Collapsed">
+            <MediaElement x:Name="CaliPlayer" AutoPlay="False" Opacity="0" IsHitTestVisible="False"
+                          AudioCategory="GameMedia" MediaEnded="OnCaliMediaEnded" />
+
+            <Grid x:Name="CaliSurface" Background="Transparent" PointerPressed="OnCaliPointerPressed">
+                <Canvas x:Name="CaliBoard">
+                    <Rectangle x:Name="CaliTarget" Fill="White" Height="4" Width="440" />
+                    <Rectangle x:Name="CaliTapMarker" Fill="#FF8FD4FF" Height="4" Width="440"
+                               Opacity="0" />
+                    <Image x:Name="CaliNote" Width="72" Height="72" Stretch="Uniform"
+                           Source="/Assets/game/click.png" />
+                </Canvas>
+            </Grid>
+
+            <StackPanel VerticalAlignment="Top" HorizontalAlignment="Left" Margin="20,12,0,0">
+                <TextBlock Text="延迟校准" FontSize="20" Foreground="#FFF2F2F6" />
+                <TextBlock FontSize="12" Foreground="#FF8A8A99" Margin="0,4,0,0"
+                           Text="音符落到白线时点击屏幕（随便哪里）。连续点几次后按“应用误差”。" />
+                <TextBlock x:Name="CaliInfo" FontSize="13" Foreground="#FF9A9AAA" Margin="0,6,0,0" />
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                        Margin="0,0,0,16">
+                <Button Content="-5ms" Click="CaliMinus5_Click" />
+                <Button Content="+5ms" Click="CaliPlus5_Click" Margin="8,0,0,0" />
+                <Button Content="应用误差" Click="CaliApply_Click" Margin="8,0,0,0" />
+                <Button Content="重置" Click="CaliReset_Click" Margin="8,0,0,0" />
+                <Button Content="返回" Click="CaliBack_Click" Margin="8,0,0,0" />
+            </StackPanel>
+        </Grid>
+
+        <!-- Loading overlay -->
+        <Grid x:Name="LoadingOverlay" Background="#FF07070B">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                <ProgressBar IsIndeterminate="True" Width="220" Height="4" Foreground="#FF8FD4FF" />
+                <TextBlock x:Name="LoadingText" Text="正在载入谱面…" FontSize="14"
+                           Foreground="#FF9A9AAA" HorizontalAlignment="Center" Margin="0,14,0,0" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Page>

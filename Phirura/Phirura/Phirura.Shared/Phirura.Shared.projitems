@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <MSBuildAllProjects>$(MSBuildAllProjects);$(MSBuildThisFileFullPath)</MSBuildAllProjects>
+    <HasSharedItems>true</HasSharedItems>
+    <SharedGUID>cbd5ec83-c615-4430-90ba-087cb58af3ed</SharedGUID>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration">
+    <Import_RootNamespace>Phirura</Import_RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ApplicationDefinition Include="$(MSBuildThisFileDirectory)App.xaml">
+      <SubType>Designer</SubType>
+    </ApplicationDefinition>
+    <Compile Include="$(MSBuildThisFileDirectory)App.xaml.cs">
+      <DependentUpon>App.xaml</DependentUpon>
+    </Compile>
+    <!-- Crash / error log written to ApplicationData\LocalFolder\phirura.log -->
+    <Compile Include="$(MSBuildThisFileDirectory)AppLog.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Ported prpr core: maths, timing, tweens, animation and the chart model. -->
+    <Compile Include="$(MSBuildThisFileDirectory)Core\Geometry.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Core\Tween.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Core\Anim.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Core\Timing.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Core\Chart.cs" />
+    <!-- Chart parsers. -->
+    <Compile Include="$(MSBuildThisFileDirectory)Parse\JsonExt.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Parse\RpeParser.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Parse\PecParser.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Parse\ChartParser.cs" />
+    <!-- Gameplay: judgement, rendering, clock, settings. -->
+    <Compile Include="$(MSBuildThisFileDirectory)Game\Judge.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Game\ChartRenderer.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Game\MusicClock.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Game\ChartEntry.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Phira backend client (login, online chart library, downloads). -->
+    <Compile Include="$(MSBuildThisFileDirectory)Net\PhiraApi.cs" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,37 @@
+[package]
+name = "sasa"
+version = "0.1.0"
+edition = "2021"
+
+# Shim, not a port.
+#
+# `sasa` is the audio engine. Its backends are `cpal` (desktop WASAPI), `oboe` (Android) and
+# `ohos-audio-sys` (OpenHarmony); there is no WinRT/XAudio2 backend, so the mixing cannot happen in
+# Rust here. On WP8.1 the C# side already has a working audio path, so this shim keeps the API and
+# the timing surface `prpr` depends on and routes the actual playback there.
+#
+# `anyhow` is a real dependency because `prpr` calls these functions with `?` inside
+# `anyhow::Result` functions - the error type has to match, not merely be convertible.
+
+[lib]
+crate-type = ["lib"]
+
+# The feature names have to match upstream exactly, because `phira` and `prpr` request them
+# conditionally (`default-features = false, features = ["ohos"]` on the OpenHarmony path,
+# `["oboe"]` on Android, plain default elsewhere). Cargo resolves features before it builds
+# anything, so a missing name fails the whole workspace with
+# `depends on sasa with feature ohos but sasa does not have that feature` - before a single
+# line is compiled.
+#
+# They are empty on purpose: each one would pull in the backend it names (cpal, oboe,
+# ohos-audio-sys), and the whole point of this shim is that the shell owns playback instead.
+[features]
+default = ["cpal"]
+cpal = []
+oboe = []
+ohos = []
+
+[dependencies]
+anyhow = "1.0"
+
+[workspace]

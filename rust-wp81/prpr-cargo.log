@@ -1,0 +1,299 @@
+﻿cargo.exe : warning: unused workspace dependency `objc2-core-foundation`
+所在位置 E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\build-prpr.ps1:82 字符: 1
++ & $cargo @cargoArgs 2>&1 | Out-File -FilePath $cargoLog -Encoding utf ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: unused...ore-foundation`:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  --> Cargo.toml:44:1
+   |
+44 | objc2-core-foundation = "0.3.2"
+   | ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `objc2-core-foundation`
+warning: workspace (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> prpr-avc\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+21 ~ sasa = { workspace = true, default-features = false, features = ["ohos"] }
+22 + [lints]
+23 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+21 ~ sasa = { workspace = true, default-features = false, features = ["ohos"] }
+22 + [lints]
+   |
+warning: `prpr-avc` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> phira-monitor\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+30 ~ uuid = { workspace = true, features = ["v4"] }
+31 + [lints]
+32 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+30 ~ uuid = { workspace = true, features = ["v4"] }
+31 + [lints]
+   |
+warning: `phira-monitor` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> prpr-l10n\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+14 ~ walkdir = { workspace = true }
+15 + [lints]
+16 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+14 ~ walkdir = { workspace = true }
+15 + [lints]
+   |
+warning: `prpr-l10n` (manifest) generated 1 warning
+warning: unused build dependency `walkdir`
+   --> prpr\Cargo.toml:118:1
+    |
+118 | walkdir = { workspace = true }
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `walkdir`
+warning: `prpr` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> prpr-auto-offset\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+14 ~ 
+15 + [lints]
+16 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+14 ~ 
+15 + [lints]
+   |
+warning: `prpr-auto-offset` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> prpr-pbc\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+10 ~ prpr = { workspace = true }
+11 + [lints]
+12 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+10 ~ prpr = { workspace = true }
+11 + [lints]
+   |
+warning: `prpr-pbc` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> tools\auto-offset-cli\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+14 ~ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+15 + [lints]
+16 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+14 ~ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+15 + [lints]
+   |
+warning: `prpr-auto-offset-cli` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> phira-main\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+12 ~ phira = { workspace = true, default-features = false }
+13 + [lints]
+14 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+12 ~ phira = { workspace = true, default-features = false }
+13 + [lints]
+   |
+warning: `phira-main` (manifest) generated 1 warning
+warning: patch `macroquad v0.4.0 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad)` was n
+ot used in the crate graph
+warning: patch `miniquad v0.4.0 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad)` was not
+ used in the crate graph
+help: Check that the patched package version and available features are compatible
+      with the dependency requirements. If the patch has a different version from
+      what is locked in the Cargo.lock file, run `cargo update` to use the new
+      version. This may also occur with an optional dependency that is not enabled.
+    Checking sasa v0.1.0 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\sasa)
+warning: variable does not need to be mutable
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\rfd\src\lib.rs:111:23
+    |
+111 |     pub fn add_filter(mut self, _name: impl Into<String>, _ext: &[&str]) -> Self {
+    |                       ----^^^^
+    |                       |
+    |                       help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `rfd` (lib) generated 1 warning (run `cargo fix --lib -p rfd` to apply 1 suggestion)
+    Checking prpr v0.8.2 (E:\Users\admin\Documents\visual studio 2013\Phirura\phira-main\phira-main\prpr)
+warning: trailing semicolon in macro used in expression position
+  --> prpr\src\log.rs:84:29
+   |
+84 |             Level::TRACE => trace!("{}", msg),
+   |                             ^^^^^^^^^^^^^^^^^
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a fu
+ture release!
+   = note: for more information, see issue #79813 <https://github.com/rust-lang/rust/issues/79813>
+   = note: `#[warn(semicolon_in_expressions_from_non_local_macros)]` (part of `#[warn(future_incompatible)]`) on by def
+ault
+   = note: this warning originates in the macro `trace` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: trailing semicolon in macro used in expression position
+  --> prpr\src\log.rs:85:29
+   |
+85 |             Level::DEBUG => debug!("{}", msg),
+   |                             ^^^^^^^^^^^^^^^^^
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a fu
+ture release!
+   = note: for more information, see issue #79813 <https://github.com/rust-lang/rust/issues/79813>
+   = note: this warning originates in the macro `debug` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: trailing semicolon in macro used in expression position
+  --> prpr\src\log.rs:86:28
+   |
+86 |             Level::INFO => info!("{}", msg),
+   |                            ^^^^^^^^^^^^^^^^
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a fu
+ture release!
+   = note: for more information, see issue #79813 <https://github.com/rust-lang/rust/issues/79813>
+   = note: this warning originates in the macro `info` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: trailing semicolon in macro used in expression position
+  --> prpr\src\log.rs:87:28
+   |
+87 |             Level::WARN => warn!("{}", msg),
+   |                            ^^^^^^^^^^^^^^^^
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a fu
+ture release!
+   = note: for more information, see issue #79813 <https://github.com/rust-lang/rust/issues/79813>
+   = note: this warning originates in the macro `warn` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: trailing semicolon in macro used in expression position
+  --> prpr\src\log.rs:88:29
+   |
+88 |             Level::ERROR => error!("{}", msg),
+   |                             ^^^^^^^^^^^^^^^^^
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a fu
+ture release!
+   = note: for more information, see issue #79813 <https://github.com/rust-lang/rust/issues/79813>
+   = note: this warning originates in the macro `error` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: use of deprecated constant `std::f32::INFINITY`: replaced by the `INFINITY` associated constant on `f32`
+   --> prpr\src\ui.rs:519:23
+    |
+519 |             pos: f32::INFINITY,
+    |                       ^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: `prpr` (lib) generated 6 warnings
+warning: unused dependency `base64`
+  --> prpr\Cargo.toml:17:1
+   |
+17 | base64 = { workspace = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `base64`
+warning: unused dependency `hex`
+  --> prpr\Cargo.toml:31:1
+   |
+31 | hex = { workspace = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `hex`
+warning: unused dependency `hmac`
+  --> prpr\Cargo.toml:32:1
+   |
+32 | hmac = "0.12.1"
+   | ^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `hmac`
+warning: unused dependency `libc`
+  --> prpr\Cargo.toml:43:1
+   |
+43 | libc = "0.2.183"
+   | ^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `libc`
+warning: unused dependency `miniz_oxide`
+  --> prpr\Cargo.toml:49:1
+   |
+49 | miniz_oxide = "0.9.1"
+   | ^^^^^^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `miniz_oxide`
+warning: unused dependency `obfstr`
+  --> prpr\Cargo.toml:51:1
+   |
+51 | obfstr = "0.4.4"
+   | ^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `obfstr`
+warning: unused dependency `sha2`
+  --> prpr\Cargo.toml:63:1
+   |
+63 | sha2 = { workspace = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `sha2`
+warning: unused dependency `symphonia`
+  --> prpr\Cargo.toml:65:1
+   |
+65 | / symphonia = { version = "0.5", features = [
+66 | |     "flac",
+67 | |     "mp3",
+68 | |     "ogg",
+...  |
+71 | |     "pcm",
+72 | | ] }
+   | |___^
+   |
+help: consider removing the dependency on `symphonia`
+warning: unused dependency `tempfile`
+  --> prpr\Cargo.toml:74:1
+   |
+74 | tempfile = { workspace = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `tempfile`
+warning: unused dependency `uuid`
+  --> prpr\Cargo.toml:78:1
+   |
+78 | uuid = { workspace = true, features = ["v4"] }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `uuid`
+warning: `prpr` (manifest) generated 10 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 20.00s
+warning: the following packages contain code that will be rejected by a future version of Rust: prpr v0.8.2 (E:\Users\a
+dmin\Documents\visual studio 2013\Phirura\phira-main\phira-main\prpr)
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibi
+lities --id 1`

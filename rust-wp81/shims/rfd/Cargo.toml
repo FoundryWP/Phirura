@@ -1,0 +1,24 @@
+[package]
+name = "rfd"
+version = "0.17.2"
+edition = "2021"
+
+# Shim, not a port.
+#
+# `rfd` is the native file-dialog crate. On Windows it binds the Win32 common dialogs through
+# `windows-sys`, and that is the only thing in the entire phira dependency graph that fails to
+# compile for this target - `windows-sys` 0.61.2 references shell types (APPBARDATA,
+# SHFILEOPSTRUCTW, NOTIFYICONDATAW, ...) that its feature gating does not define.
+#
+# `prpr` and `phira` use exactly two calls: `pick_file` and `save_file`. WP8.1 has its own picker
+# (the C# side already drives `FileOpenPicker`), so this forwards there and `windows-sys` leaves
+# the graph.
+#
+# Deliberately no dependencies: adding any would risk re-introducing a crate that cannot build.
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+
+[workspace]

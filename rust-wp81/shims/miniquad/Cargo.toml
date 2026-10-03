@@ -1,0 +1,23 @@
+[package]
+name = "miniquad"
+# The version must be semver-compatible with the crate being replaced, or cargo silently
+# ignores the patch and builds the real crate instead - with a warning that is easy to
+# miss in a long build log. Upstream is miniquad 0.3.15.
+version = "0.3.15"
+edition = "2021"
+
+# Shim, not a port.
+#
+# `prpr` imports `miniquad` directly as well as through macroquad, but the surface is small -
+# `Context`, `Texture`/`TextureParams`/`TextureFormat`/`TextureWrap`, `RenderPass`, `UniformType`,
+# `KeyMods`, `TouchPhase`, `PassAction`, and the `gl` module that `core/render.rs` reaches into.
+#
+# The GL module is the one part that cannot be honoured: WP8.1 has no OpenGL, and D3D11 has no
+# equivalent of a multisampled renderbuffer plus blit. See rust-wp81/README.md.
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+
+[workspace]

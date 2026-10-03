@@ -1,0 +1,18 @@
+[package]
+name = "wp81-link-probe"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# The real thing: this is what prpr would be built as, and what gets linked into the C++/CX
+# app shell. A staticlib is a final artifact, so std/panic_abort supplies the panic handler.
+crate-type = ["staticlib"]
+
+[dependencies]
+wp81-compat = { path = "../compat" }
+
+[profile.release]
+opt-level = 2
+panic = "abort"
+
+[workspace]

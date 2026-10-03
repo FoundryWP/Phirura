@@ -1,0 +1,324 @@
+﻿cargo.exe : warning: unused workspace dependency `objc2-core-foundation`
+所在位置 E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\build-port.ps1:78 字符: 1
++ & $cargo @cargoArgs 2>&1 | Out-File -FilePath $cargoLog -Encoding utf ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: unused...ore-foundation`:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  --> Cargo.toml:47:1
+   |
+47 | objc2-core-foundation = "0.3.2"
+   | ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `objc2-core-foundation`
+warning: workspace (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> prpr-avc\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+21 ~ sasa = { workspace = true, default-features = false, features = ["ohos"] }
+22 + [lints]
+23 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+21 ~ sasa = { workspace = true, default-features = false, features = ["ohos"] }
+22 + [lints]
+   |
+warning: `prpr-avc` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> prpr-port\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+38 ~ libm = "0.2"
+39 + [lints]
+40 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+38 ~ libm = "0.2"
+39 + [lints]
+   |
+warning: `prpr-port` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\compat\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+15 ~ [workspace]
+16 + [lints]
+17 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+15 ~ [workspace]
+16 + [lints]
+   |
+warning: `wp81-compat` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> phira-monitor\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+30 ~ uuid = { workspace = true, features = ["v4"] }
+31 + [lints]
+32 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+30 ~ uuid = { workspace = true, features = ["v4"] }
+31 + [lints]
+   |
+warning: `phira-monitor` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> prpr-l10n\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+14 ~ walkdir = { workspace = true }
+15 + [lints]
+16 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+14 ~ walkdir = { workspace = true }
+15 + [lints]
+   |
+warning: `prpr-l10n` (manifest) generated 1 warning
+warning: unused build dependency `walkdir`
+   --> prpr\Cargo.toml:118:1
+    |
+118 | walkdir = { workspace = true }
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `walkdir`
+warning: `prpr` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> prpr-auto-offset\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+14 ~ 
+15 + [lints]
+16 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+14 ~ 
+15 + [lints]
+   |
+warning: `prpr-auto-offset` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> prpr-pbc\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+10 ~ prpr = { workspace = true }
+11 + [lints]
+12 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+10 ~ prpr = { workspace = true }
+11 + [lints]
+   |
+warning: `prpr-pbc` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> tools\auto-offset-cli\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+14 ~ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+15 + [lints]
+16 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+14 ~ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+15 + [lints]
+   |
+warning: `prpr-auto-offset-cli` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> phira-main\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+12 ~ phira = { workspace = true, default-features = false }
+13 + [lints]
+14 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+12 ~ phira = { workspace = true, default-features = false }
+13 + [lints]
+   |
+warning: `phira-main` (manifest) generated 1 warning
+   Compiling miniquad v0.3.15 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad)
+warning: variable does not need to be mutable
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\rfd\src\lib.rs:111:23
+    |
+111 |     pub fn add_filter(mut self, _name: impl Into<String>, _ext: &[&str]) -> Self {
+    |                       ----^^^^
+    |                       |
+    |                       help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `rfd` (lib) generated 1 warning (run `cargo fix --lib -p rfd` to apply 1 suggestion)
+warning: suspicious definition of the runtime `strlen` symbol used by the standard library
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\compat\src\lib.rs:813:1
+    |
+813 | pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected `unsafe extern "C" fn(*const i8) -> usize` (for the current target)
+               found `unsafe extern "C" fn(*const u8) -> usize`
+    = help: either fix the signature or remove any attributes like `#[unsafe(no_mangle)]`, `#[unsafe(export_name = "str
+len")]`, or `#[link_name = "strlen"]`
+    = help: allow this lint if the signature is compatible
+    = note: `#[warn(suspicious_runtime_symbol_definitions)]` on by default
+
+warning: `wp81-compat` (lib) generated 1 warning
+warning: function `glTexParameteri` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:701:19
+    |
+701 |     pub unsafe fn glTexParameteri(_target: u32, _pname: u32, _param: i32) {}
+    |                   ^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_tex_parameteri`
+    |
+    = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: function `glBindTexture` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:703:19
+    |
+703 |     pub unsafe fn glBindTexture(_target: u32, _texture: u32) {}
+    |                   ^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_bind_texture`
+
+warning: function `glTexSubImage2D` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:704:19
+    |
+704 |     pub unsafe fn glTexSubImage2D(
+    |                   ^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_tex_sub_image2_d`
+
+warning: function `glGetIntegerv` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:709:19
+    |
+709 |     pub unsafe fn glGetIntegerv(_pname: u32, _params: *mut i32) {}
+    |                   ^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_get_integerv`
+
+warning: function `glGenerateMipmap` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:710:19
+    |
+710 |     pub unsafe fn glGenerateMipmap(_target: u32) {}
+    |                   ^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_generate_mipmap`
+
+warning: function `glDeleteRenderbuffers` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:711:19
+    |
+711 |     pub unsafe fn glDeleteRenderbuffers(_n: i32, _ids: *const u32) {}
+    |                   ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_delete_renderbuffers`
+
+warning: function `glDeleteFramebuffers` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:712:19
+    |
+712 |     pub unsafe fn glDeleteFramebuffers(_n: i32, _ids: *const u32) {}
+    |                   ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_delete_framebuffers`
+
+warning: function `glBindFramebuffer` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:714:19
+    |
+714 |     pub unsafe fn glBindFramebuffer(_target: u32, _fb: u32) {}
+    |                   ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_bind_framebuffer`
+
+warning: function `glBlitFramebuffer` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:715:19
+    |
+715 |     pub unsafe fn glBlitFramebuffer(
+    |                   ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_blit_framebuffer`
+
+warning: function `glGetError` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:721:19
+    |
+721 |     pub unsafe fn glGetError() -> u32 {
+    |                   ^^^^^^^^^^ help: convert the identifier to snake case: `gl_get_error`
+
+warning: function `glGenRenderbuffers` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:724:19
+    |
+724 |     pub unsafe fn glGenRenderbuffers(_n: i32, _out: *mut u32) {}
+    |                   ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_gen_renderbuffers`
+
+warning: function `glBindRenderbuffer` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:725:19
+    |
+725 |     pub unsafe fn glBindRenderbuffer(_target: u32, _rb: u32) {}
+    |                   ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_bind_renderbuffer`
+
+warning: function `glRenderbufferStorageMultisample` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:726:19
+    |
+726 |     pub unsafe fn glRenderbufferStorageMultisample(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_renderbuffer_s
+torage_multisample`
+
+warning: function `glGenFramebuffers` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:730:19
+    |
+730 |     pub unsafe fn glGenFramebuffers(_n: i32, _out: *mut u32) {}
+    |                   ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_gen_framebuffers`
+
+warning: function `glFramebufferRenderbuffer` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:731:19
+    |
+731 |     pub unsafe fn glFramebufferRenderbuffer(_target: u32, _att: u32, _rbt: u32, _rb: u32) {}
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_framebuffer_renderbuf
+fer`
+
+   Compiling macroquad v0.3.25 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad)
+warning: ambiguous import visibility: pub or pub(in crate::window)
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:534:13
+    |
+534 |     pub use miniquad;
+    |             ^^^^^^^^
+    |
+    = note: ambiguous because of a conflict between a name from a glob import and an outer scope during import or macro
+ resolution
+    = note: `miniquad` could refer to a crate passed with `--extern`
+    = help: use `::miniquad` to refer to this crate unambiguously
+note: `miniquad` could also refer to the crate imported here
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:527:9
+    |
+527 |     use super::*;
+    |         ^^^^^^^^
+    = help: consider adding an explicit import of `miniquad` to disambiguate
+    = help: or use `self::miniquad` to refer to this crate unambiguously
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a f
+uture release!
+    = note: for more information, see issue #149145 <https://github.com/rust-lang/rust/issues/149145>
+    = note: `#[warn(ambiguous_import_visibilities)]` (part of `#[warn(future_incompatible)]`) on by default
+
+warning: `miniquad` (lib) generated 15 warnings
+error[E0308]: mismatched types
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:940:21
+    |
+940 |     draw_texture_ex(tex, x, y, color, DrawTextureParams::default());
+    |     --------------- ^^^ expected `Texture2D`, found `&Texture2D`
+    |     |
+    |     arguments to this function are incorrect
+    |
+note: function defined here
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:923:8
+    |
+923 | pub fn draw_texture_ex(tex: Texture2D, x: f32, y: f32, color: Color, params: DrawTextureParams) {
+    |        ^^^^^^^^^^^^^^^ --------------
+help: consider dereferencing the borrow
+    |
+940 |     draw_texture_ex(*tex, x, y, color, DrawTextureParams::default());
+    |                     +
+
+For more information about this error, try `rustc --explain E0308`.
+warning: `macroquad` (lib) generated 1 warning
+error: could not compile `macroquad` (lib) due to 1 previous error; 1 warning emitted

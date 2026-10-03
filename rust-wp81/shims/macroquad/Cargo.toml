@@ -1,0 +1,44 @@
+[package]
+name = "macroquad"
+# The version must be semver-compatible with the crate being replaced, or cargo silently
+# ignores the patch and builds the real crate instead - with a warning that is easy to
+# miss in a long build log. Upstream is macroquad 0.3.25.
+version = "0.3.25"
+edition = "2021"
+
+# A shim, not a reimplementation.
+#
+# It exposes the subset of macroquad's API that `prpr` actually uses, measured by scanning the
+# source rather than guessed at (~40 distinct items over ~130 call sites). The maths types are
+# real; the drawing functions forward to the C#/Win2D side over FFI, because on WP8.1 the
+# rendering is already solved there and re-solving it in Rust would mean writing a GL-to-D3D11
+# translation layer (see rust-wp81/README.md).
+#
+# This crate deliberately has no dependencies beyond std, so it builds for
+# thumbv7a-windows-phone without pulling anything that cannot be built there.
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+# The handle types (`Texture`, `RenderPass`, `TextureParams`, ...) live in the miniquad shim and are
+# re-exported here. They must be the *same* types in both crates: `prpr` converts between them via
+# `Texture2D::from_miniquad_texture` and `raw_miniquad_texture_handle`, and two structurally
+# identical but distinct structs would not compile at those call sites.
+miniquad = { path = "../miniquad" }
+
+# The real glam, not a hand-rolled substitute.
+#
+# macroquad does not define its own maths types - it re-exports glam's. `prpr` relies on that: it
+# calls `glam::Quat::from_rotation_z` directly, and its `Vec2`/`Mat4` are glam's, so a structurally
+# similar local type would not compile at any of the call sites that mix the two. Hand-rolling was
+# the wrong approach and left ~60 "cannot find vec2/vec3/vec4" errors.
+#
+# Version and feature must match macroquad 0.3.25 exactly (`glam 0.30`, `scalar-math`), or the types
+# are still different types. `scalar-math` also disables SIMD, which is what we want on ARM.
+glam = { version = "0.30", features = ["scalar-math"] }
+
+# macroquad's prelude re-exports the logging facade, and prpr uses `log::*` macros.
+log = "0.4"
+
+[workspace]

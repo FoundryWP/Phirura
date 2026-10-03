@@ -1,0 +1,21 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/01/nuspec.xsd">
+  <metadata minClientVersion="2.8.6">
+    <id>Win2D.win81</id>
+    <version>1.21.0</version>
+    <title>Win2D.win81</title>
+    <authors>Microsoft</authors>
+    <owners>win2d,microsoft</owners>
+    <licenseUrl>http://www.microsoft.com/web/webpi/eula/eula_win2d_10012014.htm</licenseUrl>
+    <projectUrl>http://go.microsoft.com/fwlink/?LinkID=519078</projectUrl>
+    <iconUrl>http://raw.githubusercontent.com/Microsoft/Win2D/master/samples/ExampleGallery/WindowsPhone/Assets/Square71x71Logo.scale-240.png</iconUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <description>An easy-to-use Windows Runtime API for immediate mode 2D graphics rendering.
+For Windows 8.1 and Windows Phone 8.1.</description>
+    <copyright>© Microsoft Corporation. All rights reserved.</copyright>
+    <tags>graphics 2D Direct2D DirectX WinRT XAML canvas drawing C# C++ Windows</tags>
+    <references>
+      <reference file="Microsoft.Graphics.Canvas.winmd" />
+    </references>
+  </metadata>
+</package>

@@ -1,0 +1,4 @@
+GetProcAddress
+LoadLibraryExW
+GetActiveProcessorCount
+QueryPerformanceFrequency

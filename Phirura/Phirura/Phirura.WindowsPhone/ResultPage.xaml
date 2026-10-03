@@ -1,0 +1,115 @@
+<Page
+    x:Class="Phirura.ResultPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Phirura"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Background="#FF07070B">
+
+    <Grid x:Name="RootGrid" Background="#FF07070B">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Song / level -->
+        <StackPanel Grid.Row="0" Margin="24,18,24,4">
+            <TextBlock x:Name="TitleText" Text="" FontSize="22" FontWeight="Light"
+                       Foreground="#FFF2F2F6" TextTrimming="CharacterEllipsis" />
+            <TextBlock x:Name="RankText" Text="" FontSize="13" Foreground="#FF8A8A99"
+                       Margin="0,3,0,0" />
+        </StackPanel>
+
+        <!-- Score block -->
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="24,6,24,6">
+                <TextBlock x:Name="ScoreText" Text="0" FontSize="62" FontWeight="Light"
+                           Foreground="#FFF2F2F6" HorizontalAlignment="Center" />
+                <TextBlock x:Name="AccText" Text="0.00%" FontSize="20"
+                           Foreground="#FF8FD4FF" HorizontalAlignment="Center" />
+
+                <Border Background="#FF14141C" Margin="0,20,0,0" Padding="16,14,16,14">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="PERFECT" FontSize="14"
+                                   Foreground="#FF8A8A99" Margin="0,3,0,3" />
+                        <TextBlock x:Name="PerfectText" Grid.Row="0" Grid.Column="1" Text="0"
+                                   FontSize="14" Foreground="#FFF2F2F6"
+                                   HorizontalAlignment="Right" Margin="0,3,0,3" />
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="GOOD" FontSize="14"
+                                   Foreground="#FF8A8A99" Margin="0,3,0,3" />
+                        <TextBlock x:Name="GoodText" Grid.Row="1" Grid.Column="1" Text="0"
+                                   FontSize="14" Foreground="#FFF2F2F6"
+                                   HorizontalAlignment="Right" Margin="0,3,0,3" />
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="BAD" FontSize="14"
+                                   Foreground="#FF8A8A99" Margin="0,3,0,3" />
+                        <TextBlock x:Name="BadText" Grid.Row="2" Grid.Column="1" Text="0"
+                                   FontSize="14" Foreground="#FFF2F2F6"
+                                   HorizontalAlignment="Right" Margin="0,3,0,3" />
+
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="MISS" FontSize="14"
+                                   Foreground="#FF8A8A99" Margin="0,3,0,3" />
+                        <TextBlock x:Name="MissText" Grid.Row="3" Grid.Column="1" Text="0"
+                                   FontSize="14" Foreground="#FFF2F2F6"
+                                   HorizontalAlignment="Right" Margin="0,3,0,3" />
+                    </Grid>
+                </Border>
+
+                <Border Background="#FF14141C" Margin="0,10,0,0" Padding="16,14,16,14">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="最大连击" FontSize="14"
+                                   Foreground="#FF8A8A99" Margin="0,3,0,3" />
+                        <TextBlock x:Name="ComboText" Grid.Row="0" Grid.Column="1" Text="0"
+                                   FontSize="14" Foreground="#FFF2F2F6"
+                                   HorizontalAlignment="Right" Margin="0,3,0,3" />
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="音符总数" FontSize="14"
+                                   Foreground="#FF8A8A99" Margin="0,3,0,3" />
+                        <TextBlock x:Name="NotesText" Grid.Row="1" Grid.Column="1" Text="0"
+                                   FontSize="14" Foreground="#FFF2F2F6"
+                                   HorizontalAlignment="Right" Margin="0,3,0,3" />
+                    </Grid>
+                </Border>
+
+                <TextBlock x:Name="EarlyLateText" Text="" FontSize="13"
+                           Foreground="#FF8A8A99" HorizontalAlignment="Center" Margin="0,12,0,0" />
+
+                <TextBlock x:Name="HintText" Text="" FontSize="12"
+                           Foreground="#FF6A6A7A" TextWrapping="Wrap"
+                           HorizontalAlignment="Center" Margin="0,10,0,0" />
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Actions -->
+        <StackPanel Grid.Row="2" Margin="24,8,24,18">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                <Button Content="再来一次" Click="RetryButton_Click" />
+                <Button Content="返回列表" Click="BackButton_Click" Margin="12,0,0,0" />
+            </StackPanel>
+        </StackPanel>
+    </Grid>
+</Page>
