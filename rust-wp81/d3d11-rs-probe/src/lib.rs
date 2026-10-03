@@ -63,6 +63,13 @@ struct State {
     width: u32,
     height: u32,
     vertex_count: usize,
+    /// A monotonic "how far did we get" counter, bumped *before* each risky native call.
+    ///
+    /// On the phone there is no debugger and a hard fault kills the process before `AppLog` flushes,
+    /// so the last value this reached is the only evidence of where it died. C# reads it with
+    /// [`wp81_rs_tick`] right after `wp81_rs_start` returns *and* from a watchdog that runs during
+    /// the frame loop - so even a crash inside the native call leaves a number behind.
+    tick: i32,
 }
 
 /// Added to the raw swapchain step (20..25) so `stage` cannot be confused with the coarse
@@ -84,11 +91,29 @@ static mut STATE: State = State {
     width: 0,
     height: 0,
     vertex_count: 0,
+    tick: 0,
 };
 
 #[inline]
 unsafe fn st() -> &'static mut State {
     &mut *core::ptr::addr_of_mut!(STATE)
+}
+
+/// Advance the progress counter and return it.
+///
+/// Called immediately *before* each native call that could fault, so `wp81_rs_tick()` afterwards
+/// names the last call that was entered. Cheap enough to keep in release builds.
+#[inline]
+unsafe fn bump(s: &mut State, n: i32) -> i32 {
+    s.tick = n;
+    n
+}
+
+/// Set the progress tick from another module of this crate (see `renderer.rs`). Kept as a free
+/// function so the swapchain code does not need access to `STATE`.
+#[inline]
+pub(crate) unsafe fn set_tick(n: i32) {
+    st().tick = n;
 }
 
 // ===========================================================================
@@ -104,6 +129,8 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
     let s = st();
     s.width = width;
     s.height = height;
+    // tick 1 is set by the C# side before it even calls in; see RustRenderer.Start.
+    bump(s, 2); // create_device: DXGI factory + adapter enumeration + D3D11CreateDevice
 
     let (device, context, level, _desc) = match create_device() {
         Some(v) => v,
@@ -116,6 +143,7 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
     s.context = context;
     let _ = level;
 
+    bump(s, 10); // create_swapchain_for_panel_traced (QI/GetAdapter/GetParent/Create)
     let swapchain = match create_swapchain_for_panel_traced(device, panel, width, height, s.sc_trace.as_mut_ptr()) {
         Some(sc) => {
             // SC_CREATE_OK + the accepted variant index, for the log.
@@ -140,6 +168,7 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
         *mut *mut c_void,
     ) -> HRESULT = swapchain.method(IDXGISWAPCHAIN_GETBUFFER);
     let mut backbuffer = ComPtr::NULL;
+    bump(s, 20); // IDXGISwapChain::GetBuffer(0)
     if get_buffer(
         swapchain.vtbl as *mut c_void,
         0,
@@ -158,6 +187,7 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
         *mut *mut c_void,
     ) -> HRESULT = device.method(D3D11DEVICE_CREATERENDERTARGETVIEW);
     let mut rtv = ComPtr::NULL;
+    bump(s, 21); // ID3D11Device::CreateRenderTargetView(backbuffer)
     let hr = create_rtv(
         device.vtbl as *mut c_void,
         backbuffer.vtbl as *mut c_void,
@@ -172,6 +202,7 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
     }
     s.rtv = rtv;
 
+    bump(s, 30); // build_pipeline: D3DCompile x2, Create*Shader, CreateInputLayout, buffers, states
     let pipeline = match build_pipeline(device, context) {
         Some(p) => p,
         None => {
@@ -180,6 +211,7 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
         }
     };
     // ... and the 1x1 white texture the test quad samples.
+    bump(s, 40); // create_test_texture: CreateTexture2D + CreateShaderResourceView
     if !create_test_texture(device, s) {
         s.stage = 6;
         return 6;
@@ -196,8 +228,10 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
     };
     let set_viewports: extern "system" fn(*mut c_void, UINT, *const D3D11_VIEWPORT) =
         context.method(D3D11CONTEXT_RSSETVIEWPORTS);
+    bump(s, 50); // RSSetViewports
     set_viewports(context.vtbl as *mut c_void, 1, &vp);
 
+    bump(s, 99); // fully up
     s.stage = 0;
     0
 }
@@ -290,6 +324,8 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
         None => return -1,
     };
     let ctx = s.context;
+    // `set_tick` (not `bump(s, ..)`) because `p` holds an immutable borrow of `s.pipeline` here.
+    set_tick(60); // frame: Map(constant buffer) + Map(vertex buffer) + bind + Draw(4)
 
     // ---- upload the projection (one float4x4) ----
     let map: extern "system" fn(
@@ -416,10 +452,12 @@ pub unsafe extern "C" fn wp81_rs_present() -> i32 {
     if s.swapchain.is_null() {
         return -1;
     }
+    bump(s, 70); // IDXGISwapChain::Present
     let present: extern "system" fn(*mut c_void, UINT, UINT) -> HRESULT =
         s.swapchain.method(IDXGISWAPCHAIN_PRESENT);
     let hr = present(s.swapchain.vtbl as *mut c_void, 1, 0);
     s.last_hr = hr;
+    bump(s, 61); // back to "frame finished" so a later crash is not blamed on Present
     hr
 }
 
@@ -504,6 +542,57 @@ pub unsafe extern "C" fn wp81_rs_sc_variant_name() -> *const u8 {
 #[no_mangle]
 pub unsafe extern "C" fn wp81_rs_vertex_count() -> u32 {
     st().vertex_count as u32
+}
+
+/// The last native step entered (see [`wp81_rs_tick_name`]).
+///
+/// Read right after `wp81_rs_start` returns, and again from a timer while the frame loop runs: if
+/// the process dies inside a native call, this is the highest number the faulting call reached.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_tick() -> i32 {
+    st().tick
+}
+
+/// A short ASCII name for a progress tick. NUL-terminated, so C# can read it with `PtrToStringAnsi`.
+///
+/// 1 = C# is about to call wp81_rs_start (set by the managed side)
+/// 2 = create_device        (DXGI factory, adapter enum, D3D11CreateDevice)
+/// 10..16 = the switch/panel attach path inside create_swapchain_for_panel_traced
+/// 20 = IDXGISwapChain::GetBuffer(0)
+/// 21 = ID3D11Device::CreateRenderTargetView
+/// 30 = build_pipeline (D3DCompile x2, shaders, input layout, buffers, states)
+/// 40 = create_test_texture
+/// 50 = RSSetViewports
+/// 60 = frame: Map constant buffer / Map vertex buffer / bind / Draw(4)
+/// 70 = IDXGISwapChain::Present
+/// 99 = fully up
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_tick_name() -> *const u8 {
+    let t = st().tick;
+    let s: &[u8] = match t {
+        0 => b"(none)\0",
+        1 => b"C# -> wp81_rs_start\0",
+        2 => b"create_device (factory/adapter/D3D11CreateDevice)\0",
+        3..=9 => b"create_device: inside\0",
+        10 => b"swapchain: enter (QI IDXGIDevice)\0",
+        11 => b"swapchain: IDXGIDevice::GetAdapter\0",
+        12 => b"swapchain: IDXGIAdapter::GetParent(IDXGIFactory2)\0",
+        13 => b"swapchain: CreateSwapChainForComposition\0",
+        14 => b"swapchain: panel QueryInterface(ISwapChainPanelNative)\0",
+        15 => b"swapchain: ISwapChainPanelNative::SetSwapChain\0",
+        16 => b"swapchain: done\0",
+        20 => b"IDXGISwapChain::GetBuffer(0)\0",
+        21 => b"ID3D11Device::CreateRenderTargetView\0",
+        30 => b"build_pipeline (compile shaders / create states)\0",
+        40 => b"create_test_texture\0",
+        50 => b"RSSetViewports\0",
+        60 => b"frame: Map/bind/Draw(4)\0",
+        61 => b"frame: done\0",
+        70 => b"IDXGISwapChain::Present\0",
+        99 => b"fully up\0",
+        _ => b"(unknown tick)\0",
+    };
+    s.as_ptr()
 }
 
 // ===========================================================================

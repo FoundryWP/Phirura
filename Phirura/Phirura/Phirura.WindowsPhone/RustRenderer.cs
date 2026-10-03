@@ -65,6 +65,12 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr wp81_rs_sc_variant_name();
 
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_tick();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr wp81_rs_tick_name();
+
         private static bool _started;
 
         public static bool Started { get { return _started; } }
@@ -142,12 +148,74 @@ namespace Phirura
         {
             int stage = Stage;
             int hr = LastHr;
-            string s = "stage=" + stage + " hr=0x" + hr.ToString("X8");
+            string s = "stage=" + stage + " hr=0x" + hr.ToString("X8") + " tick=" + Tick + " (" + TickName + ")";
             if (stage >= 100)
             {
                 s += "  swapchain-step=" + ScStepName + " (code " + ScStep + ")";
             }
             return s;
+        }
+
+        /// <summary>
+        /// The last native step Rust entered - the only evidence of where a hard fault happened,
+        /// since the phone has no debugger and the log buffers are lost when the process dies.
+        /// </summary>
+        public static int Tick
+        {
+            get
+            {
+                try { return wp81_rs_tick(); }
+                catch (Exception) { return -1000; }
+            }
+        }
+
+        /// <summary>The progress tick by name, e.g. "swapchain: CreateSwapChainForComposition".</summary>
+        public static string TickName
+        {
+            get
+            {
+                try
+                {
+                    IntPtr p = wp81_rs_tick_name();
+                    return p == IntPtr.Zero ? "(null)" : Marshal.PtrToStringAnsi(p);
+                }
+                catch (Exception) { return "(unavailable)"; }
+            }
+        }
+
+        /// <summary>
+        /// The last tick this side actually observed *live*, kept in managed memory.
+        ///
+        /// <see cref="Tick"/> reads the DLL's counter, but if the process dies inside a native call
+        /// that read never happens. This value is refreshed by a timer while the frame loop runs, so
+        /// it always holds the last step that was known to be executing - the crash's address, in
+        /// effect. -1 means nothing was sampled yet.
+        /// </summary>
+        public static int LastSeenTick { get { return _lastSeenTick; } }
+
+        /// <summary>Name for <see cref="LastSeenTick"/>, also kept in managed memory.</summary>
+        public static string LastSeenTickName { get { return _lastSeenTickName; } }
+
+        private static int _lastSeenTick = -1;
+        private static string _lastSeenTickName = "(never)";
+
+        /// <summary>
+        /// Read the DLL's tick once and remember it. Called from a 200 ms timer on the page, so the
+        /// value survives a native fault that would otherwise kill the process before any log write.
+        /// Returns true if the tick changed since the previous sample.
+        /// </summary>
+        public static bool SampleTick()
+        {
+            int t;
+            try { t = wp81_rs_tick(); }
+            catch (Exception) { return false; }
+            if (t == _lastSeenTick)
+            {
+                return false;
+            }
+            _lastSeenTick = t;
+            _lastSeenTickName = TickName;
+            return true;
         }
 
         /// <summary>
@@ -172,15 +240,33 @@ namespace Phirura
             try
             {
                 IntPtr native = Marshal.GetIUnknownForObject(panel);
+                if (native == IntPtr.Zero)
+                {
+                    AppLog.WriteSync("RustRenderer.Start: GetIUnknownForObject returned null");
+                    return false;
+                }
+
                 int rc;
+                // Log BEFORE the native call: if the process dies inside wp81_rs_start this line is
+                // the proof of entry, and Rust's progress tick (read by the watchdog) says where.
+                AppLog.WriteSync("RustRenderer.Start: calling native wp81_rs_start(0x"
+                    + native.ToString("X8") + ", " + pixelWidth + "x" + pixelHeight + ")");
                 try
                 {
                     rc = wp81_rs_start(native, pixelWidth, pixelHeight);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.WriteSync("RustRenderer.Start: native call threw", ex);
+                    return false;
                 }
                 finally
                 {
                     Marshal.Release(native);
                 }
+
+                AppLog.WriteSync("RustRenderer.Start: native returned rc=" + rc
+                    + " tick=" + Tick + " (" + TickName + ")");
 
                 if (rc != 0)
                 {
@@ -190,7 +276,7 @@ namespace Phirura
 
                 _started = true;
                 AppLog.WriteSync("RustRenderer.Start: up. " + pixelWidth + "x" + pixelHeight
-                    + " stage=0");
+                    + " stage=0 tick=" + Tick + " (" + TickName + ")");
                 return true;
             }
             catch (Exception ex)

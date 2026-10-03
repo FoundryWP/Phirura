@@ -33,6 +33,15 @@ use core::ffi::c_void;
 use direct::*;
 use renderer::*;
 
+/// The renderer module reports its progress through `crate::set_tick`. On the phone that lives in
+/// `lib.rs` next to the exported `wp81_rs_tick`; this harness has no exports, so the same counter
+/// is kept in its own static and simply ignored. It must exist for `renderer.rs` to compile here.
+static mut HOST_TICK: i32 = 0;
+
+pub(crate) unsafe fn set_tick(n: i32) {
+    HOST_TICK = n;
+}
+
 // --------------------------------------------------------------------------
 // minimal user32 binding: just enough for a hidden window
 // --------------------------------------------------------------------------

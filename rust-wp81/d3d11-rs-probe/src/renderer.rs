@@ -261,6 +261,7 @@ pub unsafe fn create_swapchain_for_panel_traced(
     }
 
     // IDXGIDevice is needed to get the adapter's factory.
+    crate::set_tick(10); // QI IDXGIDevice
     let mut dxgi_device = ComPtr::NULL;
     let hr = device.query_interface(&IID_IDXGIDEVICE, &mut dxgi_device.vtbl as *mut _ as *mut *mut c_void);
     if hr < 0 || dxgi_device.is_null() {
@@ -270,6 +271,7 @@ pub unsafe fn create_swapchain_for_panel_traced(
     let mut adapter = ComPtr::NULL;
     // IDXGIDevice::GetAdapter is slot 7 (IUnknown 0..2, IDXGIObject 3..6).
     let get_adapter: extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT = dxgi_device.method(7);
+    crate::set_tick(11); // IDXGIDevice::GetAdapter
     let hr = get_adapter(dxgi_device.vtbl as *mut c_void, &mut adapter.vtbl as *mut _ as *mut *mut c_void);
     if hr < 0 || adapter.is_null() {
         dxgi_device.release();
@@ -280,6 +282,7 @@ pub unsafe fn create_swapchain_for_panel_traced(
     // IDXGIAdapter::GetParent(IID_IDXGIFactory2) is slot 6.
     let get_parent: extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> HRESULT =
         adapter.method(6);
+    crate::set_tick(12); // IDXGIAdapter::GetParent
     let hr = get_parent(
         adapter.vtbl as *mut c_void,
         &IID_IDXGIFACTORY2,
@@ -340,6 +343,7 @@ pub unsafe fn create_swapchain_for_panel_traced(
     let mut swapchain = ComPtr::NULL;
     let mut hr = E_INVALIDARG;
     let mut chosen: u32 = 0xFFFF_FFFF;
+    crate::set_tick(13); // CreateSwapChainForComposition
     for (i, v) in variants.iter().enumerate() {
         let scd = DXGI_SWAP_CHAIN_DESC1 {
             Width: width,
@@ -389,6 +393,7 @@ pub unsafe fn create_swapchain_for_panel_traced(
 
 
     // Hand the swapchain to XAML.
+    crate::set_tick(14); // panel QI
     let mut native = ComPtr::NULL;
     let panel_ptr = ComPtr { vtbl: panel as *const *const usize };
     let hr = panel_ptr.query_interface(
@@ -402,6 +407,7 @@ pub unsafe fn create_swapchain_for_panel_traced(
     }
     let set_swapchain: extern "system" fn(*mut c_void, *mut c_void) -> HRESULT =
         native.method(ISWAPCHAINPANELNATIVE_SETSWAPCHAIN);
+    crate::set_tick(15); // SetSwapChain
     let hr = set_swapchain(native.vtbl as *mut c_void, swapchain.vtbl as *mut c_void);
     native.release();
     if hr < 0 {
@@ -409,6 +415,7 @@ pub unsafe fn create_swapchain_for_panel_traced(
         note(trace, SC_SET_SWAPCHAIN, hr);
         return None;
     }
+    crate::set_tick(16); // done
     Some(swapchain)
 }
 

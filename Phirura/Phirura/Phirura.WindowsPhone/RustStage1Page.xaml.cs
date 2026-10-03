@@ -27,6 +27,7 @@ namespace Phirura
         private readonly Stopwatch _clock = new Stopwatch();
         private int _frames;
         private bool _hookAttached;
+        private Windows.UI.Xaml.DispatcherTimer _watchdog;
 
         public RustStage1Page()
         {
@@ -39,6 +40,22 @@ namespace Phirura
             base.OnNavigatedTo(e);
             // Wait for the panel to have a measured size before creating a swapchain against it.
             this.Loaded += OnPageLoaded;
+            // A low-frequency sampler: it reads Rust's native progress counter and keeps the value
+            // in managed memory. If a native call hard-faults the process, the log's last line is
+            // whatever this last saw - the only crash localisation available without a debugger.
+            _watchdog = new Windows.UI.Xaml.DispatcherTimer();
+            _watchdog.Interval = TimeSpan.FromMilliseconds(200);
+            _watchdog.Tick += OnWatchdogTick;
+            _watchdog.Start();
+        }
+
+        private void OnWatchdogTick(object sender, object e)
+        {
+            if (RustRenderer.SampleTick())
+            {
+                AppLog.WriteSync("RustStage1: tick -> " + RustRenderer.LastSeenTick
+                    + " (" + RustRenderer.LastSeenTickName + ")");
+            }
         }
 
         protected override void OnNavigatedFrom(NavigationEventArgs e)
@@ -50,6 +67,8 @@ namespace Phirura
         private void OnPageLoaded(object sender, RoutedEventArgs e)
         {
             this.Loaded -= OnPageLoaded;
+            AppLog.WriteSync("RustStage1: OnPageLoaded; ActualWidth=" + RustPanel.ActualWidth
+                + " ActualHeight=" + RustPanel.ActualHeight);
             // The panel must be laid out before its pixel size is meaningful.
             // On WP8.1 CoreDispatcher has RunAsync, not BeginInvoke.
             var ignore = this.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal,
@@ -58,10 +77,13 @@ namespace Phirura
 
         private async void StartRenderer()
         {
+            AppLog.WriteSync("RustStage1: StartRenderer entered");
             // One more layout pass: the first frame after navigation can report 0x0.
             await System.Threading.Tasks.Task.Delay(60);
+
             if (RustRenderer.Started)
             {
+                AppLog.WriteSync("RustStage1: already started, skipping");
                 return;
             }
 
@@ -71,6 +93,8 @@ namespace Phirura
 
             uint w = (uint)Math.Max(1.0, Math.Round(RustPanel.ActualWidth * scale));
             uint h = (uint)Math.Max(1.0, Math.Round(RustPanel.ActualHeight * scale));
+            AppLog.WriteSync("RustStage1: panel " + RustPanel.ActualWidth + "x" + RustPanel.ActualHeight
+                + " -> " + w + "x" + h + " px @ " + scale.ToString("0.0"));
 
             bool ok = RustRenderer.Start(RustPanel, w, h);
             AppLog.WriteSync("RustStage1: Start(" + w + "x" + h + " @ " + scale.ToString("0.0") + ") -> " + ok
@@ -154,6 +178,12 @@ namespace Phirura
 
         private void TearDown()
         {
+            if (_watchdog != null)
+            {
+                _watchdog.Stop();
+                _watchdog.Tick -= OnWatchdogTick;
+                _watchdog = null;
+            }
             if (_hookAttached)
             {
                 CompositionTarget.Rendering -= OnFrame;
