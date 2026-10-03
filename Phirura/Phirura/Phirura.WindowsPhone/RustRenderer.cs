@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 using Windows.UI.Xaml.Controls;
 
 namespace Phirura
@@ -37,6 +38,18 @@ namespace Phirura
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_rs_reached();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint wp81_rs_vt_count();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint wp81_rs_vt_entry(uint i);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_factory_is_current();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_factory_qi_hr();
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_rs_clear(float r, float g, float b, float a);
@@ -225,6 +238,52 @@ namespace Phirura
         }
 
         /// <summary>
+        /// Log the vtable snapshot Rust recorded for the DXGI factory (see `dump_vtable`).
+        ///
+        /// This is the one question that cannot be asked any other way on the phone: does the object
+        /// `GetParent(IID_IDXGIFactory2)` handed back actually have a slot 24? A short table is what
+        /// makes `CreateSwapChainForComposition` jump into garbage and hard-fault.
+        /// </summary>
+        public static void LogVtable()
+        {
+            try
+            {
+                uint count = wp81_rs_vt_count();
+                AppLog.WriteSync("RustRenderer.vtable: readable slots = " + count);
+                if (count == 0)
+                {
+                    return;
+                }
+                StringBuilder sb = new StringBuilder();
+                sb.Append("RustRenderer.vtable:");
+                uint n = Math.Min(count, 26u);
+                for (uint i = 0; i < n; i++)
+                {
+                    uint p = wp81_rs_vt_entry(i);
+                    sb.Append(' ');
+                    sb.Append(i);
+                    sb.Append("=0x");
+                    sb.Append(p.ToString("X8"));
+                }
+                AppLog.WriteSync(sb.ToString());
+                // Slot 24 is CreateSwapChainForComposition - the call that faults.
+                uint s3 = wp81_rs_vt_entry(3);
+                uint s24 = wp81_rs_vt_entry(24);
+                AppLog.WriteSync("RustRenderer.vtable: slot3(GetParent)=0x" + s3.ToString("X8")
+                    + " slot24(CreateSwapChainForComposition)=0x" + s24.ToString("X8")
+                    + (s24 == 0 ? "  <-- NULL: table is too short!" : ""));
+                // The factory soundness probe: a sane IsCurrent plus a successful QI round-trip
+                // means the factory object is good and only slot 24 faults.
+                AppLog.WriteSync("RustRenderer.factory: IsCurrent=" + wp81_rs_factory_is_current()
+                    + " QI(IDXGIFactory2) hr=0x" + wp81_rs_factory_qi_hr().ToString("X8"));
+            }
+            catch (Exception ex)
+            {
+                AppLog.WriteSync("RustRenderer.LogVtable failed", ex);
+            }
+        }
+
+        /// <summary>
         /// Bisect a hard fault inside start-up by running the native bring-up in steps, logging each.
         ///
         /// Each call stops *before* the next risky native call. If the process survives step N but
@@ -243,11 +302,12 @@ namespace Phirura
 
             // Steps, in order, and what the *next* call after each one does. Keep in sync with
             // wp81_rs_start_upto in rust-wp81/d3d11-rs-probe/src/lib.rs.
-            int[] limits = new int[] { 2, 10, 16, 20, 21, 30, 40, 50, 99 };
+            int[] limits = new int[] { 2, 10, 13, 16, 20, 21, 30, 40, 50, 99 };
             string[] after = new string[]
             {
                 "next: create_swapchain_for_panel_traced (QI/GetAdapter/GetParent/Create/attach)",
                 "next: enter the swapchain+panel-attach path",
+                "next: CreateSwapChainForComposition  <-- the call that has been faulting",
                 "next: IDXGISwapChain::GetBuffer(0) + CreateRenderTargetView",
                 "next: ID3D11Device::CreateRenderTargetView",
                 "next: build_pipeline (D3DCompile + Create*Shader + CreateInputLayout + buffers/states)",
@@ -286,7 +346,8 @@ namespace Phirura
                     try { reached = wp81_rs_reached(); }
                     catch (Exception) { }
                     AppLog.WriteSync("RustRenderer.Bisect: step limit=" + limit + " returned rc=" + rc
-                        + " reached=" + reached);
+                        + " reached=" + reached + " stage=" + Stage
+                        + " hr=0x" + LastHr.ToString("X8"));
                     if (rc != 0)
                     {
                         AppLog.WriteSync("RustRenderer.Bisect: step limit=" + limit + " FAILED rc=" + rc
@@ -294,7 +355,44 @@ namespace Phirura
                         return lastOk;
                     }
                     lastOk = reached;
+                    // The step that builds the swapchain is also where the factory vtable gets
+                    // snapshotted. Log it as soon as that step has succeeded, because the NEXT step
+                    // is the one that dies and takes the log's tail with it.
+                    if (limit == 10 || limit == 13)
+                    {
+                        LogVtable();
+                    }
+                    // Each limited run leaves partial state behind; tear it down so the next step
+                    // starts clean and eight steps do not leak eight devices.
+                    try { wp81_rs_stop(); } catch (Exception) { }
                 }
+
+                // Bisecting is done and nothing faulted: now run the real thing in one piece.
+                // This is the call that actually produces pixels, so it must be the last one.
+                AppLog.WriteSync("RustRenderer.Bisect: bisect clean; running full start-up (limit=0)");
+                int rcFull;
+                try
+                {
+                    rcFull = wp81_rs_start_upto(native, pixelWidth, pixelHeight, 0);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.WriteSync("RustRenderer.Bisect: full start-up threw", ex);
+                    return lastOk;
+                }
+                int reachedFull = -1;
+                try { reachedFull = wp81_rs_reached(); }
+                catch (Exception) { }
+                AppLog.WriteSync("RustRenderer.Bisect: full start-up returned rc=" + rcFull
+                    + " reached=" + reachedFull + " stage=" + Stage
+                    + " hr=0x" + LastHr.ToString("X8")
+                    + " swapchain-variant=" + ScVariant + " (" + ScVariantName + ")");
+                if (rcFull != 0)
+                {
+                    AppLog.WriteSync("RustRenderer.Bisect: full start-up FAILED " + Diagnose());
+                    return lastOk;
+                }
+                lastOk = reachedFull;
             }
             finally
             {

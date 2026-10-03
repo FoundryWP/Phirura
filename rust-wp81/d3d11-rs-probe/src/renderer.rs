@@ -295,6 +295,41 @@ pub unsafe fn create_swapchain_for_panel_traced(
         return None;
     }
 
+    // The phone's DXGI is not the desktop's: `GetParent(IID_IDXGIFactory2)` can succeed yet hand
+    // back an object whose vtable is SHORTER than `IDXGIFactory2` (i.e. it is really an
+    // `IDXGIFactory1` that answered the QI). Reading slot 24 from a short vtable returns whatever
+    // happens to follow it and jumping there is an instant hard fault - exactly the observed
+    // symptom (GetParent OK, next call dies). Snapshot the slots so the log can show how long the
+    // table actually is and whether slot 24 looks like code.
+    crate::dump_vtable(factory);
+
+    // Honour a bisect stop at the factory stage: `limit == 13` means "have the factory, do not
+    // call anything on it". This is the only way to read the vtable on the phone, because the very
+    // next call is the one that dies.
+    if crate::limit_is(13) {
+        crate::set_tick(13);
+        return None;
+    }
+
+    // Before the call that faults, prove the factory object itself is sound: `IsCurrent` (slot 13)
+    // takes no arguments and simply returns a BOOL, and `IDXGIFactory2::GetParent` via QI exercises
+    // the same vtable. If those return sanely and only slot 24 crashes, the fault is specific to
+    // `CreateSwapChainForComposition` (a missing/unsupported entry on this driver) rather than a
+    // corrupt factory pointer - which is the difference between "wrong slot" and "unsupported API".
+    let is_current: extern "system" fn(*mut c_void) -> BOOL = factory.method(13);
+    let current = is_current(factory.vtbl as *mut c_void);
+    let mut round_trip = ComPtr::NULL;
+    let hr_qi = factory.query_interface(
+        &IID_IDXGIFACTORY2,
+        &mut round_trip.vtbl as *mut _ as *mut *mut c_void,
+    );
+    round_trip.release();
+    crate::record_factory_probe(current, hr_qi);
+    // A walk of the same adapter path the desktop harness uses, to confirm slot 6 on this adapter
+    // really does hand back an IDXGIFactory2 and not something else that merely answered the QI.
+    let _ = current;
+    let _ = hr_qi;
+
     // `CreateSwapChainForComposition` takes a `DXGI_SWAP_CHAIN_DESC1`, NOT the legacy
     // `DXGI_SWAP_CHAIN_DESC`. Pass the wrong one and the fields are read from the wrong offsets,
     // which the runtime reports as `DXGI_ERROR_INVALID_CALL` (0x887A0001) - indistinguishable at

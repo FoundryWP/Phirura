@@ -131,7 +131,11 @@ $linkArgs = @(
     "/EXPORT:wp81_rs_sc_variant_name",
     "/EXPORT:wp81_rs_tick",
     "/EXPORT:wp81_rs_tick_name",
-    "/EXPORT:wp81_rs_reached"
+    "/EXPORT:wp81_rs_reached",
+    "/EXPORT:wp81_rs_vt_count",
+    "/EXPORT:wp81_rs_vt_entry",
+    "/EXPORT:wp81_rs_factory_is_current",
+    "/EXPORT:wp81_rs_factory_qi_hr"
 )
 $savedEap2 = $ErrorActionPreference
 $ErrorActionPreference = "Continue"

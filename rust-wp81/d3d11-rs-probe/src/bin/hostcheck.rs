@@ -42,6 +42,18 @@ pub(crate) unsafe fn set_tick(n: i32) {
     HOST_TICK = n;
 }
 
+/// `renderer.rs` also snapshots the factory vtable on the phone (a diagnostic for the composition
+/// swapchain fault). The harness's HWND path does not need it, so this is a no-op stub.
+pub(crate) unsafe fn dump_vtable(_obj: direct::ComPtr) {}
+
+/// The bisect limit is a phone-only concept; the harness always runs to completion.
+pub(crate) unsafe fn limit_is(_n: i32) -> bool {
+    false
+}
+
+/// The factory soundness probe is phone-only too; the harness's HWND path succeeds and needs none.
+pub(crate) unsafe fn record_factory_probe(_is_current: i32, _qi_hr: i32) {}
+
 // --------------------------------------------------------------------------
 // minimal user32 binding: just enough for a hidden window
 // --------------------------------------------------------------------------

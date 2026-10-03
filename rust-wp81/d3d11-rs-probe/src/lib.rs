@@ -122,18 +122,128 @@ pub(crate) unsafe fn set_tick(n: i32) {
     st().tick = n;
 }
 
+// ===========================================================================
+// vtable snapshot (diagnostic for the composition-swapchain hard fault)
+// ===========================================================================
+
+/// How many vtable slots [`dump_vtable`] records. `IDXGIFactory2`'s last method is slot 24
+/// (`CreateSwapChainForComposition`), so 32 covers it plus slack to see if the table simply ends.
+pub const VT_SLOTS: usize = 32;
+
+/// The class name (or a marker) of whatever vtable was dumped last.
+pub static mut VT_CLASS: [u8; 64] = [0; 64];
+/// The recorded function pointers themselves.
+pub static mut VT_ENTRIES: [usize; VT_SLOTS] = [0; VT_SLOTS];
+/// How many entries were readable before a null/garbage slot was seen.
+pub static mut VT_COUNT: usize = 0;
+
+/// Snapshot up to [`VT_SLOTS`] function pointers from a COM object's vtable.
+///
+/// The point is to answer, on the phone, "does this object actually have a slot 24?" - a question
+/// that cannot be asked any other way without a debugger. A slot that reads back as 0 (or as a
+/// pointer outside the code range) is the tell that the vtable is shorter than assumed and the
+/// call we are about to make will jump into garbage.
+pub(crate) unsafe fn dump_vtable(obj: ComPtr) {
+    let class = &mut *core::ptr::addr_of_mut!(VT_CLASS);
+    for b in class.iter_mut() {
+        *b = 0;
+    }
+    let entries = &mut *core::ptr::addr_of_mut!(VT_ENTRIES);
+    for e in entries.iter_mut() {
+        *e = 0;
+    }
+    VT_COUNT = 0;
+    if obj.is_null() {
+        return;
+    }
+    let vtable: *const usize = *obj.vtbl;
+    if vtable.is_null() {
+        return;
+    }
+    let mut n = 0usize;
+    while n < VT_SLOTS {
+        let p = *vtable.add(n);
+        entries[n] = p;
+        n += 1;
+        if p == 0 {
+            break;
+        }
+    }
+    VT_COUNT = n;
+}
+
+/// Number of readable vtable slots in the last [`dump_vtable`] (0 = nothing dumped).
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_vt_count() -> u32 {
+    VT_COUNT as u32
+}
+
+/// The recorded vtable slot `i` (0 if out of range or not dumped). C# formats it as hex.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_vt_entry(i: u32) -> usize {
+    if (i as usize) >= VT_SLOTS {
+        return 0;
+    }
+    let entries = &*core::ptr::addr_of!(VT_ENTRIES);
+    entries[i as usize]
+}
+
+/// True when the current [`wp81_rs_start_upto`] run asked to stop at exactly `n`.
+///
+/// Used by sub-steps that live *inside* the swapchain path: `renderer.rs` calls this at its own
+/// boundaries so a run with `limit = 13` can obtain the DXGI factory and then stop before the call
+/// that would fault, letting C# read the vtable snapshot.
+#[inline]
+pub(crate) unsafe fn limit_is(n: i32) -> bool {
+    st().limit == n
+}
+
+// ===========================================================================
+// factory soundness probe
+// ===========================================================================
+
+/// `IDXGIFactory2::IsCurrent()` result from the last swapchain attempt (-1 = not run).
+pub static mut FACTORY_IS_CURRENT: i32 = -1;
+/// HRESULT of a `QueryInterface(IID_IDXGIFactory2)` round-trip on that same object.
+pub static mut FACTORY_QI_HR: i32 = 0;
+
+/// Record the harmless-method probe run just before `CreateSwapChainForComposition`.
+///
+/// A sane `IsCurrent` plus a successful QI round-trip means the factory pointer and its vtable are
+/// valid, which isolates a hard fault at slot 24 to that one entry rather than to corruption.
+pub(crate) unsafe fn record_factory_probe(is_current: i32, qi_hr: i32) {
+    FACTORY_IS_CURRENT = is_current;
+    FACTORY_QI_HR = qi_hr;
+}
+
+/// `IDXGIFactory2::IsCurrent()` as observed on the phone; -1 means the probe did not run.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_factory_is_current() -> i32 {
+    FACTORY_IS_CURRENT
+}
+
+/// HRESULT of the `QueryInterface(IID_IDXGIFactory2)` round-trip that preceded the probe.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_factory_qi_hr() -> i32 {
+    FACTORY_QI_HR
+}
+
 /// Record that tick `n` was reached, and report whether a limited run should stop **before**
 /// executing the call that follows it.
 ///
-/// Returns true only when `limit != 0 && limit >= n`: the caller has just bumped to `n`, the
-/// limited run's target has been met, and the *next* call (which is what we want to test) must not
-/// run. `reached` is frozen at that point so C# can show how far the run got.
+/// `bump` fires at every step boundary; this is the gate that decides whether the run continues.
+/// The rule is: **stop once the tick has reached the limit** (`n >= limit`), so a run with
+/// `limit = 10` sails past step 2 and halts at step 10, while `limit = 2` halts immediately. The
+/// first draft had this comparison the other way round (`limit >= n`), which made *every* run stop
+/// at step 2 - the symptom was `reached=2` for even a `limit=99` call.
+///
+/// `reached` is advanced here too, so C# can read back the furthest step a limited run proved good.
 #[inline]
 unsafe fn stop_here(s: &mut State, n: i32) -> bool {
     if n > s.reached {
         s.reached = n;
     }
-    s.limit != 0 && s.limit >= n
+    s.limit != 0 && n >= s.limit
 }
 
 // ===========================================================================
@@ -174,6 +284,10 @@ pub unsafe extern "C" fn wp81_rs_start_upto(
     limit: i32,
 ) -> i32 {
     let s = st();
+    // A limited run leaves partially-built state behind (a device, sometimes a swapchain) and the
+    // next run overwrites those fields. Release first so eight bisect steps do not leak eight
+    // devices - on a 512 MB phone that is what turns a diagnostic into a second failure.
+    release_all(s);
     s.width = width;
     s.height = height;
     s.limit = limit;
@@ -199,6 +313,10 @@ pub unsafe extern "C" fn wp81_rs_start_upto(
     if stop_here(s, 10) {
         return 0;
     }
+    // Sub-ticks 11..16 live inside the swapchain path, and the DXGI factory - the object whose
+    // vtable we need - only exists between ticks 12 and 13. The path honours `s.limit` itself, so a
+    // run with limit=13 stops the moment the factory is in hand, *before* the call that faults,
+    // leaving a valid snapshot for C# to log.
     let swapchain = match create_swapchain_for_panel_traced(device, panel, width, height, s.sc_trace.as_mut_ptr()) {
         Some(sc) => {
             // SC_CREATE_OK + the accepted variant index, for the log.
@@ -206,6 +324,12 @@ pub unsafe extern "C" fn wp81_rs_start_upto(
             sc
         }
         None => {
+            // An intentional sub-step stop (limit 11..15) returns None without an error; report it
+            // as success so the bisect keeps its "rc=0 = the step did not fault" invariant.
+            if s.limit >= 11 && s.limit <= 15 {
+                s.reached = s.limit;
+                return 0;
+            }
             // Report *which* call failed: s.stage carries the sub-step (20..25) and last_hr the
             // HRESULT, so the phone's log names the failing call instead of a bare "stage 2".
             s.stage = SC_BASE + s.sc_trace[0];
@@ -535,9 +659,11 @@ pub unsafe extern "C" fn wp81_rs_present() -> i32 {
     hr
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn wp81_rs_stop() {
-    let s = st();
+/// Release every COM object the renderer holds and reset to the pre-start state.
+///
+/// Called by [`wp81_rs_stop`] and at the top of a limited [`wp81_rs_start_upto`] run, so eight
+/// bisect steps do not leak eight devices on a 512 MB phone.
+unsafe fn release_all(s: &mut State) {
     if let Some(p) = s.pipeline.take() {
         p.vs.release();
         p.ps.release();
@@ -554,7 +680,18 @@ pub unsafe extern "C" fn wp81_rs_stop() {
     s.swapchain.release();
     s.context.release();
     s.device.release();
+    s.test_srv = ComPtr::NULL;
+    s.test_tex = ComPtr::NULL;
+    s.rtv = ComPtr::NULL;
+    s.swapchain = ComPtr::NULL;
+    s.context = ComPtr::NULL;
+    s.device = ComPtr::NULL;
     s.stage = -1;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_stop() {
+    release_all(st());
 }
 
 /// Where start-up got to (0 = fully up), and the last HRESULT. The C# side logs both.
