@@ -35,6 +35,10 @@ pub mod macroquad_compat_types {
     #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
     pub struct Texture {
         pub id: u32,
+        /// Dimensions are carried here rather than only on macroquad's `Texture2D` because
+        /// `prpr::core::render` reads them off the miniquad handle when sizing render targets.
+        pub width: u32,
+        pub height: u32,
     }
 
     #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -57,33 +61,27 @@ pub mod macroquad_compat_types {
         Mirror,
     }
 
+    /// miniquad's own parameters - five fields, and `filter` rather than separate min/mag.
+    ///
+    /// macroquad has a *different* `TextureParams` with `min_filter`/`mag_filter`, and conflating
+    /// the two is what made `prpr::core::line`'s literal fail: it writes the five-field form.
     #[derive(Clone, Debug)]
     pub struct TextureParams {
-        pub width: u32,
-        pub height: u32,
         pub format: TextureFormat,
         pub wrap: TextureWrap,
-        pub min_filter: FilterMode,
-        pub mag_filter: FilterMode,
-        /// The single-filter form `prpr::core::line` uses:
-        /// `miniquad::TextureParams { filter: FilterMode::Linear, .. }`.
         pub filter: FilterMode,
-        pub allocate_mipmaps: bool,
-        pub sample_count: i32,
+        pub width: u32,
+        pub height: u32,
     }
 
     impl Default for TextureParams {
         fn default() -> Self {
             TextureParams {
-                width: 0,
-                height: 0,
                 format: TextureFormat::RGBA8,
                 wrap: TextureWrap::Clamp,
-                min_filter: FilterMode::Linear,
-                mag_filter: FilterMode::Linear,
                 filter: FilterMode::Linear,
-                allocate_mipmaps: false,
-                sample_count: 1,
+                width: 0,
+                height: 0,
             }
         }
     }
@@ -213,7 +211,11 @@ pub mod conf {
 
 impl Texture {
     pub fn new_render_texture(_ctx: &mut Context, params: TextureParams) -> Self {
-        Texture { id: params.width ^ (params.height << 16) ^ params.format as u32 }
+        Texture {
+            id: params.width ^ (params.height << 16) ^ params.format as u32,
+            width: params.width,
+            height: params.height,
+        }
     }
 
     /// Rebuild a handle from an id handed out earlier.
@@ -222,7 +224,9 @@ impl Texture {
     /// (`core/resource.rs`), so this has to round-trip. The format is accepted and ignored: on this
     /// platform the C# side owns the real texture and knows its format.
     pub fn from_raw_id(id: u32, _format: TextureFormat) -> Self {
-        Texture { id }
+        // Dimensions are unknown here - upstream does not carry them either. Callers that need
+        // them reconstruct through `Texture2D`, which keeps its own copy.
+        Texture { id, width: 0, height: 0 }
     }
 
     pub fn delete(&self) {}
@@ -237,6 +241,25 @@ impl Texture {
     /// `prpr::core::resource` sets this when loading note textures. The shell decides its own
     /// sampling; the call is accepted so the loader's flow is unchanged.
     pub fn set_wrap(&self, _ctx: &mut Context, _wrap: TextureWrap) {}
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn set_filter(&self, _ctx: &mut Context, _filter: FilterMode) {}
+
+    pub fn from_rgba8(ctx: &mut Context, width: u16, height: u16, bytes: &[u8]) -> Self {
+        let _ = (ctx, bytes);
+        Texture {
+            id: 0,
+            width: width as u32,
+            height: height as u32,
+        }
+    }
 }
 
 impl RenderPass {
@@ -253,8 +276,8 @@ impl RenderPass {
     }
 
     /// The colour attachment. `prpr::core::render` reads it back to bind the result as a texture.
-    pub fn texture(&self) -> Texture {
-        Texture { id: self.id }
+    pub fn texture(&self, _ctx: &mut Context) -> Texture {
+        Texture { id: self.id, width: 0, height: 0 }
     }
 }
 
@@ -311,8 +334,9 @@ pub enum CompareFunc {
     Always,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PrimitiveType {
+    #[default]
     Triangles,
     Lines,
     LineStrip,
@@ -595,7 +619,9 @@ impl Pipeline {
     }
 }
 
-#[derive(Clone, Debug)]
+/// `Copy` because macroquad's `Material` embeds one and is itself `Copy`, and `prpr` dereferences
+/// a `&Material` into a value. `Default` because `MaterialParams` does `..Default::default()`.
+#[derive(Copy, Clone, Debug)]
 pub struct PipelineParams {
     pub color_blend: Option<BlendState>,
     pub alpha_blend: Option<BlendState>,
@@ -628,8 +654,9 @@ pub struct DepthState {
     pub compare: CompareFunc,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CullFace {
+    #[default]
     Nothing,
     Front,
     Back,
@@ -642,14 +669,18 @@ pub struct Buffer {
 }
 
 impl Buffer {
-    pub fn new(_ctx: &mut Context, _buffer_type: BufferType, _usage: BufferUsage, data: &[u8]) -> Self {
-        Buffer { id: 0, len: data.len() }
+    pub fn new<T>(_ctx: &mut Context, _buffer_type: BufferType, _usage: BufferUsage, data: &[T]) -> Self {
+        Buffer { id: 0, len: core::mem::size_of_val(data) }
     }
     /// `prpr::particle` builds its vertex and index buffers with this.
-    pub fn immutable(_ctx: &mut Context, _buffer_type: BufferType, data: &[u8]) -> Self {
-        Buffer { id: 0, len: data.len() }
+    pub fn immutable<T>(_ctx: &mut Context, _buffer_type: BufferType, data: &[T]) -> Self {
+        Buffer { id: 0, len: core::mem::size_of_val(data) }
     }
-    pub fn update(&self, _ctx: &mut Context, data: &[u8]) {}
+    pub fn stream<T>(_ctx: &mut Context, _buffer_type: BufferType, data: &[T]) -> Self {
+        Buffer { id: 0, len: core::mem::size_of_val(data) }
+    }
+
+    pub fn update<T>(&self, _ctx: &mut Context, data: &[T]) {}
     pub fn size(&self) -> usize {
         self.len
     }

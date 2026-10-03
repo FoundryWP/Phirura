@@ -265,7 +265,7 @@ pub use miniquad::FilterMode;
 ///
 /// A struct with these two fields, not an enum: `prpr::core::render` reads `.texture` and
 /// `.render_pass` off it, and `prpr::ext` constructs one from a miniquad render pass.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct RenderTarget {
     pub texture: Texture2D,
     pub render_pass: crate::miniquad_compat::RenderPass,
@@ -334,7 +334,14 @@ impl Texture2D {
     /// `prpr` calls this only to key its draw batches, and batching belongs to the renderer on
     /// this platform - so the id is returned unchanged rather than pretending to be a GL handle.
     pub fn raw_miniquad_texture_handle(&self) -> crate::miniquad_compat::Texture {
-        crate::miniquad_compat::Texture { id: self.id }
+        // The dimensions travel with the handle: `prpr::core::render` sizes its render targets by
+        // reading `width`/`height` off whatever this returns, so a zero-sized handle would produce
+        // zero-sized targets.
+        crate::miniquad_compat::Texture {
+            id: self.id,
+            width: self.width,
+            height: self.height,
+        }
     }
     pub fn gl_internal_id(&self) -> u32 {
         self.id
@@ -463,7 +470,7 @@ impl QuadGl {
         draw::set_scissor(rect);
     }
 
-    pub fn push_model_matrix(&mut self, _mat: [f32; 16]) {}
+    pub fn push_model_matrix(&mut self, _mat: Mat4) {}
 
     pub fn pop_model_matrix(&mut self) {}
 
@@ -495,20 +502,22 @@ impl QuadGl {
     pub fn flush(&mut self) {}
 
     /// `prpr::ext::get_viewport` unwraps this with a fallback, so `None` means "ask the shell".
-    pub fn get_viewport(&self) -> Option<(i32, i32, i32, i32)> {
+    pub fn get_viewport(&self) -> Option<Rect> {
         None
     }
 
-    pub fn viewport(&self) -> (i32, i32, i32, i32) {
-        (0, 0, 0, 0)
-    }
+    /// A setter, not a getter: `prpr::core::line` brackets an offscreen pass with
+    /// `viewport(None)` / `viewport(Some(..))`. The getter is `get_viewport`.
+    pub fn viewport(&mut self, _rect: Option<(i32, i32, i32, i32)>) {}
 
     /// Selects the render target. A setter, not a getter - `prpr::core::effect` and
     /// `prpr::core::line` both call it with the pass they want to draw into.
     pub fn render_pass(&mut self, _pass: Option<crate::miniquad_compat::RenderPass>) {}
 
-    pub fn get_active_render_pass(&self) -> crate::miniquad_compat::RenderPass {
-        crate::miniquad_compat::RenderPass { id: 0 }
+    /// `prpr::ext::get_viewport` maps over this, so it must be an `Option` - returning a bare
+    /// `RenderPass` made it "not an iterator".
+    pub fn get_active_render_pass(&self) -> Option<crate::miniquad_compat::RenderPass> {
+        None
     }
 
     pub fn set_blend(&mut self, _blend: Option<miniquad::BlendState>, _clear: bool) {}
@@ -937,7 +946,7 @@ pub fn draw_texture_ex(tex: Texture2D, x: f32, y: f32, color: Color, params: Dra
 }
 
 pub fn draw_texture(tex: &Texture2D, x: f32, y: f32, color: Color) {
-    draw_texture_ex(tex, x, y, color, DrawTextureParams::default());
+    draw_texture_ex(*tex, x, y, color, DrawTextureParams::default());
 }
 
 pub fn draw_rectangle(x: f32, y: f32, w: f32, h: f32, color: Color) {
@@ -1201,7 +1210,8 @@ pub mod material {
         }
     }
 
-    #[derive(Clone, Debug, Default)]
+    /// `Copy` because prpr does `*self.material` - dereferencing a reference into a value.
+    #[derive(Copy, Clone, Debug, Default)]
     pub struct Material {
         pub pipeline_params: PipelineParams,
     }
@@ -1237,7 +1247,7 @@ pub mod material {
         })
     }
 
-    pub fn gl_use_material(_material: &Material) {}
+    pub fn gl_use_material(_material: Material) {}
     pub fn gl_use_default_material() {}
     /// Re-exported rather than declared: upstream macroquad re-exports miniquad's, and
     /// `prpr::particle` builds one to hand to `miniquad::Pipeline::with_params`. Two structurally

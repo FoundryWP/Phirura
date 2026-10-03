@@ -1,7 +1,7 @@
 ﻿cargo.exe : warning: unused workspace dependency `objc2-core-foundation`
-所在位置 E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\build-port.ps1:78 字符: 1
-+ & $cargo @cargoArgs 2>&1 | Out-File -FilePath $cargoLog -Encoding utf ...
-+ ~~~~~~~~~~~~~~~~~~~~~~~~
+At line:1 char:728
++ ... hira-main"; & $cargo build -p prpr-port --target $target "-Zjson-targ ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     + CategoryInfo          : NotSpecified: (warning: unused...ore-foundation`:String) [], RemoteException
     + FullyQualifiedErrorId : NativeCommandError
  
@@ -157,7 +157,124 @@ help: to clarify your intent to not inherit, add:
 13 + [lints]
    |
 warning: `phira-main` (manifest) generated 1 warning
-   Compiling miniquad v0.3.15 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad)
+warning: function `glTexParameteri` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:732:19
+    |
+732 |     pub unsafe fn glTexParameteri(_target: u32, _pname: u32, _param: i32) {}
+    |                   ^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_tex_parameteri`
+    |
+    = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: function `glBindTexture` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:734:19
+    |
+734 |     pub unsafe fn glBindTexture(_target: u32, _texture: u32) {}
+    |                   ^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_bind_texture`
+
+warning: function `glTexSubImage2D` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:735:19
+    |
+735 |     pub unsafe fn glTexSubImage2D(
+    |                   ^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_tex_sub_image2_d`
+
+warning: function `glGetIntegerv` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:740:19
+    |
+740 |     pub unsafe fn glGetIntegerv(_pname: u32, _params: *mut i32) {}
+    |                   ^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_get_integerv`
+
+warning: function `glGenerateMipmap` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:741:19
+    |
+741 |     pub unsafe fn glGenerateMipmap(_target: u32) {}
+    |                   ^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_generate_mipmap`
+
+warning: function `glDeleteRenderbuffers` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:742:19
+    |
+742 |     pub unsafe fn glDeleteRenderbuffers(_n: i32, _ids: *const u32) {}
+    |                   ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_delete_renderbuffers`
+
+warning: function `glDeleteFramebuffers` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:743:19
+    |
+743 |     pub unsafe fn glDeleteFramebuffers(_n: i32, _ids: *const u32) {}
+    |                   ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_delete_framebuffers`
+
+warning: function `glBindFramebuffer` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:745:19
+    |
+745 |     pub unsafe fn glBindFramebuffer(_target: u32, _fb: u32) {}
+    |                   ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_bind_framebuffer`
+
+warning: function `glBlitFramebuffer` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:746:19
+    |
+746 |     pub unsafe fn glBlitFramebuffer(
+    |                   ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_blit_framebuffer`
+
+warning: function `glGetError` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:752:19
+    |
+752 |     pub unsafe fn glGetError() -> u32 {
+    |                   ^^^^^^^^^^ help: convert the identifier to snake case: `gl_get_error`
+
+warning: function `glGenRenderbuffers` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:755:19
+    |
+755 |     pub unsafe fn glGenRenderbuffers(_n: i32, _out: *mut u32) {}
+    |                   ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_gen_renderbuffers`
+
+warning: function `glBindRenderbuffer` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:756:19
+    |
+756 |     pub unsafe fn glBindRenderbuffer(_target: u32, _rb: u32) {}
+    |                   ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_bind_renderbuffer`
+
+warning: function `glRenderbufferStorageMultisample` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:757:19
+    |
+757 |     pub unsafe fn glRenderbufferStorageMultisample(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_renderbuffer_s
+torage_multisample`
+
+warning: function `glGenFramebuffers` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:761:19
+    |
+761 |     pub unsafe fn glGenFramebuffers(_n: i32, _out: *mut u32) {}
+    |                   ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_gen_framebuffers`
+
+warning: function `glFramebufferRenderbuffer` should have a snake case name
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:762:19
+    |
+762 |     pub unsafe fn glFramebufferRenderbuffer(_target: u32, _att: u32, _rbt: u32, _rb: u32) {}
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_framebuffer_renderbuf
+fer`
+
+warning: `miniquad` (lib) generated 15 warnings
+warning: ambiguous import visibility: pub or pub(in crate::window)
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:543:13
+    |
+543 |     pub use miniquad;
+    |             ^^^^^^^^
+    |
+    = note: ambiguous because of a conflict between a name from a glob import and an outer scope during import or macro
+ resolution
+    = note: `miniquad` could refer to a crate passed with `--extern`
+    = help: use `::miniquad` to refer to this crate unambiguously
+note: `miniquad` could also refer to the crate imported here
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:536:9
+    |
+536 |     use super::*;
+    |         ^^^^^^^^
+    = help: consider adding an explicit import of `miniquad` to disambiguate
+    = help: or use `self::miniquad` to refer to this crate unambiguously
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a f
+uture release!
+    = note: for more information, see issue #149145 <https://github.com/rust-lang/rust/issues/149145>
+    = note: `#[warn(ambiguous_import_visibilities)]` (part of `#[warn(future_incompatible)]`) on by default
+
+warning: `macroquad` (lib) generated 1 warning
 warning: variable does not need to be mutable
    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\rfd\src\lib.rs:111:23
     |
@@ -168,7 +285,6 @@ warning: variable does not need to be mutable
     |
     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
-warning: `rfd` (lib) generated 1 warning (run `cargo fix --lib -p rfd` to apply 1 suggestion)
 warning: suspicious definition of the runtime `strlen` symbol used by the standard library
    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\compat\src\lib.rs:813:1
     |
@@ -182,143 +298,690 @@ len")]`, or `#[link_name = "strlen"]`
     = help: allow this lint if the signature is compatible
     = note: `#[warn(suspicious_runtime_symbol_definitions)]` on by default
 
+warning: `rfd` (lib) generated 1 warning (run `cargo fix --lib -p rfd` to apply 1 suggestion)
 warning: `wp81-compat` (lib) generated 1 warning
-warning: function `glTexParameteri` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:701:19
-    |
-701 |     pub unsafe fn glTexParameteri(_target: u32, _pname: u32, _param: i32) {}
-    |                   ^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_tex_parameteri`
-    |
-    = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+   Compiling prpr v0.8.2 (E:\Users\admin\Documents\visual studio 2013\Phirura\phira-main\phira-main\prpr)
+warning: unused import: `macroquad::prelude::*`
+ --> prpr\src\core\object.rs:2:5
+  |
+2 | use macroquad::prelude::*;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
-warning: function `glBindTexture` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:703:19
+warning: use of deprecated constant `std::f32::INFINITY`: replaced by the `INFINITY` associated constant on `f32`
+   --> prpr\src\ui.rs:519:23
     |
-703 |     pub unsafe fn glBindTexture(_target: u32, _texture: u32) {}
-    |                   ^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_bind_texture`
+519 |             pos: f32::INFINITY,
+    |                       ^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
 
-warning: function `glTexSubImage2D` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:704:19
-    |
-704 |     pub unsafe fn glTexSubImage2D(
-    |                   ^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_tex_sub_image2_d`
-
-warning: function `glGetIntegerv` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:709:19
-    |
-709 |     pub unsafe fn glGetIntegerv(_pname: u32, _params: *mut i32) {}
-    |                   ^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_get_integerv`
-
-warning: function `glGenerateMipmap` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:710:19
-    |
-710 |     pub unsafe fn glGenerateMipmap(_target: u32) {}
-    |                   ^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_generate_mipmap`
-
-warning: function `glDeleteRenderbuffers` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:711:19
-    |
-711 |     pub unsafe fn glDeleteRenderbuffers(_n: i32, _ids: *const u32) {}
-    |                   ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_delete_renderbuffers`
-
-warning: function `glDeleteFramebuffers` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:712:19
-    |
-712 |     pub unsafe fn glDeleteFramebuffers(_n: i32, _ids: *const u32) {}
-    |                   ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_delete_framebuffers`
-
-warning: function `glBindFramebuffer` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:714:19
-    |
-714 |     pub unsafe fn glBindFramebuffer(_target: u32, _fb: u32) {}
-    |                   ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_bind_framebuffer`
-
-warning: function `glBlitFramebuffer` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:715:19
-    |
-715 |     pub unsafe fn glBlitFramebuffer(
-    |                   ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_blit_framebuffer`
-
-warning: function `glGetError` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:721:19
-    |
-721 |     pub unsafe fn glGetError() -> u32 {
-    |                   ^^^^^^^^^^ help: convert the identifier to snake case: `gl_get_error`
-
-warning: function `glGenRenderbuffers` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:724:19
-    |
-724 |     pub unsafe fn glGenRenderbuffers(_n: i32, _out: *mut u32) {}
-    |                   ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_gen_renderbuffers`
-
-warning: function `glBindRenderbuffer` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:725:19
-    |
-725 |     pub unsafe fn glBindRenderbuffer(_target: u32, _rb: u32) {}
-    |                   ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_bind_renderbuffer`
-
-warning: function `glRenderbufferStorageMultisample` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:726:19
-    |
-726 |     pub unsafe fn glRenderbufferStorageMultisample(
-    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_renderbuffer_s
-torage_multisample`
-
-warning: function `glGenFramebuffers` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:730:19
-    |
-730 |     pub unsafe fn glGenFramebuffers(_n: i32, _out: *mut u32) {}
-    |                   ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_gen_framebuffers`
-
-warning: function `glFramebufferRenderbuffer` should have a snake case name
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:731:19
-    |
-731 |     pub unsafe fn glFramebufferRenderbuffer(_target: u32, _att: u32, _rbt: u32, _rb: u32) {}
-    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_framebuffer_renderbuf
-fer`
-
-   Compiling macroquad v0.3.25 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad)
-warning: ambiguous import visibility: pub or pub(in crate::window)
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:534:13
-    |
-534 |     pub use miniquad;
-    |             ^^^^^^^^
-    |
-    = note: ambiguous because of a conflict between a name from a glob import and an outer scope during import or macro
- resolution
-    = note: `miniquad` could refer to a crate passed with `--extern`
-    = help: use `::miniquad` to refer to this crate unambiguously
-note: `miniquad` could also refer to the crate imported here
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:527:9
-    |
-527 |     use super::*;
-    |         ^^^^^^^^
-    = help: consider adding an explicit import of `miniquad` to disambiguate
-    = help: or use `self::miniquad` to refer to this crate unambiguously
-    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a f
-uture release!
-    = note: for more information, see issue #149145 <https://github.com/rust-lang/rust/issues/149145>
-    = note: `#[warn(ambiguous_import_visibilities)]` (part of `#[warn(future_incompatible)]`) on by default
-
-warning: `miniquad` (lib) generated 15 warnings
 error[E0308]: mismatched types
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:940:21
+   --> prpr\src\ext.rs:205:9
     |
-940 |     draw_texture_ex(tex, x, y, color, DrawTextureParams::default());
-    |     --------------- ^^^ expected `Texture2D`, found `&Texture2D`
-    |     |
-    |     arguments to this function are incorrect
+205 |         (0, 0, w, h)
+    |         ^^^^^^^^^^^^ expected `Rect`, found `({integer}, {integer}, i32, i32)`
     |
-note: function defined here
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:923:8
-    |
-923 | pub fn draw_texture_ex(tex: Texture2D, x: f32, y: f32, color: Color, params: DrawTextureParams) {
-    |        ^^^^^^^^^^^^^^^ --------------
-help: consider dereferencing the borrow
-    |
-940 |     draw_texture_ex(*tex, x, y, color, DrawTextureParams::default());
-    |                     +
+    = note: expected struct `macroquad::Rect`
+                found tuple `({integer}, {integer}, i32, i32)`
 
-For more information about this error, try `rustc --explain E0308`.
-warning: `macroquad` (lib) generated 1 warning
-error: could not compile `macroquad` (lib) due to 1 previous error; 1 warning emitted
+error[E0308]: mismatched types
+   --> prpr\src\ext.rs:196:5
+    |
+194 |   pub fn get_viewport() -> (i32, i32, i32, i32) {
+    |                            -------------------- expected `(i32, i32, i32, i32)` because of return type
+195 |       let gl = unsafe { get_internal_gl() };
+196 | /     gl.quad_gl.get_viewport().unwrap_or_else(|| {
+197 | |         let (w, h) = gl
+198 | |             .quad_gl
+199 | |             .get_active_render_pass()
+...   |
+205 | |         (0, 0, w, h)
+206 | |     })
+    | |______^ expected `(i32, i32, i32, i32)`, found `Rect`
+    |
+    = note: expected tuple `(i32, i32, i32, i32)`
+              found struct `macroquad::Rect`
+
+error[E0308]: mismatched types
+   --> prpr\src\particle.rs:432:85
+    |
+432 | ...x_buffer = Buffer::stream(ctx, BufferType::VertexBuffer, Self::MAX_PARTICLES * std::mem::size_of::<GpuParticle
+>());
+    |               --------------                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^ expected `&[_]`, found `usize`
+    |               |
+    |               arguments to this function are incorrect
+    |
+    = note: expected reference `&[_]`
+                    found type `usize`
+note: associated function defined here
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:679:12
+    |
+679 |     pub fn stream<T>(_ctx: &mut Context, _buffer_type: BufferType, data: &[T]) -> Self {
+    |            ^^^^^^
+
+error[E0061]: this function takes 4 arguments but 5 arguments were supplied
+   --> prpr\src\particle.rs:455:24
+    |
+455 |         let pipeline = Pipeline::with_params(
+    |                        ^^^^^^^^^^^^^^^^^^^^^
+...
+473 |             shader,
+    |             ------ unexpected argument #4 of type `miniquad::Shader`
+    |
+note: expected `BufferLayout`, found `&[BufferLayout; 2]`
+   --> prpr\src\particle.rs:457:13
+    |
+457 | /             &[
+458 | |                 BufferLayout::default(),
+459 | |                 BufferLayout {
+460 | |                     step_func: VertexStep::PerInstance,
+461 | |                     ..Default::default()
+462 | |                 },
+463 | |             ],
+    | |_____________^
+    = note: expected struct `macroquad::BufferLayout`
+            found reference `&[macroquad::BufferLayout; 2]`
+note: expected `ShaderMeta`, found `&[VertexAttribute; 7]`
+   --> prpr\src\particle.rs:464:13
+    |
+464 | /             &[
+465 | |                 VertexAttribute::with_buffer("in_attr_pos", VertexFormat::Float3, 0),
+466 | |                 VertexAttribute::with_buffer("in_attr_uv", VertexFormat::Float2, 0),
+467 | |                 VertexAttribute::with_buffer("in_attr_color", VertexFormat::Float4, 0),
+...   |
+471 | |                 VertexAttribute::with_buffer("in_attr_inst_color", VertexFormat::Float4, 1),
+472 | |             ],
+    | |_____________^
+    = note: expected struct `macroquad::ShaderMeta`
+            found reference `&[macroquad::VertexAttribute; 7]`
+note: associated function defined here
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:612:12
+    |
+612 |     pub fn with_params(
+    |            ^^^^^^^^^^^
+help: remove the extra argument
+    |
+457 ~             /* BufferLayout */,
+458 ~             /* ShaderMeta */,
+    |
+
+error[E0061]: this function takes 4 arguments but 5 arguments were supplied
+   --> prpr\src\particle.rs:484:40
+    |
+484 |         let post_processing_pipeline = Pipeline::with_params(
+    |                                        ^^^^^^^^^^^^^^^^^^^^^
+...
+491 |             post_processing_shader,
+    |             ---------------------- unexpected argument #4 of type `miniquad::Shader`
+    |
+note: expected `BufferLayout`, found `&[BufferLayout; 2]`
+   --> prpr\src\particle.rs:486:13
+    |
+486 |             &[BufferLayout::default(), BufferLayout::default()],
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: expected struct `macroquad::BufferLayout`
+            found reference `&[macroquad::BufferLayout; 2]`
+note: expected `ShaderMeta`, found `&[VertexAttribute; 2]`
+   --> prpr\src\particle.rs:487:13
+    |
+487 | /             &[
+488 | |                 VertexAttribute::with_buffer("pos", VertexFormat::Float2, 0),
+489 | |                 VertexAttribute::with_buffer("uv", VertexFormat::Float2, 0),
+490 | |             ],
+    | |_____________^
+    = note: expected struct `macroquad::ShaderMeta`
+            found reference `&[macroquad::VertexAttribute; 2]`
+note: associated function defined here
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:612:12
+    |
+612 |     pub fn with_params(
+    |            ^^^^^^^^^^^
+help: remove the extra argument
+    |
+486 ~             /* BufferLayout */,
+487 ~             /* ShaderMeta */,
+    |
+
+error[E0599]: no method named `apply_uniforms` found for mutable reference `&mut miniquad::Context` in the current scop
+e
+   --> prpr\src\particle.rs:730:13
+    |
+730 |         ctx.apply_uniforms(&shader::Uniforms {
+    |             ^^^^^^^^^^^^^^ method not found in `&mut miniquad::Context`
+
+error[E0599]: no method named `set_blend` found for struct `miniquad::Pipeline` in the current scope
+   --> prpr\src\particle.rs:741:27
+    |
+741 |             self.pipeline.set_blend(ctx, Some(self.config.blend_mode.blend_state()));
+    |                           ^^^^^^^^^ method not found in `miniquad::Pipeline`
+
+error[E0061]: function takes 1 argument but 4 arguments were supplied
+   --> prpr\src\particle.rs:753:55
+    |
+753 |             ctx.begin_pass(self.post_processing_pass, PassAction::clear_color(0.0, 0.0, 0.0, 0.0));
+    |                                                       ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: associated function defined here
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:120:16
+    |
+120 |         pub fn clear_color(color: (f32, f32, f32, f32)) -> Self {
+    |                ^^^^^^^^^^^
+help: wrap these arguments in parentheses to construct a tuple
+    |
+753 |             ctx.begin_pass(self.post_processing_pass, PassAction::clear_color((0.0, 0.0, 0.0, 0.0)));
+    |                                                                               +                  +
+
+error[E0308]: mismatched types
+   --> prpr\src\particle.rs:760:32
+    |
+760 |             .unwrap_or_else(|| (0, 0, screen_width() as _, screen_height() as _));
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Rect`, found `({intege
+r}, {integer}, _, _)`
+    |
+    = note: expected struct `macroquad::Rect`
+                found tuple `({integer}, {integer}, _, _)`
+
+error[E0308]: mismatched types
+   --> prpr\src\particle.rs:758:13
+    |
+758 |           let (x, y, w, h) = quad_gl
+    |  _____________^^^^^^^^^^^^___-
+    | |             |
+    | |             expected `Rect`, found `(_, _, _, _)`
+759 | |             .get_viewport()
+760 | |             .unwrap_or_else(|| (0, 0, screen_width() as _, screen_height() as _));
+    | |_________________________________________________________________________________- this expression has type `mac
+roquad::Rect`
+    |
+    = note: expected struct `macroquad::Rect`
+                found tuple `(_, _, _, _)`
+
+error[E0308]: mismatched types
+   --> prpr\src\particle.rs:778:36
+    |
+778 |                 .unwrap_or_else(|| (0, 0, screen_width() as _, screen_height() as _));
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Rect`, found `({in
+teger}, {integer}, _, _)`
+    |
+    = note: expected struct `macroquad::Rect`
+                found tuple `({integer}, {integer}, _, _)`
+
+error[E0308]: mismatched types
+   --> prpr\src\particle.rs:776:17
+    |
+776 |               let (x, y, w, h) = quad_gl
+    |  _________________^^^^^^^^^^^^___-
+    | |                 |
+    | |                 expected `Rect`, found `(_, _, _, _)`
+777 | |                 .get_viewport()
+778 | |                 .unwrap_or_else(|| (0, 0, screen_width() as _, screen_height() as _));
+    | |_____________________________________________________________________________________- this expression has type 
+`macroquad::Rect`
+    |
+    = note: expected struct `macroquad::Rect`
+                found tuple `(_, _, _, _)`
+
+error[E0308]: mismatched types
+   --> prpr\src\particle.rs:800:32
+    |
+800 |         self.setup_render_pass(quad_gl, ctx);
+    |              ----------------- ^^^^^^^ expected `&QuadGl`, found `QuadGl`
+    |              |
+    |              arguments to this method are incorrect
+    |
+note: method defined here
+   --> prpr\src\particle.rs:739:12
+    |
+739 |     pub fn setup_render_pass(&mut self, quad_gl: &QuadGl, ctx: &mut Context) {
+    |            ^^^^^^^^^^^^^^^^^            ----------------
+help: consider borrowing here
+    |
+800 |         self.setup_render_pass(&quad_gl, ctx);
+    |                                +
+
+error[E0308]: mismatched types
+   --> prpr\src\particle.rs:801:34
+    |
+801 |         self.perform_render_pass(quad_gl, ctx);
+    |              ------------------- ^^^^^^^ expected `&QuadGl`, found `QuadGl`
+    |              |
+    |              arguments to this method are incorrect
+    |
+note: method defined here
+   --> prpr\src\particle.rs:728:8
+    |
+728 |     fn perform_render_pass(&mut self, quad_gl: &QuadGl, ctx: &mut Context) {
+    |        ^^^^^^^^^^^^^^^^^^^            ----------------
+help: consider borrowing here
+    |
+801 |         self.perform_render_pass(&quad_gl, ctx);
+    |                                  +
+
+error[E0308]: mismatched types
+   --> prpr\src\particle.rs:802:30
+    |
+802 |         self.end_render_pass(quad_gl, ctx);
+    |              --------------- ^^^^^^^ expected `&QuadGl`, found `QuadGl`
+    |              |
+    |              arguments to this method are incorrect
+    |
+note: method defined here
+   --> prpr\src\particle.rs:764:12
+    |
+764 |     pub fn end_render_pass(&mut self, quad_gl: &QuadGl, ctx: &mut Context) {
+    |            ^^^^^^^^^^^^^^^            ----------------
+help: consider borrowing here
+    |
+802 |         self.end_render_pass(&quad_gl, ctx);
+    |                              +
+
+error[E0599]: no method named `render_pass` found for struct `macroquad::Camera2D` in the current scope
+    --> prpr\src\scene\game.rs:1195:40
+     |
+1195 |                 .or_else(|| res.camera.render_pass()),
+     |                                        ^^^^^^^^^^^ method not found in `macroquad::Camera2D`
+
+error[E0599]: no method named `clipboard_set` found for mutable reference `&mut miniquad::Context` in the current scope
+  --> prpr\src\ui\dialog.rs:91:63
+   |
+91 |                     unsafe { get_internal_gl() }.quad_context.clipboard_set(&error);
+   |                                                               ^^^^^^^^^^^^^ method not found in `&mut miniquad::Co
+ntext`
+
+error[E0277]: the trait bound `[f32; 4]: From<macroquad::Color>` is not satisfied
+   --> prpr\src\ui\text.rs:127:45
+    |
+127 | ...                   .with_color(self.color)
+    |                        ---------- ^^^^^^^^^^ the trait `From<macroquad::Color>` is not implemented for `[f32; 4]`
+    |                        |
+    |                        required by a bound introduced by this call
+    |
+    = help: `[f32; 4]` implements trait `From<T>`:
+              From<Quat>
+              From<macroquad::Vec4>
+              From<simba::simd::auto_simd_impl::AutoSimd<[f32; 4]>>
+              From<simba::simd::wide_simd_impl::WideF32x4>
+              From<wide::f32x4_::f32x4>
+    = note: required for `macroquad::Color` to implement `Into<[f32; 4]>`
+note: required by a bound in `glyph_brush::Text::<'_>::with_color`
+   --> C:\Users\admin\.workbuddy-ai\binaries\rust\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\glyph_brush-0.7.1
+2\src\section\refed.rs:224:26
+    |
+222 | impl Text<'_, Extra> {
+223 |     #[inline]
+224 |     pub fn with_color<C: Into<Color>>(mut self, color: C) -> Self {
+    |                          ^^^^^^^^^^^ required by this bound in `Text::<'_>::with_color`
+
+error[E0277]: the trait bound `[f32; 4]: From<macroquad::Color>` is not satisfied
+   --> prpr\src\ui\text.rs:139:37
+    |
+139 |                         .with_color(self.color)
+    |                          ---------- ^^^^^^^^^^ the trait `From<macroquad::Color>` is not implemented for `[f32; 4
+]`
+    |                          |
+    |                          required by a bound introduced by this call
+    |
+    = help: `[f32; 4]` implements trait `From<T>`:
+              From<Quat>
+              From<macroquad::Vec4>
+              From<simba::simd::auto_simd_impl::AutoSimd<[f32; 4]>>
+              From<simba::simd::wide_simd_impl::WideF32x4>
+              From<wide::f32x4_::f32x4>
+    = note: required for `macroquad::Color` to implement `Into<[f32; 4]>`
+note: required by a bound in `glyph_brush::Text::<'_>::with_color`
+   --> C:\Users\admin\.workbuddy-ai\binaries\rust\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\glyph_brush-0.7.1
+2\src\section\refed.rs:224:26
+    |
+222 | impl Text<'_, Extra> {
+223 |     #[inline]
+224 |     pub fn with_color<C: Into<Color>>(mut self, color: C) -> Self {
+    |                          ^^^^^^^^^^^ required by this bound in `Text::<'_>::with_color`
+
+error[E0277]: the trait bound `[f32; 4]: From<macroquad::Color>` is not satisfied
+   --> prpr\src\ui\text.rs:144:85
+    |
+144 |             section = section.add_text(Text::new(text).with_scale(scale).with_color(self.color));
+    |                                                                          ---------- ^^^^^^^^^^ the trait `From<ma
+croquad::Color>` is not implemented for `[f32; 4]`
+    |                                                                          |
+    |                                                                          required by a bound introduced by this c
+all
+    |
+    = help: `[f32; 4]` implements trait `From<T>`:
+              From<Quat>
+              From<macroquad::Vec4>
+              From<simba::simd::auto_simd_impl::AutoSimd<[f32; 4]>>
+              From<simba::simd::wide_simd_impl::WideF32x4>
+              From<wide::f32x4_::f32x4>
+    = note: required for `macroquad::Color` to implement `Into<[f32; 4]>`
+note: required by a bound in `glyph_brush::Text::<'_>::with_color`
+   --> C:\Users\admin\.workbuddy-ai\binaries\rust\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\glyph_brush-0.7.1
+2\src\section\refed.rs:224:26
+    |
+222 | impl Text<'_, Extra> {
+223 |     #[inline]
+224 |     pub fn with_color<C: Into<Color>>(mut self, color: C) -> Self {
+    |                          ^^^^^^^^^^^ required by this bound in `Text::<'_>::with_color`
+
+error[E0277]: the trait bound `[f32; 4]: From<macroquad::Color>` is not satisfied
+   --> prpr\src\ui\text.rs:182:81
+    |
+182 |                     Text::new(&text[..byte_index]).with_scale(scale).with_color(self.color),
+    |                                                                      ---------- ^^^^^^^^^^ the trait `From<macroq
+uad::Color>` is not implemented for `[f32; 4]`
+    |                                                                      |
+    |                                                                      required by a bound introduced by this call
+    |
+    = help: `[f32; 4]` implements trait `From<T>`:
+              From<Quat>
+              From<macroquad::Vec4>
+              From<simba::simd::auto_simd_impl::AutoSimd<[f32; 4]>>
+              From<simba::simd::wide_simd_impl::WideF32x4>
+              From<wide::f32x4_::f32x4>
+    = note: required for `macroquad::Color` to implement `Into<[f32; 4]>`
+note: required by a bound in `glyph_brush::Text::<'_>::with_color`
+   --> C:\Users\admin\.workbuddy-ai\binaries\rust\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\glyph_brush-0.7.1
+2\src\section\refed.rs:224:26
+    |
+222 | impl Text<'_, Extra> {
+223 |     #[inline]
+224 |     pub fn with_color<C: Into<Color>>(mut self, color: C) -> Self {
+    |                          ^^^^^^^^^^^ required by this bound in `Text::<'_>::with_color`
+
+error[E0277]: the trait bound `[f32; 4]: From<macroquad::Color>` is not satisfied
+   --> prpr\src\ui\text.rs:183:65
+    |
+183 |                     Text::new("…").with_scale(scale).with_color(self.color),
+    |                                                      ---------- ^^^^^^^^^^ the trait `From<macroquad::Color>` is 
+not implemented for `[f32; 4]`
+    |                                                      |
+    |                                                      required by a bound introduced by this call
+    |
+    = help: `[f32; 4]` implements trait `From<T>`:
+              From<Quat>
+              From<macroquad::Vec4>
+              From<simba::simd::auto_simd_impl::AutoSimd<[f32; 4]>>
+              From<simba::simd::wide_simd_impl::WideF32x4>
+              From<wide::f32x4_::f32x4>
+    = note: required for `macroquad::Color` to implement `Into<[f32; 4]>`
+note: required by a bound in `glyph_brush::Text::<'_>::with_color`
+   --> C:\Users\admin\.workbuddy-ai\binaries\rust\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\glyph_brush-0.7.1
+2\src\section\refed.rs:224:26
+    |
+222 | impl Text<'_, Extra> {
+223 |     #[inline]
+224 |     pub fn with_color<C: Into<Color>>(mut self, color: C) -> Self {
+    |                          ^^^^^^^^^^^ required by this bound in `Text::<'_>::with_color`
+
+error[E0277]: the trait bound `macroquad::Color: From<[f32; 4]>` is not satisfied
+   --> prpr\src\ui\text.rs:352:63
+    |
+352 |                     let mut color: Color = vertex.extra.color.into();
+    |                                                               ^^^^ the trait `From<[f32; 4]>` is not implemented 
+for `macroquad::Color`
+    |
+help: `macroquad::Color` implements trait `From<T>`
+   --> prpr\src\parse\rpe.rs:124:1
+    |
+124 | impl From<RGBColor> for Color {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<RGBColor>`
+    |
+   ::: E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:200:1
+    |
+200 | impl From<[u8; 4]> for Color {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<[u8; 4]>`
+    = note: required for `[f32; 4]` to implement `Into<macroquad::Color>`
+
+error[E0599]: no method named `xy` found for struct `macroquad::Vec4` in the current scope
+   --> prpr\src\ui.rs:200:17
+    |
+200 |             pos.xy() / pos.w
+    |                 ^^
+    |
+   ::: C:\Users\admin\.workbuddy-ai\binaries\rust\cargo\registry\src\index.crates.io-1949cf8c6b5b557f\glam-0.30.10\src\
+swizzles\vec_traits.rs:489:8
+    |
+489 |     fn xy(self) -> Self::Vec2;
+    |        -- the method is available for `macroquad::Vec4` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Vec4Swizzles` which provides `xy` is implemented but not in scope; perhaps you want to import it
+    |
+  2 + use macroquad::glam::Vec4Swizzles;
+    |
+help: there is a method `wxy` with a similar name
+    |
+200 |             pos.wxy() / pos.w
+    |                 +
+
+error[E0559]: variant `miniquad::PassAction::Clear` has no field named `depth`
+   --> prpr\src\ui.rs:687:13
+    |
+687 |             depth: None,
+    |             ^^^^^ `miniquad::PassAction::Clear` does not have this field
+    |
+    = note: all struct fields are already assigned
+
+error[E0559]: variant `miniquad::PassAction::Clear` has no field named `stencil`
+   --> prpr\src\ui.rs:688:13
+    |
+688 |             stencil: Some(0),
+    |             ^^^^^^^ `miniquad::PassAction::Clear` does not have this field
+    |
+    = note: all struct fields are already assigned
+
+error[E0308]: mismatched types
+   --> prpr\src\ui.rs:922:20
+    |
+922 |         gl.scissor(self.scissor);
+    |            ------- ^^^^^^^^^^^^ expected `Option<Rect>`, found `Option<(i32, i32, i32, i32)>`
+    |            |
+    |            arguments to this method are incorrect
+    |
+    = note: expected enum `Option<macroquad::Rect>`
+               found enum `Option<(i32, i32, i32, i32)>`
+note: method defined here
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:469:12
+    |
+469 |     pub fn scissor(&mut self, rect: Option<Rect>) {
+    |            ^^^^^^^
+
+error[E0308]: mismatched types
+   --> prpr\src\ui.rs:925:20
+    |
+925 |         gl.scissor(old);
+    |            ------- ^^^ expected `Option<Rect>`, found `Option<(i32, i32, i32, i32)>`
+    |            |
+    |            arguments to this method are incorrect
+    |
+    = note: expected enum `Option<macroquad::Rect>`
+               found enum `Option<(i32, i32, i32, i32)>`
+note: method defined here
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:469:12
+    |
+469 |     pub fn scissor(&mut self, rect: Option<Rect>) {
+    |            ^^^^^^^
+
+warning: unnecessary `unsafe` block
+   --> prpr\src\core\resource.rs:397:62
+    |
+397 | ...   gl.texture(Some(Texture2D::from_miniquad_texture(unsafe { Texture::from_raw_id(tex_id, miniquad::TextureFor
+mat::RGBA8) })));
+    |                                                        ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
+   --> prpr\src\core\resource.rs:394:13
+    |
+394 | ...   let gl = gl.quad_gl;
+    |           ^^ not mutable
+395 | ...   gl.draw_mode(DrawMode::Triangles);
+    |       -- cannot borrow as mutable
+396 | ...   for ((_, tex_id), meshes) in std::mem::take(&mut self.0).into_iter() {
+397 | ...       gl.texture(Some(Texture2D::from_miniquad_texture(unsafe { Texture::from_raw_id(tex_id, miniquad::Textur
+eFormat::RGBA8) })));
+    |           -- cannot borrow as mutable
+398 | ...       for mesh in meshes {
+399 | ...           gl.geometry(&mesh.0, &mesh.1);
+    |               -- cannot borrow as mutable
+    |
+help: consider changing this to be mutable
+    |
+394 |         let mut gl = gl.quad_gl;
+    |             +++
+
+error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
+   --> prpr\src\ext.rs:275:9
+    |
+275 |     let gl = unsafe { get_internal_gl() }.quad_gl;
+    |         ^^ not mutable
+...
+284 |         gl.texture(Some(tex));
+    |         -- cannot borrow as mutable
+...
+292 |         gl.texture(None);
+    |         -- cannot borrow as mutable
+...
+300 |     gl.draw_mode(DrawMode::Triangles);
+    |     -- cannot borrow as mutable
+301 |     gl.geometry(&v, &[0, 2, 3, 0, 1, 3]);
+    |     -- cannot borrow as mutable
+    |
+help: consider changing this to be mutable
+    |
+275 |     let mut gl = unsafe { get_internal_gl() }.quad_gl;
+    |         +++
+
+error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
+   --> prpr\src\ext.rs:325:9
+    |
+325 |     let gl = unsafe { get_internal_gl() }.quad_gl;
+    |         ^^ not mutable
+326 |     gl.texture(None);
+    |     -- cannot borrow as mutable
+327 |     gl.draw_mode(DrawMode::Triangles);
+    |     -- cannot borrow as mutable
+328 |     gl.geometry(&p, &[0, 1, 2, 1, 2, 3, 0, 1, 5, 0, 5, 4, 4, 5, 6, 5, 6, 7, 6, 7, 2, 7, 2, 3]);
+    |     -- cannot borrow as mutable
+    |
+help: consider changing this to be mutable
+    |
+325 |     let mut gl = unsafe { get_internal_gl() }.quad_gl;
+    |         +++
+
+error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
+   --> prpr\src\ext.rs:346:9
+    |
+346 |     let gl = unsafe { get_internal_gl() }.quad_gl;
+    |         ^^ not mutable
+347 |     gl.texture(None);
+    |     -- cannot borrow as mutable
+348 |     gl.draw_mode(DrawMode::Triangles);
+    |     -- cannot borrow as mutable
+349 |     gl.geometry(&p, &[0, 1, 2, 1, 2, 3, 0, 2, 4, 4, 0, 6, 4, 5, 6, 5, 6, 7, 1, 3, 5, 5, 1, 7]);
+    |     -- cannot borrow as mutable
+    |
+help: consider changing this to be mutable
+    |
+346 |     let mut gl = unsafe { get_internal_gl() }.quad_gl;
+    |         +++
+
+error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
+   --> prpr\src\ext.rs:449:5
+    |
+449 |     gl.make_pipeline(
+    |     ^^ cannot borrow as mutable
+    |
+help: consider changing this to be mutable
+    |
+446 |         quad_gl: mut gl,
+    |                  +++
+
+error[E0507]: cannot move out of index of `Vec<miniquad::Buffer>`
+   --> prpr\src\particle.rs:626:38
+    |
+626 |                 .build_bindings(ctx, self.bindings.vertex_buffers[1], self.config.texture);
+    |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ move occurs because value has type `miniquad
+::Buffer`, which does not implement the `Copy` trait
+    |
+help: you can `clone` the value and consume it, but this might not be your desired behavior
+    |
+626 |                 .build_bindings(ctx, <miniquad::Buffer as Clone>::clone(&self.bindings.vertex_buffers[1]), self.c
+onfig.texture);
+    |                                      ++++++++++++++++++++++++++++++++++++                               +
+
+error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
+   --> prpr\src\ui\text.rs:391:13
+    |
+391 |         let gl = unsafe { get_internal_gl() }.quad_gl;
+    |             ^^ not mutable
+392 |         gl.texture(Some(self.cache_texture));
+    |         -- cannot borrow as mutable
+...
+400 |             gl.geometry(&vertices, &[0, 2, 3, 0, 1, 3]);
+    |             -- cannot borrow as mutable
+    |
+help: consider changing this to be mutable
+    |
+391 |         let mut gl = unsafe { get_internal_gl() }.quad_gl;
+    |             +++
+
+error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
+   --> prpr\src\ui.rs:142:13
+    |
+142 |         let gl = unsafe { get_internal_gl() }.quad_gl;
+    |             ^^ not mutable
+143 |         gl.texture(self.shading.texture());
+    |         -- cannot borrow as mutable
+144 |         gl.draw_mode(DrawMode::Triangles);
+    |         -- cannot borrow as mutable
+145 |         gl.geometry(&self.vertices, &self.indices);
+    |         -- cannot borrow as mutable
+    |
+help: consider changing this to be mutable
+    |
+142 |         let mut gl = unsafe { get_internal_gl() }.quad_gl;
+    |             +++
+
+error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
+   --> prpr\src\ui.rs:796:13
+    |
+796 |         let gl = unsafe { get_internal_gl() }.quad_gl;
+    |             ^^ not mutable
+797 |         gl.texture(texture);
+    |         -- cannot borrow as mutable
+798 |         gl.draw_mode(DrawMode::Triangles);
+    |         -- cannot borrow as mutable
+799 |         gl.geometry(&std::mem::take(&mut self.vertex_buffers.vertices), &std::mem::take(&mut self.vertex_buffers.
+indices));
+    |         -- cannot borrow as mutable
+    |
+help: consider changing this to be mutable
+    |
+796 |         let mut gl = unsafe { get_internal_gl() }.quad_gl;
+    |             +++
+
+error[E0596]: cannot borrow `gl` as mutable, as it is not declared as mutable
+   --> prpr\src\ui.rs:880:13
+    |
+880 |         let gl = unsafe { get_internal_gl() }.quad_gl;
+    |             ^^ not mutable
+881 |         gl.push_model_matrix(transform);
+    |         -- cannot borrow as mutable
+...
+885 |         gl.pop_model_matrix();
+    |         -- cannot borrow as mutable
+    |
+help: consider changing this to be mutable
+    |
+880 |         let mut gl = unsafe { get_internal_gl() }.quad_gl;
+    |             +++
+
+Some errors have detailed explanations: E0061, E0277, E0308, E0507, E0559, E0596, E0599.
+For more information about an error, try `rustc --explain E0061`.
+warning: `prpr` (lib) generated 3 warnings
+error: could not compile `prpr` (lib) due to 38 previous errors; 3 warnings emitted
