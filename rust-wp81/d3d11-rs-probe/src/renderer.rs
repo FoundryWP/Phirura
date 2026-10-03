@@ -136,22 +136,60 @@ pub struct Pipeline {
 ///
 /// Returns `(device, context, feature_level, adapter_description)`.
 ///
-/// This deliberately mirrors Microsoft's own WP8.1 XAML/DirectX sample (`DeviceResources.cpp`) rather
-/// than the "enumerate adapters, pick the first non-software one, create with an explicit adapter +
-/// `D3D_DRIVER_TYPE_UNKNOWN`" shape the probe used:
+/// **Device shape matters, and this one was chosen by measurement, not by preference.** Two shapes
+/// were tried on the device and they fail *differently*:
 ///
-///     D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, 0, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-///                       levels[], …, D3D11_SDK_VERSION, &device, &level, &context);
+/// | shape | `CreateSwapChainForComposition` |
+/// | --- | --- |
+/// | enumerated adapter + `D3D_DRIVER_TYPE_UNKNOWN` (this one) | returns `DXGI_ERROR_INVALID_CALL` |
+/// | default adapter + `D3D_DRIVER_TYPE_HARDWARE` (the WP8.1 sample's) | **hard-faults the process** |
 ///
-/// That difference is not cosmetic. On device the adapter-enumerated + `UNKNOWN` shape produced a
-/// device that DXGI then refused for **both** swapchain routes:
-/// `CreateSwapChainForComposition` → `DXGI_ERROR_INVALID_CALL` on every descriptor variant, and
-/// `CreateSwapChainForCoreWindow` → `E_INVALIDARG`. Both failures point at the device, not the
-/// descriptor, so the device creation is what moved to the sample's shape.
+/// A clean error is worth far more than a crash when there is no debugger, so the probe keeps the
+/// enumerated-adapter shape until the swapchain question is settled. The sample's shape stays
+/// available behind [`create_device_default_adapter`] for a re-test once the attach is proven.
 ///
-/// `adapter_desc` is still filled in (via the device's own `IDXGIDevice::GetAdapter`), because the
-/// log's adapter name is the one piece of the old path worth keeping.
+/// `adapter_desc` comes from the chosen adapter's own `IDXGIAdapter1::GetDesc1`.
 pub unsafe fn create_device() -> Option<(ComPtr, ComPtr, u32, [u16; 128])> {
+    let mut factory = ComPtr::NULL;
+    if CreateDXGIFactory1(
+        &IID_IDXGIFACTORY1 as *const Guid,
+        &mut factory.vtbl as *mut _ as *mut *mut c_void,
+    ) < 0
+        || factory.is_null()
+    {
+        return None;
+    }
+
+    let enum_adapters1: extern "system" fn(*mut c_void, UINT, *mut *mut c_void) -> HRESULT =
+        factory.method(IDXGIFACTORY1_ENUMADAPTERS1);
+    let mut chosen = ComPtr::NULL;
+    let mut chosen_desc = DXGI_ADAPTER_DESC1::default();
+    let mut i = 0u32;
+    loop {
+        let mut ad = ComPtr::NULL;
+        if enum_adapters1(factory.vtbl as *mut c_void, i, &mut ad.vtbl as *mut _ as *mut *mut c_void) < 0
+            || ad.is_null()
+        {
+            break;
+        }
+        let get_desc1: extern "system" fn(*mut c_void, *mut DXGI_ADAPTER_DESC1) -> HRESULT =
+            ad.method(IDXGIADAPTER1_GETDESC1);
+        let mut desc = DXGI_ADAPTER_DESC1::default();
+        if get_desc1(ad.vtbl as *mut c_void, &mut desc) >= 0
+            && (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0
+        {
+            chosen = ad;
+            chosen_desc = desc;
+            break;
+        }
+        ad.release();
+        i += 1;
+    }
+    factory.release();
+    if chosen.is_null() {
+        return None;
+    }
+
     let levels = [
         D3D_FEATURE_LEVEL_11_1,
         D3D_FEATURE_LEVEL_11_0,
@@ -165,7 +203,44 @@ pub unsafe fn create_device() -> Option<(ComPtr, ComPtr, u32, [u16; 128])> {
     let mut context = ComPtr::NULL;
     let mut level = 0u32;
     let hr = D3D11CreateDevice(
-        core::ptr::null_mut(), // default adapter
+        chosen.vtbl as *mut c_void,
+        D3D_DRIVER_TYPE_UNKNOWN,
+        core::ptr::null_mut(),
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        levels.as_ptr(),
+        levels.len() as u32,
+        D3D11_SDK_VERSION,
+        &mut device.vtbl as *mut _ as *mut *mut c_void,
+        &mut level,
+        &mut context.vtbl as *mut _ as *mut *mut c_void,
+    );
+    chosen.release();
+    if hr < 0 || device.is_null() {
+        return None;
+    }
+    Some((device, context, level, chosen_desc.Description))
+}
+
+/// The WP8.1 sample's device shape: default adapter, `D3D_DRIVER_TYPE_HARDWARE`, `BGRA_SUPPORT`.
+///
+/// Kept as a named alternative (not dead code) because the on-device comparison between this and
+/// [`create_device`] is the evidence behind the table in that function's doc comment. Currently
+/// unused by the bring-up path.
+pub unsafe fn create_device_default_adapter() -> Option<(ComPtr, ComPtr, u32, [u16; 128])> {
+    let levels = [
+        D3D_FEATURE_LEVEL_11_1,
+        D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1,
+        D3D_FEATURE_LEVEL_10_0,
+        D3D_FEATURE_LEVEL_9_3,
+        D3D_FEATURE_LEVEL_9_2,
+        D3D_FEATURE_LEVEL_9_1,
+    ];
+    let mut device = ComPtr::NULL;
+    let mut context = ComPtr::NULL;
+    let mut level = 0u32;
+    let hr = D3D11CreateDevice(
+        core::ptr::null_mut(),
         D3D_DRIVER_TYPE_HARDWARE,
         core::ptr::null_mut(),
         D3D11_CREATE_DEVICE_BGRA_SUPPORT,
@@ -179,30 +254,7 @@ pub unsafe fn create_device() -> Option<(ComPtr, ComPtr, u32, [u16; 128])> {
     if hr < 0 || device.is_null() {
         return None;
     }
-
-    // Fill the description from the device's own adapter, purely for the log. A failure here is not
-    // fatal - the caller treats an all-zero description as "unknown adapter".
-    let mut desc_out = DXGI_ADAPTER_DESC1::default();
-    let mut dxgi_device = ComPtr::NULL;
-    if device.query_interface(&IID_IDXGIDEVICE, &mut dxgi_device.vtbl as *mut _ as *mut *mut c_void) >= 0
-        && !dxgi_device.is_null()
-    {
-        let mut adapter = ComPtr::NULL;
-        let get_adapter: extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT =
-            dxgi_device.method(7);
-        if get_adapter(dxgi_device.vtbl as *mut c_void, &mut adapter.vtbl as *mut _ as *mut *mut c_void) >= 0
-            && !adapter.is_null()
-        {
-            // IDXGIAdapter1::GetDesc1 is slot 10 (IDXGIAdapter::GetDesc is slot 8).
-            let get_desc1: extern "system" fn(*mut c_void, *mut DXGI_ADAPTER_DESC1) -> HRESULT =
-                adapter.method(IDXGIADAPTER1_GETDESC1);
-            let _ = get_desc1(adapter.vtbl as *mut c_void, &mut desc_out);
-            adapter.release();
-        }
-        dxgi_device.release();
-    }
-
-    Some((device, context, level, desc_out.Description))
+    Some((device, context, level, [0u16; 128]))
 }
 
 /// Create a composition swapchain for a XAML `SwapChainPanel` and attach it.
@@ -236,10 +288,10 @@ pub const SC_CREATE_OK: i32 = 26;
 ///
 /// Variant 0 is Microsoft's own Windows Phone 8.1 sample shape; the rest are fallbacks.
 pub static SC_VARIANT_NAMES: [&[u8]; 4] = [
+    b"DISCARD x1 IGNORE (FL9.3 control)\0",
+    b"SEQUENTIAL x1 IGNORE (control)\0",
     b"FLIP_SEQUENTIAL x2 IGNORE (official WP8.1 sample)\0",
     b"FLIP_SEQUENTIAL x2 PREMULTIPLIED\0",
-    b"DISCARD x1 IGNORE (control)\0",
-    b"SEQUENTIAL x1 IGNORE (control)\0",
 ];
 
 pub unsafe fn create_swapchain_for_panel_traced(
@@ -298,6 +350,25 @@ pub unsafe fn create_swapchain_for_panel_traced(
         return None;
     }
 
+    // The `limit = 19` bisect stop wants the *other* factory source: a factory created directly by
+    // `CreateDXGIFactory1`, not one derived from the device's adapter. If `CreateSwapChainForComposition`
+    // succeeds on this factory but fails on the `GetParent`-derived one, the derived object was the
+    // problem all along; if both fail identically, the factory is exonerated.
+    if crate::limit_is(19) {
+        crate::set_tick(19);
+        let mut direct = ComPtr::NULL;
+        if CreateDXGIFactory1(
+            &IID_IDXGIFACTORY2 as *const Guid,
+            &mut direct.vtbl as *mut _ as *mut *mut c_void,
+        ) >= 0
+            && !direct.is_null()
+        {
+            crate::dump_vtable(direct);
+            factory.release();
+            factory = direct;
+        }
+    }
+
     // The phone's DXGI is not the desktop's: `GetParent(IID_IDXGIFactory2)` can succeed yet hand
     // back an object whose vtable is SHORTER than `IDXGIFactory2` (i.e. it is really an
     // `IDXGIFactory1` that answered the QI). Reading slot 24 from a short vtable returns whatever
@@ -332,6 +403,10 @@ pub unsafe fn create_swapchain_for_panel_traced(
 
     // Honour a bisect stop at the factory stage. This is the only way to read the vtable (and the
     // probe results) on the phone, because the very next call is the one that dies.
+    //
+    // `limit = 19` is deliberately NOT stopped here: it wants the *direct* factory above, then the
+    // real `CreateSwapChainForComposition` call so its HRESULT lands in the `sc-hr` table, and only
+    // then stops.
     if crate::limit_is(13) || crate::limit_is(18) {
         crate::set_tick(13);
         return None;
@@ -360,35 +435,37 @@ pub unsafe fn create_swapchain_for_panel_traced(
         name: &'static [u8],
     }
     let variants: [Variant; 4] = [
-        // The official WP8.1 sample's shape.
-        Variant {
-            swap_effect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-            buffer_count: 2,
-            alpha_mode: DXGI_ALPHA_MODE_IGNORE,
-            name: b"FLIP_SEQUENTIAL x2 ignore-alpha (official WP8.1 sample)\0",
-        },
-        // The same, but with premultiplied alpha (the Microsoft doc for `SwapChainPanel` forbids
-        // this, but it is the shape that appeared to hard-fault first, so its HRESULT is worth seeing).
-        Variant {
-            swap_effect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-            buffer_count: 2,
-            alpha_mode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-            name: b"FLIP_SEQUENTIAL x2 premultiplied\0",
-        },
-        // Non-flip effects: illegal for `CreateSwapChainForComposition` by spec, so these are the
-        // controls - if one of them *succeeds*, the spec is not being enforced and the flip model is
-        // genuinely unimplemented on this driver.
+        // DISCARD first, deliberately. On the Adreno 225 / FL 9.3 the flip model
+        // (`FLIP_SEQUENTIAL`) does not merely fail - it HARD-FAULTS this driver, and because the
+        // loop tries v0 first, a fault there means v1..v3 never run and their HRESULTs stay "n/a"
+        // forever. The flip model is a feature-level-10+ concept and this device is 9.3, so the
+        // non-flip controls are the shapes actually worth measuring first. The spec says
+        // composition requires `FLIP_SEQUENTIAL`, but a driver that faults on the spec answer is a
+        // driver whose real answer has to be found by trying the alternatives.
         Variant {
             swap_effect: DXGI_SWAP_EFFECT_DISCARD,
             buffer_count: 1,
             alpha_mode: DXGI_ALPHA_MODE_IGNORE,
-            name: b"DISCARD x1 ignore-alpha (control)\0",
+            name: b"DISCARD x1 ignore-alpha (FL9.3 control)\0",
         },
         Variant {
             swap_effect: DXGI_SWAP_EFFECT_SEQUENTIAL,
             buffer_count: 1,
             alpha_mode: DXGI_ALPHA_MODE_IGNORE,
             name: b"SEQUENTIAL x1 ignore-alpha (control)\0",
+        },
+        // The official WP8.1 sample's shape. Kept, but no longer first: it is the one that faults.
+        Variant {
+            swap_effect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+            buffer_count: 2,
+            alpha_mode: DXGI_ALPHA_MODE_IGNORE,
+            name: b"FLIP_SEQUENTIAL x2 ignore-alpha (official WP8.1 sample)\0",
+        },
+        Variant {
+            swap_effect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+            buffer_count: 2,
+            alpha_mode: DXGI_ALPHA_MODE_PREMULTIPLIED,
+            name: b"FLIP_SEQUENTIAL x2 premultiplied\0",
         },
     ];
 
@@ -447,8 +524,13 @@ pub unsafe fn create_swapchain_for_panel_traced(
             *trace.add(1) = hr;
         }
         let _ = chosen;
-        return None;
-    }
+        // `limit = 19` wanted exactly this: the create call attempted against the direct factory,
+        // with its HRESULT recorded. Report it as an intentional stop so the bisect's "rc=0 = the
+        // step did not fault" invariant holds and C# logs the table.
+        if crate::limit_is(19) {
+            return None;
+        }
+        return None;    }
 
     // Surface which variant worked, through the same trace slot the failure path uses.
     if !trace.is_null() {

@@ -387,9 +387,10 @@ pub unsafe extern "C" fn wp81_rs_start_upto(
         }
         None => {
             // An intentional sub-step stop (limit 11..15, or 18 = "skip the probe and stop before
-            // slot 24") returns None without an error; report it as success so the bisect keeps its
-            // "rc=0 = the step did not fault" invariant.
-            if (s.limit >= 11 && s.limit <= 15) || s.limit == 18 {
+            // slot 24", or 19 = "use the direct factory, try the create, then stop") returns None
+            // without an error; report it as success so the bisect keeps its "rc=0 = the step did
+            // not fault" invariant.
+            if (s.limit >= 11 && s.limit <= 15) || s.limit == 18 || s.limit == 19 {
                 s.reached = s.limit;
                 return 0;
             }

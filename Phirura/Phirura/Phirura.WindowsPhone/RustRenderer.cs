@@ -399,13 +399,14 @@ namespace Phirura
             // 13 vs 18 are the pair that separates the two remaining suspects: both stop at the
             // factory, but 13 runs the `IsCurrent` soundness probe and 18 skips it. If 13 dies and
             // 18 is clean, `IsCurrent` is the faulting call; if both die, slot 24 is.
-            int[] limits = new int[] { 2, 10, 13, 18, 16, 20, 21, 30, 40, 50, 99 };
+            int[] limits = new int[] { 2, 10, 13, 18, 19, 16, 20, 21, 30, 40, 50, 99 };
             string[] after = new string[]
             {
                 "next: create_swapchain_for_panel_traced (QI/GetAdapter/GetParent/Create/attach)",
                 "next: enter the swapchain+panel-attach path",
                 "next: IDXGIFactory2::IsCurrent (probe ON) then CreateSwapChainForComposition",
                 "next: CreateSwapChainForComposition (probe OFF - isolates slot 24 if this dies)",
+                "next: CreateSwapChainForComposition on a direct CreateDXGIFactory1 factory",
                 "next: IDXGISwapChain::GetBuffer(0) + CreateRenderTargetView",
                 "next: ID3D11Device::CreateRenderTargetView",
                 "next: build_pipeline (D3DCompile + Create*Shader + CreateInputLayout + buffers/states)",
@@ -455,7 +456,7 @@ namespace Phirura
                         // step that fails. So log the table HERE, on the failure path, before
                         // returning - otherwise `sc-hr` is read after a step that never tried a
                         // variant (limits 10/13/18 all stop *before* slot 24) and reads all-n/a.
-                        if (limit == 16)
+                        if (limit == 16 || limit == 19)
                         {
                             LogVtable();
                         }
@@ -465,7 +466,7 @@ namespace Phirura
                     // The step that builds the swapchain is also where the factory vtable gets
                     // snapshotted. Log it as soon as that step has succeeded, because the NEXT step
                     // is the one that dies and takes the log's tail with it.
-                    if (limit == 10 || limit == 13 || limit == 18 || limit == 16)
+                    if (limit == 10 || limit == 13 || limit == 18 || limit == 16 || limit == 19)
                     {
                         LogVtable();
                     }
