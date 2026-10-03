@@ -3,6 +3,13 @@
 > Status: **approved plan.** The import surface was verified against the WP8.1 kit's own ARM
 > import libraries and against the device image (`2026-10-04.md`, Round 38). This document is the
 > ordered work list.
+>
+> **Stage 1 is built and verified against the real D3D11 runtime** (`2026-10-04.md`, Round 39):
+> `src/bin/hostcheck.rs` compiles the same binding for the desktop and runs device → swapchain →
+> RTV → pipeline → clear → `Draw(4,0)` → present, all passing. It found and fixed three
+> crash-on-device bugs (vtable base offset, every device-context slot off by 4, a missing `Map`
+> argument). The remaining Stage 1 acceptance item is the on-device run, which needs the phone
+> connected.
 
 ## The goal
 
@@ -75,8 +82,9 @@ Key decisions to make in this stage:
     `SetSwapChain` by hand, IID `63aad0b8-7c24-40ff-85a8-640d944cc325`).
 - **Formats.** `DXGI_FORMAT_B8G8R8A8_UNORM` + `DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL` if FL9.3 allows
   it, else `DISCARD` with `R8G8B8A8_UNORM`. Verify on device.
-- Vertex stride 32 bytes (pos3 + uv2 + rgba4 = 9 floats, pad to 32? no — 9*4 = 36; use
-  `pos2 (8) + uv2 (8) + rgba4 (16) = 32` and drop `z`).
+- Vertex stride **36 bytes**: `pos3 (12) + uv2 (8) + rgba4 (16)`. `z` is kept at 0 — it costs 4
+  bytes and keeps the layout identical to macroquad/sokol's `Vertex`, so the Stage 3 port needs no
+  re-mapping. (`MAX_VERTICES = 65536` → a ~2.3 MB dynamic buffer.)
 
 Acceptance: builds; `check_imports.py` still passes; on device a solid quad appears on a
 `SwapChainPanel`.

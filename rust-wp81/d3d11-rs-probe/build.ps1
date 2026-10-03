@@ -58,6 +58,7 @@ $env:MSYS2_ARG_CONV_EXCL = "*"
 # build-port.ps1 documents.
 $cargoArgs = @(
     "build",
+    "--lib",
     "--target", $target,
     "-Zjson-target-spec",
     "-Zbuild-std=std,panic_abort",
@@ -108,10 +109,21 @@ $linkArgs = @(
     $staticlib,
     $CompatRlib,
     $chkstk,
+    "d3d11.lib",
+    "dxgi.lib",
+    "d3dcompiler.lib",
     "WindowsPhoneCore.lib",
     "ws2_32.lib",
     "/EXPORT:wp81_d3d11_rs_probe",
-    "/EXPORT:wp81_d3d11_rs_report"
+    "/EXPORT:wp81_d3d11_rs_report",
+    "/EXPORT:wp81_rs_start",
+    "/EXPORT:wp81_rs_clear",
+    "/EXPORT:wp81_rs_draw_test_quad",
+    "/EXPORT:wp81_rs_present",
+    "/EXPORT:wp81_rs_stop",
+    "/EXPORT:wp81_rs_stage",
+    "/EXPORT:wp81_rs_last_hr",
+    "/EXPORT:wp81_rs_vertex_count"
 )
 $savedEap2 = $ErrorActionPreference
 $ErrorActionPreference = "Continue"

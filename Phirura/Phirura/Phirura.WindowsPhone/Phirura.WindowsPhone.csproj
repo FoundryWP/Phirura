@@ -105,6 +105,7 @@
     <Compile Include="NativeProbe.cs" />
     <Compile Include="SfxPlayer.cs" />
     <Compile Include="Win2DChartRenderer.cs" />
+    <Compile Include="RustRenderer.cs" />
   </ItemGroup>
   <ItemGroup>
     <AppxManifest Include="Package.appxmanifest">
@@ -159,6 +160,10 @@
     <!-- Conditional: the Rust port is still being brought up, and a missing file in a
          Content item fails the whole build. The app must stay shippable either way. -->
     <Content Include="wp81prpr.dll" Condition="Exists('wp81prpr.dll')" />
+    <!-- Path A: the Rust-owned D3D11 renderer (rust-wp81/d3d11-rs-probe/out/wp81d3d11rs.dll).
+         Imports only d3d11.dll / dxgi.dll / d3dcompiler_47.dll - all three present on WP8.1.
+         Same package-root rule as the other natives. -->
+    <Content Include="wp81d3d11rs.dll" Condition="Exists('wp81d3d11rs.dll')" />
   </ItemGroup>
   <ItemGroup>
     <Page Include="GamePage.xaml">

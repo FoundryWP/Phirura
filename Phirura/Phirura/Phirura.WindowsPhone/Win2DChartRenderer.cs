@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using Microsoft.Graphics.Canvas;
+using Microsoft.Graphics.Canvas.Geometry;
 using Microsoft.Graphics.Canvas.UI.Xaml;
 using Phirura.Core;
 using Windows.Foundation;
@@ -902,13 +903,13 @@ namespace Phirura.Game
                 int i2 = (int)c.istart + t + 2;
 
                 if (i0 >= frame.Indices.Length) break;
-                PrprPort.PortVertex v0 = Vert(frame, c.vstart + frame.Indices[i0]);
-                PrprPort.PortVertex v1 = Vert(frame, c.vstart + frame.Indices[i1]);
+                PrprPort.PortVertex v0 = Vert(frame, (int)c.vstart + (int)frame.Indices[i0]);
+                PrprPort.PortVertex v1 = Vert(frame, (int)c.vstart + (int)frame.Indices[i1]);
 
                 if (mode == 0)
                 {
                     if (i2 >= frame.Indices.Length) break;
-                    PrprPort.PortVertex v2 = Vert(frame, c.vstart + frame.Indices[i2]);
+                    PrprPort.PortVertex v2 = Vert(frame, (int)c.vstart + (int)frame.Indices[i2]);
                     FillPortTriangle(ds, v0, v1, v2, c.flags, hasTex);
                 }
                 else
@@ -1006,19 +1007,23 @@ namespace Phirura.Game
                 }
                 try
                 {
-                    // Direct3D expects BGRA; the shim holds RGBA. Swapping here rather than on the
-                    // Rust side keeps the shim's `from_rgba8` contract intact for any other caller.
-                    byte[] bgra = new byte[t.Rgba.Length];
-                    for (int p = 0; p + 3 < t.Rgba.Length; p += 4)
+                    // Win2D's WP8.1 fork only exposes CreateFromBytes with a DirectXPixelFormat
+                    // argument, and that enum lives in Windows.Graphics.DirectX, which does not
+                    // exist on WP8.1 (no winmd declares it). CreateFromColors takes plain
+                    // Windows.UI.Color values instead, so build the pixel array from RGBA bytes.
+                    int pixelCount = (int)(t.Width * t.Height);
+                    Color[] pixels = new Color[pixelCount];
+                    for (int p = 0; p < pixelCount; p++)
                     {
-                        bgra[p + 0] = t.Rgba[p + 2];
-                        bgra[p + 1] = t.Rgba[p + 1];
-                        bgra[p + 2] = t.Rgba[p + 0];
-                        bgra[p + 3] = t.Rgba[p + 3];
+                        int o = p * 4;
+                        if (o + 3 >= t.Rgba.Length)
+                        {
+                            break;
+                        }
+                        pixels[p] = Color.FromArgb(t.Rgba[o + 3], t.Rgba[o + 0], t.Rgba[o + 1], t.Rgba[o + 2]);
                     }
-                    _portTextures[t.Id] = CanvasBitmap.CreateFromBytes(
-                        ds.Device, bgra, (int)t.Width, (int)t.Height,
-                        Windows.Graphics.DirectX.DirectXPixelFormat.B8G8R8A8UIntNormalized);
+                    _portTextures[t.Id] = CanvasBitmap.CreateFromColors(
+                        ds.Device, pixels, (int)t.Width, (int)t.Height);
                 }
                 catch (Exception ex)
                 {

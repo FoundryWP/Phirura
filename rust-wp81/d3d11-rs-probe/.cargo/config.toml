@@ -1,0 +1,20 @@
+# Host-only link flags for the desktop verification harness (`src/bin/hostcheck.rs`).
+#
+# `[target.'cfg(all(windows, not(target_arch = "arm")))']` scopes this to the build machine; the
+# WP8.1 ARM build (`build.ps1`, which calls `link.exe` by hand with the kit's ARM libs) never sees
+# it.
+#
+# Rust turns `#[link(name = "d3d11.dll")]` into a request for `d3d11.dll.lib`, which the Win8.1 SDK
+# does not ship (it has `d3d11.lib`). Rather than fight the link-name derivation, the imports in
+# `direct.rs` carry no `#[link]` and the libraries are named here, exactly as the ARM path names
+# them in `build.ps1`.
+
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-L", "native=C:\\Program Files (x86)\\Windows Kits\\8.1\\Lib\\winv6.3\\um\\x64",
+    "-L", "native=C:\\Program Files (x86)\\Microsoft Visual Studio 11.0\\VC\\lib\\amd64",
+    "-l", "d3d11",
+    "-l", "dxgi",
+    "-l", "d3dcompiler",
+    "-l", "user32",
+]

@@ -84,6 +84,12 @@ namespace Phirura
             StatusText.Text = "正在运行 Rust 端口自检 …";
             AppLog.Write("MainPage: running prpr port self-test");
             PrprPort.RunSelfTest(SamplePec);
+
+            // Path A: the Rust-owned D3D11 renderer. It cannot attach to a panel from here, so
+            // what this proves is that the DLL loads on the phone and reports its start-up state -
+            // a missing import or a bad image names itself rather than failing silently later.
+            string rs = RustRenderer.RunSelfTest();
+            AppLog.Write("MainPage: RustRenderer self-test -> " + rs.Replace('\n', ' '));
         }
 
         /// <summary>

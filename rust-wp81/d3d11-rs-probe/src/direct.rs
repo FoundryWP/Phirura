@@ -15,7 +15,10 @@
 //! | --- | --- | --- |
 //! | `ID3D11Device::CreateRenderTargetView` | 10 (that is CreateDepthStencilView) | **9** |
 //! | `ID3D11DeviceContext::ClearRenderTargetView` | 50 (that is GenerateMips) | **46** |
-//! | `IDXGIAdapter1::GetDesc1` | 10 | **6** |
+//! | `IDXGIFactory::CreateSwapChain` | 9 (that is GetWindowAssociation) | **10** |
+//!
+//! (`IDXGIAdapter1::GetDesc1` = 10 and `IDXGIFactory1::EnumAdapters1` = 12 were already right;
+//! the full chains are IUnknown 0..2, IDXGIObject 3..6, then the derived interface from 7.)
 //!
 //! The device/adapter creation path was verified independently by a C++ probe reaching the Adreno
 //! 225 on a real device, so the entry points are right; these slots are the part that was not.
@@ -44,7 +47,8 @@ pub type LUID = u64;
 pub const S_OK: HRESULT = 0;
 pub const E_INVALIDARG: HRESULT = 0x8007_0057u32 as HRESULT;
 
-/// A COM interface pointer. `vtbl` is the object's first word; every method is a slot in it.
+/// A COM interface pointer. `vtbl` is the object pointer: `*vtbl` is the vtable, `(*vtbl)[n]` the
+/// n-th method. The `this` passed to every call is therefore `vtbl` itself.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ComPtr {
@@ -61,13 +65,15 @@ impl ComPtr {
 
     /// Fetch method slot `n` as a typed function pointer.
     ///
-    /// `transmute_copy` rather than `transmute`: `T` is a function pointer whose size is only known
-    /// to the caller, so it is read out of the slot with `transmute_copy`, which does not require
-    /// the two types to have equal size at the call site.
+    /// `*self.vtbl` is the vtable; slot `n` in it *is* the function address. Read that word and
+    /// reinterpret it as `T`; do not treat the address as a pointer to data (that reads the
+    /// function's own machine code and jumps through garbage). `transmute_copy` is used rather than
+    /// `transmute` because `T`'s size is only known to the caller.
     #[inline]
     pub unsafe fn method<T: Copy>(&self, n: usize) -> T {
-        let slot: *const T = *self.vtbl.add(n) as *const T;
-        core::mem::transmute_copy(&slot)
+        let vtable: *const usize = *self.vtbl;
+        let slot_addr: *const usize = vtable.add(n);
+        core::mem::transmute_copy(&*slot_addr)
     }
 
     /// `IUnknown::QueryInterface` (slot 0).
@@ -304,7 +310,12 @@ pub const D3D11_BIND_RENDER_TARGET: UINT = 0x20;
 pub const D3D11_CPU_ACCESS_WRITE: UINT = 0x10000;
 
 // D3D11.h - D3D11_MAP
-pub const D3D11_MAP_WRITE_DISCARD: UINT = 4;
+//
+// `ID3D11DeviceContext::Map` takes BOTH a `D3D11_MAP MapType` and a `UINT MapFlags`, in that
+// order, after the subresource index. Dropping the `MapFlags` argument silently shifts the
+// out-parameter into it and the call fails with `E_INVALIDARG`.
+pub type D3D11_MAP = UINT;
+pub const D3D11_MAP_WRITE_DISCARD: D3D11_MAP = 4;
 
 // D3D11.h - D3D11_PRIMITIVE_TOPOLOGY (D3Dcommon.h)
 pub const D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST: UINT = 4;
@@ -336,8 +347,9 @@ pub const D3D11_INPUT_PER_VERTEX_DATA: UINT = 0;
 
 // dxgi.h - DXGI_FORMAT
 pub const DXGI_FORMAT_UNKNOWN: UINT = 0;
-pub const DXGI_FORMAT_R32G32_FLOAT: UINT = 16;
 pub const DXGI_FORMAT_R32G32B32A32_FLOAT: UINT = 2;
+pub const DXGI_FORMAT_R32G32B32_FLOAT: UINT = 6;
+pub const DXGI_FORMAT_R32G32_FLOAT: UINT = 16;
 pub const DXGI_FORMAT_R8G8B8A8_UNORM: UINT = 28;
 pub const DXGI_FORMAT_B8G8R8A8_UNORM: UINT = 87;
 
@@ -357,9 +369,16 @@ pub const DXGI_ADAPTER_FLAG_SOFTWARE: UINT = 2;
 // the binding: WP8.1 module names only
 // ===========================================================================
 
-#[link(name = "d3d11.dll")]
+// The DLL names are supplied by the *linker*, not by `#[link]`.
+//
+// On WP8.1 `build.ps1` passes the kit's ARM `d3d11.lib` / `dxgi.lib` / `d3dcompiler.lib` straight
+// to `link.exe`; on the desktop host `build.rs` does the same for the SDK's x64 libs. Neither
+// wants Rust's `#[link]` machinery: `#[link(name = "d3d11.dll")]` makes MSVC ask for
+// `d3d11.dll.lib`, a file the SDK does not ship, and the ARM link already names the libraries
+// itself. Declaring the imports without `#[link]` keeps both paths explicit and identical.
+
 extern "system" {
-    fn D3D11CreateDevice(
+    pub fn D3D11CreateDevice(
         padapter: *mut c_void,
         drivertype: UINT,
         software: *mut c_void,
@@ -372,7 +391,7 @@ extern "system" {
         ppimmediatecontext: *mut *mut c_void,
     ) -> HRESULT;
 
-    fn D3D11CreateDeviceAndSwapChain(
+    pub fn D3D11CreateDeviceAndSwapChain(
         padapter: *mut c_void,
         drivertype: UINT,
         software: *mut c_void,
@@ -388,16 +407,14 @@ extern "system" {
     ) -> HRESULT;
 }
 
-#[link(name = "dxgi.dll")]
 extern "system" {
-    fn CreateDXGIFactory1(riid: *const Guid, ppfactory: *mut *mut c_void) -> HRESULT;
+    pub fn CreateDXGIFactory1(riid: *const Guid, ppfactory: *mut *mut c_void) -> HRESULT;
 }
 
-#[link(name = "d3dcompiler.dll")]
 extern "system" {
     /// Present in the kit's `d3dcompiler.lib` (61 symbols incl. `D3DCompile`, `D3DReflect`), so
     /// the phone can compile HLSL at runtime and offline DXBC is an optimisation, not a need.
-    fn D3DCompile(
+    pub fn D3DCompile(
         psrcdata: *const c_void,
         srcdatasize: usize,
         psourcename: *const u8,
@@ -415,44 +432,80 @@ extern "system" {
 // ===========================================================================
 // IIDs
 // ===========================================================================
+//
+// Every one of these is copied from a `DEFINE_GUID` line (or a `MIDL_INTERFACE` attribute) in the
+// WP8.1 kit's own headers. They were originally written from memory and six of them were wrong -
+// see the note at the top of this file. Do not "tidy" these.
 
+// dxgi.h
 pub const IID_IDXGIFACTORY1: Guid = Guid {
-    data1: 0x770a_a070,
-    data2: 0x5f86,
-    data3: 0x44c6,
-    data4: [0xa8, 0x45, 0x8f, 0xc6, 0x53, 0xbc, 0x5c, 0xcb],
+    data1: 0x770a_ae78,
+    data2: 0xf26f,
+    data3: 0x4dba,
+    data4: [0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87],
 };
 
-pub const IID_ID3D11DEVICE: Guid = Guid {
-    data1: 0xdb6f_6d30,
-    data2: 0x4eb2,
-    data3: 0x45de,
-    data4: [0x8e, 0x9f, 0xb4, 0xe3, 0x92, 0x8a, 0xa9, 0x9c],
+// dxgi1_2.h
+pub const IID_IDXGIFACTORY2: Guid = Guid {
+    data1: 0x50c8_3a1c,
+    data2: 0xe072,
+    data3: 0x4c48,
+    data4: [0x87, 0xb0, 0x36, 0x30, 0xfa, 0x36, 0xa6, 0xd0],
 };
 
-/// `IDXGISwapChain` (dxgi.h).
+// dxgi.h
+pub const IID_IDXGIDEVICE: Guid = Guid {
+    data1: 0x54ec_77fa,
+    data2: 0x1377,
+    data3: 0x44e6,
+    data4: [0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c],
+};
+
+// dxgi.h
 pub const IID_IDXGISWAPCHAIN: Guid = Guid {
-    data1: 0x310d_36b9,
-    data2: 0x231c,
-    data3: 0x47c3,
-    data4: [0xba, 0xb9, 0x75, 0xc9, 0x74, 0x8e, 0x2c, 0x81],
+    data1: 0x310d_36a0,
+    data2: 0xd2e7,
+    data3: 0x4c0a,
+    data4: [0xaa, 0x04, 0x6a, 0x9d, 0x23, 0xb8, 0x88, 0x6a],
 };
 
-/// `IDXGISwapChain1` (dxgi1_2.h) - what `CreateSwapChainForComposition` returns.
+// dxgi1_2.h
 pub const IID_IDXGISWAPCHAIN1: Guid = Guid {
-    data1: 0x790a_45d7,
-    data2: 0x9d6e,
-    data3: 0x4fb1,
-    data4: [0x97, 0x3b, 0x00, 0x87, 0xa4, 0xe3, 0x35, 0xef],
+    data1: 0x790a_45f7,
+    data2: 0x0d42,
+    data3: 0x4876,
+    data4: [0x98, 0x3a, 0x0a, 0x55, 0xcf, 0xe6, 0xf4, 0xaa],
+};
+
+// D3D11.h
+pub const IID_ID3D11DEVICE: Guid = Guid {
+    data1: 0xdb6f_6ddb,
+    data2: 0xac77,
+    data3: 0x4e88,
+    data4: [0x82, 0x53, 0x81, 0x9d, 0xf9, 0xbb, 0xf1, 0x40],
+};
+
+/// `ID3D11Texture2D` - used as the riid when asking a swapchain for its back buffer.
+pub const IID_ID3D11TEXTURE2D: Guid = Guid {
+    data1: 0x6f15_aaf2,
+    data2: 0xd208,
+    data3: 0x4e89,
+    data4: [0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c],
 };
 
 /// `ISwapChainPanelNative` (windows.ui.xaml.media.dxinterop.h) - the XAML side of composition.
+///
+/// The kit's own header gives the IID: `F92F19D2-3ADE-45A6-A20C-F6F1EA90554B`. It derives from
+/// `IUnknown` and has exactly one method, `SetSwapChain(IDXGISwapChain*)`, at slot 3.
 pub const IID_ISWAPCHAINPANELNATIVE: Guid = Guid {
-    data1: 0x63aa_d0b8,
-    data2: 0x7c24,
-    data3: 0x40ff,
-    data4: [0x85, 0xa8, 0x64, 0x0d, 0x94, 0x4c, 0xc3, 0x25],
+    data1: 0xf92f_19d2,
+    data2: 0x3ade,
+    data3: 0x45a6,
+    data4: [0xa2, 0x0c, 0xf6, 0xf1, 0xea, 0x90, 0x55, 0x4b],
 };
+
+/// `ISwapChainPanelNative::SetSwapChain` lives at slot 3 (the first method past IUnknown).
+pub const ISWAPCHAINPANELNATIVE_SETSWAPCHAIN: usize = 3;
 
 // ===========================================================================
 // vtable slots (already offset past IUnknown - a real method starts at 3)
@@ -462,7 +515,9 @@ pub const IID_ISWAPCHAINPANELNATIVE: Guid = Guid {
 pub const IDXGIADAPTER1_GETDESC1: usize = 10;
 // IDXGIObject (3..6) -> IDXGIFactory (7..11) -> IDXGIFactory1 (12 EnumAdapters1, 13 IsCurrent)
 pub const IDXGIFACTORY1_ENUMADAPTERS1: usize = 12;
-pub const IDXGIFACTORY_CREATESWAPCHAIN: usize = 9;
+// IDXGIFactory: 7 EnumAdapters, 8 MakeWindowAssociation, 9 GetWindowAssociation,
+// 10 CreateSwapChain, 11 CreateSoftwareAdapter
+pub const IDXGIFACTORY_CREATESWAPCHAIN: usize = 10;
 // IDXGIObject (3..6) -> IDXGIDeviceSubObject (7) -> IDXGISwapChain (8..17)
 pub const IDXGISWAPCHAIN_PRESENT: usize = 8;
 pub const IDXGISWAPCHAIN_GETBUFFER: usize = 9;
@@ -488,27 +543,33 @@ pub const D3D11DEVICE_CREATESAMPLERSTATE: usize = 23;
 pub const D3D11DEVICE_GETFEATURELEVEL: usize = 37;
 
 // ID3D11DeviceContext
-pub const D3D11CONTEXT_VSSETCONSTANTBUFFERS: usize = 3;
-pub const D3D11CONTEXT_PSSETSHADERRESOURCES: usize = 4;
-pub const D3D11CONTEXT_PSSETSHADER: usize = 5;
-pub const D3D11CONTEXT_PSSETSAMPLERS: usize = 6;
-pub const D3D11CONTEXT_VSSETSHADER: usize = 7;
-pub const D3D11CONTEXT_DRAWINDEXED: usize = 8;
-pub const D3D11CONTEXT_DRAW: usize = 9;
-pub const D3D11CONTEXT_MAP: usize = 10;
-pub const D3D11CONTEXT_UNMAP: usize = 11;
-pub const D3D11CONTEXT_PSSETCONSTANTBUFFERS: usize = 12;
-pub const D3D11CONTEXT_IASETINPUTLAYOUT: usize = 13;
-pub const D3D11CONTEXT_IASETVERTEXBUFFERS: usize = 14;
-pub const D3D11CONTEXT_IASETINDEXBUFFER: usize = 15;
-pub const D3D11CONTEXT_IASETPRIMITIVETOPOLOGY: usize = 20;
-pub const D3D11CONTEXT_OMSETRENDERTARGETS: usize = 29;
-pub const D3D11CONTEXT_OMSETBLENDSTATE: usize = 31;
-pub const D3D11CONTEXT_RSSETSTATE: usize = 39;
-pub const D3D11CONTEXT_RSSETVIEWPORTS: usize = 40;
-pub const D3D11CONTEXT_UPDATESUBRESOURCE: usize = 44;
-pub const D3D11CONTEXT_CLEARRENDERTARGETVIEW: usize = 46; // NOT 50 (that is GenerateMips)
-pub const D3D11CONTEXT_FLUSH: usize = 114;
+//
+// Base is `ID3D11DeviceChild`, i.e. IUnknown 0..2 plus GetDevice/GetPrivateData/SetPrivateData/
+// SetPrivateDataInterface at 3..6. The first *context* method is therefore slot **7**, not 3 -
+// verified by extracting the declaration order from `Windows Kits\8.1\Include\um\d3d11.h`.
+// (The `ID3D11Device` slots above start at 3 because that interface derives straight from
+// IUnknown; the two do not share an offset.)
+pub const D3D11CONTEXT_VSSETCONSTANTBUFFERS: usize = 7;
+pub const D3D11CONTEXT_PSSETSHADERRESOURCES: usize = 8;
+pub const D3D11CONTEXT_PSSETSHADER: usize = 9;
+pub const D3D11CONTEXT_PSSETSAMPLERS: usize = 10;
+pub const D3D11CONTEXT_VSSETSHADER: usize = 11;
+pub const D3D11CONTEXT_DRAWINDEXED: usize = 12;
+pub const D3D11CONTEXT_DRAW: usize = 13;
+pub const D3D11CONTEXT_MAP: usize = 14;
+pub const D3D11CONTEXT_UNMAP: usize = 15;
+pub const D3D11CONTEXT_PSSETCONSTANTBUFFERS: usize = 16;
+pub const D3D11CONTEXT_IASETINPUTLAYOUT: usize = 17;
+pub const D3D11CONTEXT_IASETVERTEXBUFFERS: usize = 18;
+pub const D3D11CONTEXT_IASETINDEXBUFFER: usize = 19;
+pub const D3D11CONTEXT_IASETPRIMITIVETOPOLOGY: usize = 24;
+pub const D3D11CONTEXT_OMSETRENDERTARGETS: usize = 33;
+pub const D3D11CONTEXT_OMSETBLENDSTATE: usize = 35;
+pub const D3D11CONTEXT_RSSETSTATE: usize = 43;
+pub const D3D11CONTEXT_RSSETVIEWPORTS: usize = 44;
+pub const D3D11CONTEXT_UPDATESUBRESOURCE: usize = 48;
+pub const D3D11CONTEXT_CLEARRENDERTARGETVIEW: usize = 50;
+pub const D3D11CONTEXT_FLUSH: usize = 111;
 
 // ===========================================================================
 // the probe report (kept: the C# side reads it to show what the platform gave us)
@@ -705,42 +766,27 @@ pub extern "C" fn wp81_d3d11_rs_report() -> *const D3d11ProbeResult {
 
 /// Expose the vtable-slot table to other modules of this crate, and to a runtime self-check.
 ///
-/// These are asserted in `tests` below rather than trusted: a wrong slot is a crash, not a
-/// compile error, so it is worth pinning the ones the renderer depends on.
+/// These are pinned here rather than trusted: a wrong slot is a crash, not a compile error, so
+/// the ones the renderer depends on get asserted.
 pub mod slots {
     pub const IDXGIADAPTER1_GETDESC1: usize = 10;
+    pub const IDXGIFACTORY_CREATESWAPCHAIN: usize = 10;
+    pub const IDXGIFACTORY1_ENUMADAPTERS1: usize = 12;
+    pub const IDXGISWAPCHAIN_PRESENT: usize = 8;
+    pub const IDXGISWAPCHAIN_GETBUFFER: usize = 9;
+    pub const IDXGISWAPCHAIN_RESIZEBUFFERS: usize = 13;
     pub const ID3D11DEVICE_CREATERENDERTARGETVIEW: usize = 9;
-    pub const ID3D11CONTEXT_CLEARRENDERTARGETVIEW: usize = 46;
-    pub const ID3D11CONTEXT_FLUSH: usize = 114;
+    pub const ID3D11DEVICE_CREATEINPUTLAYOUT: usize = 11;
+    pub const ID3D11CONTEXT_IASETVERTEXBUFFERS: usize = 18;
+    pub const ID3D11CONTEXT_DRAW: usize = 13;
+    pub const ID3D11CONTEXT_CLEARRENDERTARGETVIEW: usize = 50;
+    pub const ID3D11CONTEXT_FLUSH: usize = 111;
 }
 
 // ===========================================================================
 // CRT-free DLL entry point
 // ===========================================================================
 //
-// WP8.1 native DLLs must not import KERNEL32.dll, and the desktop ARM CRT's startup objects do
-// exactly that, so the link runs with /NODEFAULTLIB and this file supplies the entry point.
-
-/// Any code that touches floating point references this; the CRT would normally define it.
-#[no_mangle]
-pub static _fltused: i32 = 0;
-
-#[no_mangle]
-pub unsafe extern "system" fn DllMain(
-    _module: *mut c_void,
-    _reason: u32,
-    _reserved: *mut c_void,
-) -> i32 {
-    // Deliberately NOT calling DisableThreadLibraryCalls: Rust std's thread-locals want the
-    // thread attach/detach notifications to arrive.
-    1
-}
-
-#[no_mangle]
-pub unsafe extern "system" fn _DllMainCRTStartup(
-    module: *mut c_void,
-    reason: u32,
-    reserved: *mut c_void,
-) -> i32 {
-    DllMain(module, reason, reserved)
-}
+// The entry point (`_fltused`, `DllMain`, `_DllMainCRTStartup`) lives in `lib.rs`, because a
+// `#[no_mangle]` symbol may only be defined once in the final image. It is there rather than here
+// so the crate has a single obvious place for exported names.
