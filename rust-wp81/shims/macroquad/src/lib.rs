@@ -215,6 +215,20 @@ impl From<Color> for [u8; 4] {
     }
 }
 
+impl From<[f32; 4]> for Color {
+    /// RGBA floats [0.0, 1.0]. `prpr::ui::text` stores vertex colours as `[f32; 4]` and converts
+    /// them back to `Color` when building glyph geometry.
+    fn from(v: [f32; 4]) -> Self {
+        Color::new(v[0], v[1], v[2], v[3])
+    }
+}
+
+impl From<Color> for [f32; 4] {
+    fn from(c: Color) -> Self {
+        [c.r, c.g, c.b, c.a]
+    }
+}
+
 impl Default for Color {
     /// Opaque white. `prpr::core::effect` needs `Color: Default` for its `UniformValue` impl, and
     /// white is the identity for the multiplicative blending the effects use.
@@ -466,8 +480,9 @@ impl QuadGl {
         draw::push_geometry(vertices, indices);
     }
 
-    pub fn scissor(&mut self, rect: Option<Rect>) {
-        draw::set_scissor(rect);
+    pub fn scissor(&mut self, _rect: Option<(i32, i32, i32, i32)>) {
+        // The C# renderer applies its own scissor. On the paths prpr uses the recorded geometry is
+        // already correct, so this is a no-op on WP8.1.
     }
 
     pub fn push_model_matrix(&mut self, _mat: Mat4) {}
@@ -502,7 +517,9 @@ impl QuadGl {
     pub fn flush(&mut self) {}
 
     /// `prpr::ext::get_viewport` unwraps this with a fallback, so `None` means "ask the shell".
-    pub fn get_viewport(&self) -> Option<Rect> {
+    ///
+    /// Returns `(x, y, w, h)` — the tuple form that `prpr` destructures directly.
+    pub fn get_viewport(&self) -> Option<(i32, i32, i32, i32)> {
         None
     }
 
@@ -671,6 +688,16 @@ impl Default for Camera2D {
             render_target: None,
             viewport: None,
         }
+    }
+}
+
+impl Camera2D {
+    /// Returns the render pass from this camera's render target, if any.
+    ///
+    /// `prpr::scene::game` calls `.or_else(|| res.camera.render_pass())` to pick the render target
+    /// to draw into. On WP8.1 the C# renderer owns targets; the value is forwarded as an opaque id.
+    pub fn render_pass(&self) -> Option<crate::miniquad_compat::RenderPass> {
+        self.render_target.map(|rt| rt.render_pass)
     }
 }
 

@@ -112,13 +112,17 @@ pub mod macroquad_compat_types {
         Nothing,
         Clear {
             color: Option<(f32, f32, f32, f32)>,
+            /// Depth buffer clear value; WP8.1 C# renderer ignores this field.
+            depth: Option<f32>,
+            /// Stencil buffer clear value; WP8.1 C# renderer ignores this field.
+            stencil: Option<i32>,
         },
     }
 
     impl PassAction {
         /// The constructor form `prpr` uses.
-        pub fn clear_color(color: (f32, f32, f32, f32)) -> Self {
-            PassAction::Clear { color: Some(color) }
+        pub fn clear_color(r: f32, g: f32, b: f32, a: f32) -> Self {
+            PassAction::Clear { color: Some((r, g, b, a)), depth: None, stencil: None }
         }
     }
 
@@ -447,6 +451,8 @@ impl Context {
     pub fn apply_scissor_rect(&mut self, _x: i32, _y: i32, _w: i32, _h: i32) {}
     pub fn apply_pipeline(&mut self, _pipeline: &Pipeline) {}
     pub fn apply_bindings(&mut self, _bindings: &Bindings) {}
+    /// Applies shader uniforms. The values are dropped - the C# renderer owns pipelines.
+    pub fn apply_uniforms<T>(&mut self, _uniforms: &T) {}
     pub fn draw(&mut self, _base_element: i32, _num_elements: i32, _num_instances: i32) {}
     pub fn clear(&mut self, _color: Option<(f32, f32, f32, f32)>) {}
     pub fn viewport(&self) -> (i32, i32, i32, i32) {
@@ -461,6 +467,8 @@ impl Context {
     pub fn get_active_render_pass(&self) -> RenderPass {
         RenderPass { id: 0 }
     }
+    /// Sets clipboard text. WP8.1 has no Win32 clipboard; the call is ignored.
+    pub fn clipboard_set(&mut self, _data: &str) {}
 }
 
 impl Default for Context {
@@ -609,14 +617,23 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
+    /// 5-argument form: `(ctx, buffer_layouts, vertex_attributes, shader, params)`.
+    ///
+    /// `prpr::particle` passes a `&[BufferLayout; N]` and `&[VertexAttribute; M]`, then a
+    /// `Shader` and `PipelineParams`. The C# renderer owns actual pipelines; this records the
+    /// description so the id can be forwarded if needed.
     pub fn with_params(
         _ctx: &mut Context,
-        _layout: BufferLayout,
-        _meta: ShaderMeta,
+        _layouts: &[BufferLayout],
+        _attrs: &[VertexAttribute],
+        _shader: Shader,
         _params: PipelineParams,
     ) -> Self {
         Pipeline { id: 0 }
     }
+
+    /// Sets the blend state on an existing pipeline. A no-op: the C# renderer manages blend state.
+    pub fn set_blend(&mut self, _ctx: &mut Context, _blend: Option<BlendState>) {}
 }
 
 /// `Copy` because macroquad's `Material` embeds one and is itself `Copy`, and `prpr` dereferences
@@ -662,7 +679,9 @@ pub enum CullFace {
     Back,
 }
 
-#[derive(Clone, Debug, Default)]
+/// `Copy` because `prpr::particle` indexes `self.bindings.vertex_buffers[1]` and passes the
+/// result by value to `build_bindings`; without `Copy` that is a move-out-of-index error.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Buffer {
     pub id: u32,
     pub len: usize,
@@ -676,11 +695,15 @@ impl Buffer {
     pub fn immutable<T>(_ctx: &mut Context, _buffer_type: BufferType, data: &[T]) -> Self {
         Buffer { id: 0, len: core::mem::size_of_val(data) }
     }
-    pub fn stream<T>(_ctx: &mut Context, _buffer_type: BufferType, data: &[T]) -> Self {
-        Buffer { id: 0, len: core::mem::size_of_val(data) }
+    /// Allocates a dynamic buffer of `byte_len` bytes.
+    ///
+    /// `prpr::particle` calls this with a byte count (`MAX_PARTICLES * size_of::<GpuParticle>()`)
+    /// rather than a data slice, so the argument is `usize` rather than `&[T]`.
+    pub fn stream(_ctx: &mut Context, _buffer_type: BufferType, byte_len: usize) -> Self {
+        Buffer { id: 0, len: byte_len }
     }
 
-    pub fn update<T>(&self, _ctx: &mut Context, data: &[T]) {}
+    pub fn update<T>(&self, _ctx: &mut Context, _data: &[T]) {}
     pub fn size(&self) -> usize {
         self.len
     }
