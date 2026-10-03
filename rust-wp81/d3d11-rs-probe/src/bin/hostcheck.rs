@@ -58,6 +58,10 @@ pub(crate) unsafe fn record_factory_probe(_is_current: i32, _qi_hr: i32) {}
 /// real `HWND` and no panel at all, so this records nothing.
 pub(crate) unsafe fn record_panel_iface(_which: i32) {}
 
+/// Per-variant HRESULT recording is a phone-only diagnostic; the harness's single HWND shape either
+/// works or the run stops at step 2.
+pub(crate) unsafe fn record_sc_hr(_i: usize, _hr: i32) {}
+
 // --------------------------------------------------------------------------
 // minimal user32 binding: just enough for a hidden window
 // --------------------------------------------------------------------------

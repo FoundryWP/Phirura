@@ -251,6 +251,41 @@ pub unsafe extern "C" fn wp81_rs_panel_iface() -> i32 {
     PANEL_IFACE
 }
 
+// ===========================================================================
+// per-variant swapchain HRESULTs
+// ===========================================================================
+
+/// HRESULT returned by each `CreateSwapChainForComposition` descriptor variant, in try order.
+///
+/// All of them being the same error is what says "no shape works with this API", whereas a mix says
+/// "this one specific field is the problem". Recorded unconditionally, including on success.
+pub static mut SC_HRS: [i32; 4] = [0x7FFF_FFFF; 4];
+
+/// Record variant `i`'s HRESULT (see [`SC_HRS`]).
+pub(crate) unsafe fn record_sc_hr(i: usize, hr: i32) {
+    if i < SC_HRS.len() {
+        SC_HRS[i] = hr;
+    }
+}
+
+/// Reset the per-variant table (called at the top of every start-up so a stale run's values do not
+/// read as this run's).
+pub(crate) unsafe fn reset_sc_hrs() {
+    for h in SC_HRS.iter_mut() {
+        *h = 0x7FFF_FFFF;
+    }
+}
+
+/// HRESULT of `CreateSwapChainForComposition` descriptor variant `i`; `0x7FFFFFFF` = not tried.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_sc_hr(i: u32) -> i32 {
+    if (i as usize) < SC_HRS.len() {
+        SC_HRS[i as usize]
+    } else {
+        0x7FFF_FFFF
+    }
+}
+
 /// Record that tick `n` was reached, and report whether a limited run should stop **before**
 /// executing the call that follows it.
 ///
@@ -347,9 +382,10 @@ pub unsafe extern "C" fn wp81_rs_start_upto(
             sc
         }
         None => {
-            // An intentional sub-step stop (limit 11..15) returns None without an error; report it
-            // as success so the bisect keeps its "rc=0 = the step did not fault" invariant.
-            if s.limit >= 11 && s.limit <= 15 {
+            // An intentional sub-step stop (limit 11..15, or 18 = "skip the probe and stop before
+            // slot 24") returns None without an error; report it as success so the bisect keeps its
+            // "rc=0 = the step did not fault" invariant.
+            if (s.limit >= 11 && s.limit <= 15) || s.limit == 18 {
                 s.reached = s.limit;
                 return 0;
             }
@@ -710,6 +746,7 @@ unsafe fn release_all(s: &mut State) {
     s.context = ComPtr::NULL;
     s.device = ComPtr::NULL;
     s.stage = -1;
+    reset_sc_hrs();
 }
 
 #[no_mangle]
@@ -825,6 +862,7 @@ pub unsafe extern "C" fn wp81_rs_tick_name() -> *const u8 {
         14 => b"swapchain: panel QueryInterface(ISwapChainPanelNative)\0",
         15 => b"swapchain: ISwapChainPanelNative::SetSwapChain\0",
         16 => b"swapchain: done\0",
+        17 => b"swapchain: IDXGIFactory2::IsCurrent (soundness probe)\0",
         20 => b"IDXGISwapChain::GetBuffer(0)\0",
         21 => b"ID3D11Device::CreateRenderTargetView\0",
         30 => b"build_pipeline (compile shaders / create states)\0",

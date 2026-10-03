@@ -55,6 +55,9 @@ namespace Phirura
         private static extern int wp81_rs_panel_iface();
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_sc_hr(uint i);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_rs_clear(float r, float g, float b, float a);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -310,6 +313,18 @@ namespace Phirura
                     + (iface == 0 ? " (ISwapChainPanelNative)"
                        : iface == 1 ? " (ISwapChainBackgroundPanelNative)"
                        : " (none)"));
+                // Every CreateSwapChainForComposition descriptor shape's HRESULT, in try order.
+                // All the same error = "no shape works with this API"; a mix = "one field is wrong".
+                StringBuilder schr = new StringBuilder("RustRenderer.sc-hr:");
+                for (uint i = 0; i < 4; i++)
+                {
+                    int h = wp81_rs_sc_hr(i);
+                    schr.Append(" v");
+                    schr.Append(i);
+                    schr.Append('=');
+                    schr.Append(h == 0x7FFFFFFF ? "n/a" : "0x" + h.ToString("X8"));
+                }
+                AppLog.WriteSync(schr.ToString());
             }
             catch (Exception ex)
             {
@@ -336,12 +351,17 @@ namespace Phirura
 
             // Steps, in order, and what the *next* call after each one does. Keep in sync with
             // wp81_rs_start_upto in rust-wp81/d3d11-rs-probe/src/lib.rs.
-            int[] limits = new int[] { 2, 10, 13, 16, 20, 21, 30, 40, 50, 99 };
+            //
+            // 13 vs 18 are the pair that separates the two remaining suspects: both stop at the
+            // factory, but 13 runs the `IsCurrent` soundness probe and 18 skips it. If 13 dies and
+            // 18 is clean, `IsCurrent` is the faulting call; if both die, slot 24 is.
+            int[] limits = new int[] { 2, 10, 13, 18, 16, 20, 21, 30, 40, 50, 99 };
             string[] after = new string[]
             {
                 "next: create_swapchain_for_panel_traced (QI/GetAdapter/GetParent/Create/attach)",
                 "next: enter the swapchain+panel-attach path",
-                "next: CreateSwapChainForComposition  <-- the call that has been faulting",
+                "next: IDXGIFactory2::IsCurrent (probe ON) then CreateSwapChainForComposition",
+                "next: CreateSwapChainForComposition (probe OFF - isolates slot 24 if this dies)",
                 "next: IDXGISwapChain::GetBuffer(0) + CreateRenderTargetView",
                 "next: ID3D11Device::CreateRenderTargetView",
                 "next: build_pipeline (D3DCompile + Create*Shader + CreateInputLayout + buffers/states)",
@@ -392,7 +412,7 @@ namespace Phirura
                     // The step that builds the swapchain is also where the factory vtable gets
                     // snapshotted. Log it as soon as that step has succeeded, because the NEXT step
                     // is the one that dies and takes the log's tail with it.
-                    if (limit == 10 || limit == 13)
+                    if (limit == 10 || limit == 13 || limit == 18)
                     {
                         LogVtable();
                     }

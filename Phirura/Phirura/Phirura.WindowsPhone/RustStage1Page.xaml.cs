@@ -29,6 +29,18 @@ namespace Phirura
         private bool _hookAttached;
         private Windows.UI.Xaml.DispatcherTimer _watchdog;
 
+        /// <summary>
+        /// Guards <see cref="StartRenderer"/> against re-entry.
+        ///
+        /// <c>OnNavigatedTo</c> can fire more than once for the same page, and <c>StartRenderer</c>
+        /// is <c>async void</c>, so without this the pool-thread bring-ups overlap. They then race
+        /// on Rust's single global <c>STATE</c>: each run calls <c>release_all()</c> first, which
+        /// frees the <em>other</em> run's device while it is still using it. The symptom was a hard
+        /// fault inside a DXGI call that looked exactly like a driver bug - and moving a probe
+        /// around appeared to "fix" it, because it changed the timing. It was a use-after-free.
+        /// </summary>
+        private int _startGate;
+
         public RustStage1Page()
         {
             this.InitializeComponent();
@@ -39,6 +51,8 @@ namespace Phirura
         {
             base.OnNavigatedTo(e);
             // Wait for the panel to have a measured size before creating a swapchain against it.
+            // -= before += so a second navigation cannot subscribe twice.
+            this.Loaded -= OnPageLoaded;
             this.Loaded += OnPageLoaded;
             // A low-frequency sampler: it reads Rust's native progress counter and keeps the value
             // in managed memory. If a native call hard-faults the process, the log's last line is
@@ -77,55 +91,71 @@ namespace Phirura
 
         private async void StartRenderer()
         {
-            AppLog.WriteSync("RustStage1: StartRenderer entered");
-            // One more layout pass: the first frame after navigation can report 0x0.
-            await System.Threading.Tasks.Task.Delay(60);
-
-            if (RustRenderer.Started)
+            // Re-entrancy gate. Two overlapping bring-ups corrupt Rust's global STATE (see
+            // _startGate); only one may run at a time, and a second nav must not restart a live one.
+            if (System.Threading.Interlocked.CompareExchange(ref _startGate, 1, 0) != 0)
             {
-                AppLog.WriteSync("RustStage1: already started, skipping");
+                AppLog.WriteSync("RustStage1: StartRenderer re-entry blocked (already running)");
                 return;
             }
-
-            double scale = 1.0;
-            try { scale = Windows.Graphics.Display.DisplayInformation.GetForCurrentView().RawPixelsPerViewPixel; }
-            catch (Exception ex) { AppLog.WriteSync("RustStage1: RawPixelsPerViewPixel", ex); }
-
-            uint w = (uint)Math.Max(1.0, Math.Round(RustPanel.ActualWidth * scale));
-            uint h = (uint)Math.Max(1.0, Math.Round(RustPanel.ActualHeight * scale));
-            AppLog.WriteSync("RustStage1: panel " + RustPanel.ActualWidth + "x" + RustPanel.ActualHeight
-                + " -> " + w + "x" + h + " px @ " + scale.ToString("0.0"));
-
-            // Run the native bring-up on a pool thread so the UI thread stays alive to flush the
-            // log if a native step hard-faults. Each step is logged before and after, so the last
-            // line in phirura.log names the call that killed the process.
-            AppLog.WriteSync("RustStage1: starting bisect on pool thread");
-            int reached = -1;
-            await System.Threading.Tasks.Task.Run(delegate
+            try
             {
-                reached = RustRenderer.Bisect(RustPanel, w, h);
-            });
+                AppLog.WriteSync("RustStage1: StartRenderer entered");
+                // One more layout pass: the first frame after navigation can report 0x0.
+                await System.Threading.Tasks.Task.Delay(60);
 
-            bool ok = RustRenderer.Started;
-            AppLog.WriteSync("RustStage1: bisect finished, reached=" + reached + " started=" + ok);
+                if (RustRenderer.Started)
+                {
+                    AppLog.WriteSync("RustStage1: already started, skipping");
+                    return;
+                }
 
-            StageText.Text = ok ? "启动成功 · stage=0" : "启动失败 · " + RustRenderer.Diagnose();
-            HrText.Text = ok
-                ? "swapchain: " + RustRenderer.ScVariantName
-                : (RustRenderer.ScStep > 0 ? "swapchain 步: " + RustRenderer.ScStepName : "");
-            SizeText.Text = w + " x " + h + " px  (scale " + scale.ToString("0.00") + ")";
-            if (!ok)
-            {
-                // Do not attach the frame loop to a renderer that never came up.
-                return;
+                double scale = 1.0;
+                try { scale = Windows.Graphics.Display.DisplayInformation.GetForCurrentView().RawPixelsPerViewPixel; }
+                catch (Exception ex) { AppLog.WriteSync("RustStage1: RawPixelsPerViewPixel", ex); }
+
+                uint w = (uint)Math.Max(1.0, Math.Round(RustPanel.ActualWidth * scale));
+                uint h = (uint)Math.Max(1.0, Math.Round(RustPanel.ActualHeight * scale));
+                AppLog.WriteSync("RustStage1: panel " + RustPanel.ActualWidth + "x" + RustPanel.ActualHeight
+                    + " -> " + w + "x" + h + " px @ " + scale.ToString("0.0"));
+
+                // Run the native bring-up on a pool thread so the UI thread stays alive to flush the
+                // log if a native step hard-faults. Each step is logged before and after, so the last
+                // line in phirura.log names the call that killed the process.
+                AppLog.WriteSync("RustStage1: starting bisect on pool thread");
+                int reached = -1;
+                await System.Threading.Tasks.Task.Run(delegate
+                {
+                    reached = RustRenderer.Bisect(RustPanel, w, h);
+                });
+
+                bool ok = RustRenderer.Started;
+                AppLog.WriteSync("RustStage1: bisect finished, reached=" + reached + " started=" + ok);
+
+                StageText.Text = ok ? "启动成功 · stage=0" : "启动失败 · " + RustRenderer.Diagnose();
+                HrText.Text = ok
+                    ? "swapchain: " + RustRenderer.ScVariantName
+                    : (RustRenderer.ScStep > 0
+                        ? "swapchain 步: " + RustRenderer.ScStepName + "  hr=0x" + RustRenderer.LastHr.ToString("X8")
+                        : "");
+                SizeText.Text = w + " x " + h + " px  (scale " + scale.ToString("0.00") + ")";
+                if (!ok)
+                {
+                    // Do not attach the frame loop to a renderer that never came up.
+                    return;
+                }
+
+                _clock.Start();
+                _frames = 0;
+                if (!_hookAttached)
+                {
+                    CompositionTarget.Rendering += OnFrame;
+                    _hookAttached = true;
+                }
             }
-
-            _clock.Start();
-            _frames = 0;
-            if (!_hookAttached)
+            finally
             {
-                CompositionTarget.Rendering += OnFrame;
-                _hookAttached = true;
+                System.Threading.Interlocked.Exchange(ref _startGate, 0);
             }
         }
 

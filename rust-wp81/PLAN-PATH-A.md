@@ -13,6 +13,43 @@ First mind:实践是检验真理的唯一标准
 > crash-on-device bugs (vtable base offset, every device-context slot off by 4, a missing `Map`
 > argument). The remaining Stage 1 acceptance item is the on-device run, which needs the phone
 > connected.
+>
+> ### On-device status (Round 41, Lumia 925 / Adreno 225, FL 9.3)
+>
+> The DLL loads and runs on the phone. A no-debugger bisect (`wp81_rs_start_upto`) plus a
+> `DispatcherTimer` progress watchdog pinned the hard fault:
+>
+> | Probe | Result | Meaning |
+> | --- | --- | --- |
+> | `limit=2` (device) | clean | DXGI factory + adapter enumeration + `D3D11CreateDevice` all OK on the Adreno 225 |
+> | `limit=10` (enter swapchain) | clean | `QI(IDXGIDevice)` OK |
+> | `limit=13` (factory in hand) | clean | `GetAdapter` + `GetParent(IID_IDXGIFactory2)` OK |
+> | vtable snapshot | **32 readable slots**, slot 3 = `0x71EFD1C5`, slot 24 = `0x71F00D21` | the vtable is NOT short; **slot 24 is a real code pointer** |
+> | `QI(IID_IDXGIFactory2)` round-trip | **S_OK** | the object really is an `IDXGIFactory2` |
+> | `limit=16` (full swapchain call) | **process dies** | the fault is inside `create_swapchain_for_panel_traced`, at/after `CreateSwapChainForComposition` |
+>
+> So the slot number, IID and factory pointer are all **verified correct**; the entry exists but
+> **hard-faults** rather than returning `DXGI_ERROR_INVALID_CALL`. That is the signature of an
+> **unimplemented DXGI 1.2 entry** on this 2014 driver, not of a wrong slot.
+>
+> **Leading hypothesis:** `DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL` is only legal from feature level 10.0
+> and this device is 9.3. The descriptor-variant loop has therefore been **reordered** to try the
+> FL-9.3-safe effects (`DISCARD`, then `SEQUENTIAL`) **before** the flip model, so if the flip model
+> is the trigger the log now records which shape the driver accepts instead of dying
+> (`wp81_rs_sc_variant()`).
+>
+> **Also verified this round:** `SwapChainBackgroundPanel` and `ISwapChainBackgroundPanelNative`
+> (IID `43BEBD4E-ADD5-4035-8F85-5608D08E9DC9`, `SetSwapChain` at slot 3) **both exist on WP8.1** —
+> confirmed by compiling against the real WP8.1 reference set and by reading the kit's own
+> `windows.ui.xaml.media.dxinterop.h`. The native attach now tries **both** panel interop interfaces
+> (`ISwapChainPanelNative` then `ISwapChainBackgroundPanelNative`) and records which answered via
+> `wp81_rs_panel_iface()`.
+>
+> **Two open suspects, now separable by one build:** the `IsCurrent` soundness probe returned `-1`
+> (not a valid BOOL), so it is possible that slot 13 is mis-signed and smashes the frame that slot
+> 24 then trips over. Two bisect stops separate them: `limit=13` runs the probe then stops before
+> slot 24 (dies → the *probe* is guilty), `limit=18` skips the probe and stops before slot 24
+> (clean → slot 24 is guilty).
 
 ## The goal
 
@@ -76,13 +113,16 @@ creates the input layout + a 1-quad dynamic vertex buffer, and draws one tinted 
 
 Key decisions to make in this stage:
 - **How the swapchain attaches to the app.** WP8.1 XAML apps composite a `SwapChainPanel` or a
-  `CoreWindow`. The clean route is `IDXGIFactory2::CreateSwapChainForComposition` →
-  `ISwapChainPanelNative::SetSwapChain`; the simpler route is
-  `CreateSwapChainForCoreWindow` with the `CoreWindow` from C#. **Measure both**, prefer
-  `ForComposition` + `SwapChainPanel` because it lets XAML own the layout.
-  - This needs `IDXGIFactory2` (present in the kit) and `ISwapChainPanelNative` (WinRT, so it
-    arrives as a `CreateDXGIFactory`-adjacent COM cast — implement `ISwapChainPanelNative`'s
-    `SetSwapChain` by hand, IID `63aad0b8-7c24-40ff-85a8-640d944cc325`).
+  `SwapChainBackgroundPanel`. The route is `IDXGIFactory2::CreateSwapChainForComposition` →
+  `ISwapChainPanelNative::SetSwapChain` (or `ISwapChainBackgroundPanelNative::SetSwapChain`); the
+  simpler route is `CreateSwapChainForCoreWindow` with the `CoreWindow` from C#. **Measure both**,
+  prefer `ForComposition` + `SwapChainPanel` because it lets XAML own the layout.
+  - This needs `IDXGIFactory2` (present in the kit) and the panel interop interface. **The two
+    correct IIDs, read from the kit's own `windows.ui.xaml.media.dxinterop.h`, are
+    `ISwapChainPanelNative` = `F92F19D2-3ADE-45A6-A20C-F6F1EA90554B` and
+    `ISwapChainBackgroundPanelNative` = `43BEBD4E-ADD5-4035-8F85-5608D08E9DC9`** (this document
+    previously carried a wrong IID for `ISwapChainPanelNative`; the header is the authority). Both
+    are `IUnknown` + a single `SetSwapChain(IDXGISwapChain*)` at slot 3.
 - **Formats.** `DXGI_FORMAT_B8G8R8A8_UNORM` + `DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL` if FL9.3 allows
   it, else `DISCARD` with `R8G8B8A8_UNORM`. Verify on device.
 - Vertex stride **36 bytes**: `pos3 (12) + uv2 (8) + rgba4 (16)`. `z` is kept at 0 — it costs 4

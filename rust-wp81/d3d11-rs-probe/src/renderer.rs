@@ -233,13 +233,12 @@ pub const SC_CREATE_OK: i32 = 26;
 /// The descriptor shapes tried by [`create_swapchain_for_panel_traced`], in order. Index into this
 /// with `wp81_rs_sc_variant()` to name the one the device accepted.
 ///
-/// Order matters: the feature-level-9.3-safe effects (`DISCARD`, `SEQUENTIAL`) come first because
-/// `FLIP_SEQUENTIAL` is illegal below feature level 10.0 and this phone is 9.3.
+/// Variant 0 is Microsoft's own Windows Phone 8.1 sample shape; the rest are fallbacks.
 pub static SC_VARIANT_NAMES: [&[u8]; 4] = [
-    b"DISCARD x1 IGNORE\0",
-    b"SEQUENTIAL x1 IGNORE\0",
-    b"FLIP_SEQUENTIAL x2 IGNORE\0",
+    b"FLIP_SEQUENTIAL x2 IGNORE (official WP8.1 sample)\0",
     b"FLIP_SEQUENTIAL x2 PREMULTIPLIED\0",
+    b"DISCARD x1 IGNORE (control)\0",
+    b"SEQUENTIAL x1 IGNORE (control)\0",
 ];
 
 pub unsafe fn create_swapchain_for_panel_traced(
@@ -306,41 +305,53 @@ pub unsafe fn create_swapchain_for_panel_traced(
     // table actually is and whether slot 24 looks like code.
     crate::dump_vtable(factory);
 
-    // Before touching anything risky, prove the factory object itself is sound. `IsCurrent` (slot
-    // 13) takes no arguments and simply returns a BOOL, and a round-trip `QueryInterface` for
-    // `IDXGIFactory2` exercises the vtable's own IUnknown slots. If both return sanely and only
-    // slot 24 dies, the fault is specific to `CreateSwapChainForComposition` (an unsupported entry
-    // on this driver) rather than a corrupt factory pointer - which is the whole difference between
-    // "wrong slot number" and "the API is not implemented here".
+    // Two bisect stops live at the factory stage, and which one is used decides whether the
+    // soundness probe runs:
     //
-    // These run BEFORE the `limit == 13` stop, so a `limit=13` run now *proves* slot 13 works and
-    // leaves the fault isolated to the very next call (slot 24).
-    crate::set_tick(12); // still "GetParent" tick; the probe below is inside it
-    let is_current: extern "system" fn(*mut c_void) -> BOOL = factory.method(13);
-    let current = is_current(factory.vtbl as *mut c_void);
-    let mut round_trip = ComPtr::NULL;
-    let hr_qi = factory.query_interface(
-        &IID_IDXGIFACTORY2,
-        &mut round_trip.vtbl as *mut _ as *mut *mut c_void,
-    );
-    round_trip.release();
-    crate::record_factory_probe(current, hr_qi);
+    //   limit = 13  -> run the probe, then stop before slot 24.  If THIS run dies, the probe
+    //                  (`IsCurrent`, slot 13) is the faulting call and slot 24 is innocent.
+    //   limit = 18  -> **skip** the probe, then stop before slot 24. If 13 dies but 18 is clean,
+    //                  the probe is exonerated and `CreateSwapChainForComposition` is confirmed.
+    //
+    // The probe initially came back `IsCurrent = -1`, which is not a valid BOOL, so a mis-signed
+    // slot 13 that smashes the frame slot 24 then trips over is a real possibility. These two runs
+    // separate the two candidates without a debugger.
+    if !crate::limit_is(18) {
+        crate::set_tick(17); // IsCurrent soundness probe - own tick so the watchdog names it exactly
+        let is_current: extern "system" fn(*mut c_void) -> BOOL = factory.method(13);
+        let current = is_current(factory.vtbl as *mut c_void);
+        let mut round_trip = ComPtr::NULL;
+        let hr_qi = factory.query_interface(
+            &IID_IDXGIFACTORY2,
+            &mut round_trip.vtbl as *mut _ as *mut *mut c_void,
+        );
+        round_trip.release();
+        crate::record_factory_probe(current, hr_qi);
+    }
 
-    // Honour a bisect stop at the factory stage: `limit == 13` means "the factory is in hand and
-    // has been proven sound; do not call slot 24". This is the only way to read the vtable (and the
+    // Honour a bisect stop at the factory stage. This is the only way to read the vtable (and the
     // probe results) on the phone, because the very next call is the one that dies.
-    if crate::limit_is(13) {
+    if crate::limit_is(13) || crate::limit_is(18) {
         crate::set_tick(13);
         return None;
     }
 
-    // The Lumia 925's Adreno 225 is feature level **9.3**, and `DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL`
-    // is only legal from 10.0 onward. A spec-invalid effect is *supposed* to come back as
-    // `DXGI_ERROR_INVALID_CALL`, but a 2014 phone driver that never implements the flip model can
-    // equally just hard-fault - which is exactly the observed symptom (`GetParent` + QI fine, the
-    // very next call kills the process). So the FL-9.3-friendly effects are tried FIRST: if the
-    // flip model is the trigger, the DISCARD variant now returns a clean HRESULT (or even succeeds)
-    // instead of taking the process down, and `wp81_rs_sc_variant()` names the winner.
+    // The descriptor shapes tried, in order. Variant 0 is the **exact** combination from
+    // Microsoft's own Windows Phone 8.1 "XAML DirectX 3D shooting game" sample's `DeviceResources`
+    // (`microsoftarchive/msdn-code-gallery-microsoft`, `[C++]-Windows Phone 8.1 samples`):
+    //
+    //     B8G8R8A8_UNORM / Stereo=IsWindowedStereoEnabled() / MSAA off /
+    //     BufferCount=2 / FLIP_SEQUENTIAL / SCALING_STRETCH / ALPHA_MODE_IGNORE / Flags=0
+    //
+    // That sample calls `CreateSwapChainForComposition` and attaches via
+    // `ISwapChainPanelNative::SetSwapChain` **on the UI thread**, then
+    // `IDXGIDevice3::SetMaximumFrameLatency(1)`. It is the only authority for what this platform
+    // accepts, so its shape goes first; the rest are fallbacks kept for their HRESULTs.
+    //
+    // All four previously came back `DXGI_ERROR_INVALID_CALL` (0x887A0001) in a run that also had
+    // four bring-ups racing on one global STATE - i.e. the calls were probably handed a device the
+    // other run had already released. The race is fixed on the C# side; these shapes are re-tried now
+    // that only one run can be in flight.
     struct Variant {
         swap_effect: UINT,
         buffer_count: UINT,
@@ -348,29 +359,35 @@ pub unsafe fn create_swapchain_for_panel_traced(
         name: &'static [u8],
     }
     let variants: [Variant; 4] = [
-        Variant {
-            swap_effect: DXGI_SWAP_EFFECT_DISCARD,
-            buffer_count: 1,
-            alpha_mode: DXGI_ALPHA_MODE_IGNORE,
-            name: b"DISCARD x1 ignore-alpha\0",
-        },
-        Variant {
-            swap_effect: DXGI_SWAP_EFFECT_SEQUENTIAL,
-            buffer_count: 1,
-            alpha_mode: DXGI_ALPHA_MODE_IGNORE,
-            name: b"SEQUENTIAL x1 ignore-alpha\0",
-        },
+        // The official WP8.1 sample's shape.
         Variant {
             swap_effect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
             buffer_count: 2,
             alpha_mode: DXGI_ALPHA_MODE_IGNORE,
-            name: b"FLIP_SEQUENTIAL x2 ignore-alpha\0",
+            name: b"FLIP_SEQUENTIAL x2 ignore-alpha (official WP8.1 sample)\0",
         },
+        // The same, but with premultiplied alpha (the Microsoft doc for `SwapChainPanel` forbids
+        // this, but it is the shape that appeared to hard-fault first, so its HRESULT is worth seeing).
         Variant {
             swap_effect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
             buffer_count: 2,
             alpha_mode: DXGI_ALPHA_MODE_PREMULTIPLIED,
             name: b"FLIP_SEQUENTIAL x2 premultiplied\0",
+        },
+        // Non-flip effects: illegal for `CreateSwapChainForComposition` by spec, so these are the
+        // controls - if one of them *succeeds*, the spec is not being enforced and the flip model is
+        // genuinely unimplemented on this driver.
+        Variant {
+            swap_effect: DXGI_SWAP_EFFECT_DISCARD,
+            buffer_count: 1,
+            alpha_mode: DXGI_ALPHA_MODE_IGNORE,
+            name: b"DISCARD x1 ignore-alpha (control)\0",
+        },
+        Variant {
+            swap_effect: DXGI_SWAP_EFFECT_SEQUENTIAL,
+            buffer_count: 1,
+            alpha_mode: DXGI_ALPHA_MODE_IGNORE,
+            name: b"SEQUENTIAL x1 ignore-alpha (control)\0",
         },
     ];
 
@@ -390,6 +407,8 @@ pub unsafe fn create_swapchain_for_panel_traced(
             Width: width,
             Height: height,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            // The official WP8.1 sample passes `IsWindowedStereoEnabled()` here; on this phone that
+            // is FALSE, which is the same as 0.
             Stereo: 0,
             SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
@@ -406,6 +425,10 @@ pub unsafe fn create_swapchain_for_panel_traced(
             &scd,
             &mut sc.vtbl as *mut _ as *mut *mut c_void,
         );
+        // Record every variant's HRESULT, not just the last. With one run in flight this is what
+        // says whether *any* shape is accepted, and whether the flip model errors differently from
+        // the controls. `wp81_rs_sc_hr(i)` reads it back.
+        crate::record_sc_hr(i, hr);
         if hr >= 0 && !sc.is_null() {
             swapchain = sc;
             chosen = i as u32;
