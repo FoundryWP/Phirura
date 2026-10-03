@@ -1,0 +1,35 @@
+# Scratch probe: can Rust bind D3D11 for the WP8.1 target, and what does it import?
+#
+# This is NOT the real renderer. It exists to answer two questions that decide whether "Rust renders
+# itself" (Path A) is possible at all:
+#
+#   1. Does `windows` 0.62.2 (the vendored copy, with its Win32_Graphics_Direct3D11 features)
+#      compile for thumbv7a-pc-windows-msvc?
+#   2. Does the resulting object import `kernel32.dll` / `api-ms-win-core-*` from the D3D11 calls,
+#      or only `d3d11.dll` / `dxgi.dll` - the two libraries WP8.1 actually has?
+#
+# Question 2 is the whole game. `windows` binds everything with `windows_core::link!`, which is
+# `#[link(kind = "raw-dylib")]` on non-x86 Windows. raw-dylib bakes the DLL name straight into the
+# import table, so whatever it names must exist on the phone.
+#
+# Deliberately a standalone workspace (its own [workspace] table) so it does not join the phira
+# workspace and does not pick up the shim `[patch]` block - this probe wants the *real* windows
+# crate, un-patched.
+[workspace]
+
+[package]
+name = "d3d11-rs-probe"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib", "lib"]
+
+[dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }

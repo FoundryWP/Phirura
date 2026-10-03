@@ -319,6 +319,15 @@ namespace Phirura.Game
             CanvasDrawingSession ds = args.DrawingSession;
             ds.Clear(Background);
 
+            // The Rust game host takes priority when it is driving: its frame is already projected
+            // and is the newer of the two paths. The XAML-chart path below is the fallback for every
+            // screen the port does not own (menus, the calibration view, ...).
+            if (_portFrame != null)
+            {
+                OnPortDraw(ds);
+                return;
+            }
+
             if (!_hasFrame || _chart == null)
             {
                 return;
@@ -724,6 +733,305 @@ namespace Phirura.Game
             // Mirror chart-space y about 0 before projecting.
             Mat3 flip = Mat3.Scaling(1f, -1f);
             return _chartToScreen * flip;
+        }
+
+        // ==================================================================
+        // the port path
+        //
+        // `prpr` itself renders when the Rust game host is driving: `wp81_game_frame` advances the
+        // scene and records its draw calls, and these methods replay them. Everything here works in
+        // *screen pixels*, because the Rust renderer has already applied the projection - the shim's
+        // `screen_width`/`screen_height` are the same numbers the shell reports through
+        // `wp81_game_set_screen`, so a coordinate is a coordinate and no matrix is involved.
+        //
+        // Deliberately separate from the XAML-chart path above: that one walks the C# `Chart` and
+        // recomputes every transform, this one replays finished pixels. Mixing them would mean two
+        // sources of truth for the camera.
+        // ==================================================================
+
+        /// <summary>Rust texture id -> bitmap, built lazily from the shim's registry.</summary>
+        private readonly Dictionary<uint, CanvasBitmap> _portTextures =
+            new Dictionary<uint, CanvasBitmap>();
+
+        /// <summary>True once the port's textures have been resolved for the current game.</summary>
+        private bool _portTexturesReady;
+
+        /// <summary>Set by <see cref="DrawPortFrame"/>; the next draw replays this instead of the chart.</summary>
+        private PrprPort.DrainFrame _portFrame;
+
+        /// <summary>Reported in the diagnostics line so a blank port frame can be told from an unbound texture.</summary>
+        public int PortCommands;
+        public int PortTexturesBound;
+
+        /// <summary>
+        /// Forgets the port's textures. Call when the game is destroyed: the next game allocates its
+        /// own ids and reusing these would draw the previous chart's sprites.
+        /// </summary>
+        public void ResetPortTextures()
+        {
+            _portTextures.Clear();
+            _portTexturesReady = false;
+            _portFrame = null;
+        }
+
+        /// <summary>
+        /// Hands the renderer a frame recorded by the Rust game and schedules a redraw.
+        ///
+        /// The frame is only stored here; the actual drawing happens in <see cref="OnPortDraw"/> on
+        /// the UI thread, because a Win2D drawing session is not valid outside the draw callback.
+        /// </summary>
+        public void DrawPortFrame(PrprPort.DrainFrame frame)
+        {
+            _portFrame = frame;
+            _canvas.Invalidate();
+        }
+
+        /// <summary>
+        /// Replays one recorded frame. Called from <see cref="OnDraw"/> in place of the chart path.
+        /// </summary>
+        private void OnPortDraw(CanvasDrawingSession ds)
+        {
+            EnsurePortTextures(ds);
+
+            PrprPort.DrainFrame frame = _portFrame;
+            if (frame == null || frame.Count == 0)
+            {
+                PortCommands = 0;
+                return;
+            }
+
+            PortCommands = frame.Count;
+            PrprPort.PortCmd[] cmds = frame.Commands;
+
+            for (int i = 0; i < frame.Count; i++)
+            {
+                PrprPort.PortCmd c = cmds[i];
+                // The kind's high bits carry the flip flags for textures, so mask before dispatching.
+                uint kind = c.kind & 0xFFFF;
+
+                switch (kind)
+                {
+                    case 0: // Texture: dest x/y/w/h, then source x/y/w/h
+                        DrawPortTexture(ds, c);
+                        break;
+
+                    case 1: // Rect: x/y/w/h then r/g/b/a
+                        ds.FillRectangle(
+                            c.f0, c.f1, c.f2, c.f3,
+                            FloatColor(c.f4, c.f5, c.f6, c.f7));
+                        break;
+
+                    case 2: // Line: x1/y1/x2/y2, thickness, then r/g/b
+                        ds.DrawLine(
+                            c.f0, c.f1, c.f2, c.f3,
+                            FloatColor(c.f5, c.f6, c.f7, 1f),
+                            c.f4);
+                        break;
+
+                    case 3: // Circle: cx/cy/r then r/g/b/a
+                        ds.FillCircle(
+                            c.f0, c.f1, c.f2,
+                            FloatColor(c.f3, c.f4, c.f5, c.f6));
+                        break;
+
+                    case 4: // Geometry: vertices carry position, uv and colour
+                        DrawPortGeometry(ds, frame, c);
+                        break;
+                }
+            }
+        }
+
+        private void DrawPortTexture(CanvasDrawingSession ds, PrprPort.PortCmd c)
+        {
+            CanvasBitmap bmp;
+            if (!_portTextures.TryGetValue(c.flags, out bmp) || bmp == null)
+            {
+                // No bitmap for this id - the shell never loaded it, or the registry dropped it.
+                // Skipping is right: an untextured quad is noise, not a missing-no warning.
+                return;
+            }
+
+            float dx = c.f0, dy = c.f1, dw = c.f2, dh = c.f3;
+            float sx = c.f4, sy = c.f5, sw = c.f6, sh = c.f7;
+            if (dw <= 0f || dh <= 0f || sw <= 0f || sh <= 0f)
+            {
+                return;
+            }
+
+            bool flipX = (c.kind & (1u << 16)) != 0;
+            bool flipY = (c.kind & (1u << 17)) != 0;
+
+            // Source rect in the bitmap's own pixel space. The flip flags are folded into the
+            // destination rectangle instead of the source, because Win2D.win81's DrawImage takes the
+            // source as an axis-aligned Rect and cannot mirror it.
+            Rect source = new Rect(sx, sy, sw, sh);
+
+            Matrix3x2 saved = ds.Transform;
+            if (flipX || flipY)
+            {
+                float cx = dx + dw / 2f;
+                float cy = dy + dh / 2f;
+                ds.Transform = Matrix3x2.CreateScale(flipX ? -1f : 1f, flipY ? -1f : 1f)
+                             * Matrix3x2.CreateTranslation(cx, cy);
+                ds.DrawImage(bmp, new Rect(-dw / 2f, -dh / 2f, dw, dh), source, 1f, CanvasImageInterpolation.Linear);
+                ds.Transform = saved;
+            }
+            else
+            {
+                ds.DrawImage(bmp, new Rect(dx, dy, dw, dh), source, 1f, CanvasImageInterpolation.Linear);
+            }
+        }
+
+        private void DrawPortGeometry(CanvasDrawingSession ds, PrprPort.DrainFrame frame,
+                                      PrprPort.PortCmd c)
+        {
+            if (c.vcount == 0 || c.icount == 0)
+            {
+                return;
+            }
+
+            int mode = (int)c.f0;
+            bool hasTex = _portTextures.ContainsKey(c.flags);
+
+            // The vertices arrive as a flat array; the index list is re-based to `c.istart` already,
+            // so the shell reads the shared arena through it.
+            for (int t = 0; t + 2 < (int)c.icount || (mode != 0 && t + 1 < (int)c.icount); t += (mode == 0 ? 3 : 2))
+            {
+                int i0 = (int)c.istart + t;
+                int i1 = (int)c.istart + t + 1;
+                int i2 = (int)c.istart + t + 2;
+
+                if (i0 >= frame.Indices.Length) break;
+                PrprPort.PortVertex v0 = Vert(frame, c.vstart + frame.Indices[i0]);
+                PrprPort.PortVertex v1 = Vert(frame, c.vstart + frame.Indices[i1]);
+
+                if (mode == 0)
+                {
+                    if (i2 >= frame.Indices.Length) break;
+                    PrprPort.PortVertex v2 = Vert(frame, c.vstart + frame.Indices[i2]);
+                    FillPortTriangle(ds, v0, v1, v2, c.flags, hasTex);
+                }
+                else
+                {
+                    // Lines / line strips: the shim uses these for hold bodies, which are plain
+                    // strokes rather than filled geometry.
+                    ds.DrawLine(v0.x, v0.y, v1.x, v1.y,
+                        FloatColor(v0.r, v0.g, v0.b, 1f), 2f);
+                }
+            }
+        }
+
+        private static PrprPort.PortVertex Vert(PrprPort.DrainFrame frame, int index)
+        {
+            if (index < 0 || index >= frame.Vertices.Length)
+            {
+                return new PrprPort.PortVertex();
+            }
+            return frame.Vertices[index];
+        }
+
+        /// <summary>
+        /// Fills one triangle. Textured when the batch names a bitmap the shell has, flat-coloured
+        /// otherwise - which is what `prpr`'s untextured note bodies rely on.
+        /// </summary>
+        private void FillPortTriangle(CanvasDrawingSession ds, PrprPort.PortVertex a,
+                                      PrprPort.PortVertex b, PrprPort.PortVertex c,
+                                      uint texId, bool hasTex)
+        {
+            CanvasBitmap bmp;
+            if (hasTex && _portTextures.TryGetValue(texId, out bmp) && bmp != null)
+            {
+                // Win2D.win81 has no arbitrary-triangle texture fill, so the batch is approximated by
+                // its bounding quad. `prpr`'s note sprites are axis-aligned quads in practice, which
+                // makes the approximation exact for them.
+                float minX = Math.Min(a.x, Math.Min(b.x, c.x));
+                float minY = Math.Min(a.y, Math.Min(b.y, c.y));
+                float maxX = Math.Max(a.x, Math.Max(b.x, c.x));
+                float maxY = Math.Max(a.y, Math.Max(b.y, c.y));
+                if (maxX - minX <= 0f || maxY - minY <= 0f)
+                {
+                    return;
+                }
+                float u0 = Math.Min(a.u, Math.Min(b.u, c.u));
+                float v0 = Math.Min(a.v, Math.Min(b.v, c.v));
+                float u1 = Math.Max(a.u, Math.Max(b.u, c.u));
+                float v1 = Math.Max(a.v, Math.Max(b.v, c.v));
+                ds.DrawImage(bmp,
+                    new Rect(minX, minY, maxX - minX, maxY - minY),
+                    new Rect(u0 * bmp.SizeInPixels.Width, v0 * bmp.SizeInPixels.Height,
+                             (u1 - u0) * bmp.SizeInPixels.Width, (v1 - v0) * bmp.SizeInPixels.Height),
+                    1f, CanvasImageInterpolation.Linear);
+                return;
+            }
+
+            // Vertex colours are per-vertex in the shim; a flat fill uses the first. Averaging would
+            // be closer to a gradient, but Win2D.win81 cannot interpolate across a triangle either.
+            ds.FillGeometry(PortTriangle(a, b, c), FloatColor(a.r, a.g, a.b, 1f));
+        }
+
+        private static CanvasGeometry PortTriangle(PrprPort.PortVertex a, PrprPort.PortVertex b,
+                                                    PrprPort.PortVertex c)
+        {
+            using (CanvasPathBuilder pb = new CanvasPathBuilder(null))
+            {
+                pb.BeginFigure(a.x, a.y);
+                pb.AddLine(b.x, b.y);
+                pb.AddLine(c.x, c.y);
+                pb.EndFigure(CanvasFigureLoop.Closed);
+                return CanvasGeometry.CreatePath(pb);
+            }
+        }
+
+        /// <summary>
+        /// Resolves every id the Rust shim has registered into a <see cref="CanvasBitmap"/>.
+        ///
+        /// Runs once per game. Ids are allocated where the shim sees pixels, so the only way to learn
+        /// them is to ask - see <see cref="PrprPort.ReadTextures"/>.
+        /// </summary>
+        private void EnsurePortTextures(CanvasDrawingSession ds)
+        {
+            if (_portTexturesReady)
+            {
+                return;
+            }
+            _portTexturesReady = true;
+
+            List<PrprPort.TextureData> textures = PrprPort.ReadTextures();
+            for (int i = 0; i < textures.Count; i++)
+            {
+                PrprPort.TextureData t = textures[i];
+                if (t.Width == 0 || t.Height == 0 || t.Rgba == null)
+                {
+                    continue;
+                }
+                try
+                {
+                    // Direct3D expects BGRA; the shim holds RGBA. Swapping here rather than on the
+                    // Rust side keeps the shim's `from_rgba8` contract intact for any other caller.
+                    byte[] bgra = new byte[t.Rgba.Length];
+                    for (int p = 0; p + 3 < t.Rgba.Length; p += 4)
+                    {
+                        bgra[p + 0] = t.Rgba[p + 2];
+                        bgra[p + 1] = t.Rgba[p + 1];
+                        bgra[p + 2] = t.Rgba[p + 0];
+                        bgra[p + 3] = t.Rgba[p + 3];
+                    }
+                    _portTextures[t.Id] = CanvasBitmap.CreateFromBytes(
+                        ds.Device, bgra, (int)t.Width, (int)t.Height,
+                        Windows.Graphics.DirectX.DirectXPixelFormat.B8G8R8A8UIntNormalized);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.WriteSync("Win2D: port texture " + t.Id + " failed", ex);
+                }
+            }
+            PortTexturesBound = _portTextures.Count;
+        }
+
+        /// <summary>Packs 0..1 floats into a Win2D colour, clamping out-of-range input.</summary>
+        private static Color FloatColor(float r, float g, float b, float a)
+        {
+            return Color.FromArgb(Channel(a), Channel(r), Channel(g), Channel(b));
         }
 
         // ------------------------------------------------------------------

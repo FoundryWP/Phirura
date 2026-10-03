@@ -396,6 +396,85 @@ namespace Phirura
             wp81_game_set_screen(width, height);
         }
 
+        // --- the texture registry's managed surface -----------------------
+
+        /// <summary>One registered texture: its Rust id and its RGBA pixels.</summary>
+        public sealed class TextureData
+        {
+            public uint Id;
+            public uint Width;
+            public uint Height;
+            public byte[] Rgba;
+        }
+
+        /// <summary>
+        /// Reads every texture the Rust shim has registered.
+        ///
+        /// Returns fewer entries than the registry holds if any texture fails to copy - a texture
+        /// that cannot be read is dropped with a log line rather than aborting the whole set, because
+        /// a chart with one unreadable texture should still play.
+        ///
+        /// Call after <c>wp81_game_create</c> (the chart's textures are registered during the scene
+        /// build) and rebuild the bitmaps whenever the count grows.
+        /// </summary>
+        public static System.Collections.Generic.List<TextureData> ReadTextures()
+        {
+            System.Collections.Generic.List<TextureData> list =
+                new System.Collections.Generic.List<TextureData>();
+
+            uint count = wp81_texture_count();
+            for (uint i = 0; i < count; i++)
+            {
+                uint id = wp81_texture_id_at(i);
+                if (id == 0)
+                {
+                    continue;
+                }
+
+                uint w, h;
+                // Metadata first: a null destination returns the byte length, so the buffer is sized
+                // exactly rather than guessed at.
+                int len = wp81_texture_data(id, out w, out h, IntPtr.Zero, 0);
+                if (len <= 0 || w == 0 || h == 0)
+                {
+                    continue;
+                }
+
+                byte[] rgba = new byte[len];
+                IntPtr buffer = Marshal.AllocHGlobal(len);
+                try
+                {
+                    int got = wp81_texture_data(id, out w, out h, buffer, (uint)len);
+                    if (got != len)
+                    {
+                        AppLog.WriteSync("PrprPort: texture " + id + " copy returned " + got
+                            + ", expected " + len);
+                        continue;
+                    }
+                    Marshal.Copy(buffer, rgba, 0, len);
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
+
+                TextureData t = new TextureData();
+                t.Id = id;
+                t.Width = w;
+                t.Height = h;
+                t.Rgba = rgba;
+                list.Add(t);
+            }
+
+            uint overflow = wp81_texture_overflow();
+            if (overflow != 0)
+            {
+                AppLog.WriteSync("PrprPort: texture registry overflowed by " + overflow
+                    + " texture(s); some sprites will not draw");
+            }
+            return list;
+        }
+
         private static PortCmd ReadCmd(IntPtr basePtr, int index)
         {
             int off = index * CmdStride;
