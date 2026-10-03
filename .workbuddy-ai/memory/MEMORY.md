@@ -356,13 +356,29 @@ deployed to `Phirura.WindowsPhone/` → WP head builds → **appx contains `wp81
 (`DiagnosticsButton_Click`) calling `PrprPort.RunSelfTest(SamplePec)` → `MessageDialog`. `SamplePec`
 is a 4-note chart (one `n1`,`n2`,`n3`,`n4`) mirroring the grammar above.
 
-**Still unverified:** the on-device parse (needs hardware). `cargo test -p prpr-port --lib` is **not
-viable** (workspace `LIB` points at ARM phone libs; an x64 host build of ~200 crates ran 3h52m and
-was killed). The sample PEC was validated with a Python token-grammar mirror instead.
+**The renderer drain exists (Round 35).** `wp81_port_version` = **2**. The macroquad shim flattened
+its `Cmd` enum into `#[repr(C)]` records — `PortCmd { u32 kind,flags,vstart,vcount,istart,icount;
+f32 f[8] }` (**56 bytes**) and `PortVertex { f32 x,y,z,u,v,r,g,b }` (**32 bytes**) — and `prpr-port`
+exports `wp81_draw_encode` / `_commands` / `_vertices` / `_indices` / `_reset` / `_selftest`
+(11 exports total). `KIND_*` = Texture 0, Rect 1, Line 2, Circle 3, Geometry 4; **text is not a
+kind** (the shim cannot rasterise glyphs, and `Cmd::Text` carries only a length). `macroquad` is now
+a *direct* dependency of `prpr-port`, declared against the same git source so `[patch]` applies.
+C# side: `PrprPort.Drain(vcap, icap)` copies out then resets, `WireLayoutOk()` +
+`DrainSelfTest()`.
 
-**Next: the renderer drain.** The macroquad shim records `draw_*` into a fixed 8192-entry `Cmd`
-arena (+ vertex/index arenas, `snapshot()` / `drain_reset()`) but **no FFI entry point exports it** —
-the C# side cannot read the commands yet. Then: real audio callbacks, chart marshalling to C#.
+- **A pointer-walk ABI needs its stride ASSERTED, not computed in your head.** The C# reader first
+  used a 32-byte `PortCmd` stride ("24 header + 8 payload") — the real record is **56** (6×u32 = 24
+  **plus** 8×f32 = 32). Caught by a Python `struct.calcsize("<6I8f")` mirror of both sides before it
+  ever reached hardware. `CmdStride = 6*4 + 8*4` is now derived, and `WireLayoutOk()` compares
+  `Marshal.SizeOf<PortCmd>()`/`<PortVertex>()` against the native strides at runtime.
+- The drain *delivers*; it does not yet *draw*. `wp81_draw_selftest` pushes a synthetic triangle.
+  Not written: `Win2DChartRenderer.DrawPortFrame(DrainFrame)` (use `ScreenMatrix`/`ToMatrix3x2`/
+  `CenteredRect`), real audio + `present` callbacks, driving the scene from the Rust game loop.
+
+**Still unverified:** the on-device parse and drain (need hardware). `cargo test -p prpr-port --lib`
+is **not viable** (workspace `LIB` points at ARM phone libs; an x64 host build of ~200 crates ran
+3h52m and was killed). The sample PEC and the wire records were validated with Python mirrors
+instead.
 
 ### `rust-wp81/tools/` — the diagnostic toolchain
 

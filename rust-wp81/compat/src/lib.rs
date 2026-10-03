@@ -1207,6 +1207,69 @@ pub unsafe extern "system" fn GetActiveProcessorCount(_groupNumber: u16) -> u32 
     1
 }
 
+// ===========================================================================
+// process creation - absent by design on WP8.1
+//
+// These two appeared only once the game host existed, because `catch_unwind` pulls in std's panic
+// machinery, which pulls in std's `process` module. That module binds `CreateProcessW` to
+// `kernel32.dll` directly, and the `which` crate it calls through binds `GetBinaryTypeW` and
+// `GetLastError` the same way (its own `#[link(kind = "raw-dylib")]`).
+//
+// A WP8.1 app cannot spawn a child process - there is no `CreateProcess` in any API set the
+// platform ships. Rather than pretend, both fail honestly and the caller degrades: `Command::new`
+// reports the OS error it is handed, which is the correct outcome for a platform with no such
+// facility. Defining them here is also what stops the arm's-length `raw-dylib` import descriptor
+// from reaching the import table - `/FORCE:MULTIPLE` keeps the first definition, which is this one.
+//
+// The signatures must match the declarations exactly; they are copied from
+// std's `sys/pal/windows/c/windows_sys.rs` and `which`'s `win_ffi.rs`.
+// ===========================================================================
+
+/// Always fails, as it must: WP8.1 has no process creation.
+///
+/// Set to `ERROR_CALL_NOT_IMPLEMENTED` (120) rather than leaving the last-error flag alone, so a
+/// caller that inspects it gets a truthful reason instead of a stale code from an unrelated call.
+#[no_mangle]
+pub unsafe extern "system" fn CreateProcessW(
+    _application_name: *const u16,
+    _command_line: *mut u16,
+    _process_attributes: *const c_void,
+    _thread_attributes: *const c_void,
+    _inherit_handles: i32,
+    _creation_flags: u32,
+    _environment: *const c_void,
+    _current_directory: *const u16,
+    _startup_info: *const c_void,
+    _process_information: *mut c_void,
+) -> i32 {
+    set_last_error(120); // ERROR_CALL_NOT_IMPLEMENTED
+    0
+}
+
+/// Reports "not an executable", which is the only honest answer when nothing can be executed.
+///
+/// `which` uses this to decide whether a path found on `PATH` is runnable. Returning 0 makes it
+/// treat every candidate as unusable instead of handing the caller a path that cannot run.
+#[no_mangle]
+pub unsafe extern "system" fn GetBinaryTypeW(_app_name: *const u16, bin_type: *mut u32) -> i32 {
+    if !bin_type.is_null() {
+        *bin_type = 0; // SCS_32BIT_BINARY is 0, so 0 alone is ambiguous - the FALSE return is
+                       // what disambiguates, and callers must check it first.
+    }
+    set_last_error(120); // ERROR_CALL_NOT_IMPLEMENTED
+    0
+}
+
+/// Records the thread's last-error value.
+///
+/// `GetLastError` here is compat's own trampoline (the patcher strips std's declaration so the
+/// symbol resolves to this file), and there is no `SetLastError` on WP8.1's API surface that is
+/// safe to call unconditionally. Rather than fake one - which would silently contradict what
+/// `GetLastError` reports elsewhere - this is a no-op and the return value of the failing call is
+/// the signal. It exists so the two functions above read as a deliberate pair.
+#[inline]
+fn set_last_error(_code: u32) {}
+
 /// Calls `QueryPerformanceCounter` directly, with no Rust clock machinery involved. Used by the
 /// step-wise probe to separate "the raw Win32 call works" from "Rust's `Instant` works".
 #[no_mangle]

@@ -111,7 +111,14 @@ $exports = @(
     "wp81_draw_vertices",
     "wp81_draw_indices",
     "wp81_draw_reset",
-    "wp81_draw_selftest"
+    "wp81_draw_selftest",
+    # the game host - see `wp81_game_*`, which runs the real prpr scene
+    "wp81_game_create",
+    "wp81_game_frame",
+    "wp81_game_destroy",
+    "wp81_game_frames",
+    "wp81_game_running",
+    "wp81_game_set_screen"
 )
 
 # /FORCE:MULTIPLE is load-bearing, and the reason is not obvious from the log.

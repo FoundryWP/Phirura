@@ -21,6 +21,10 @@
 
 use core::ffi::c_void;
 
+/// The game host: builds a real `prpr` `GameScene` and ticks it. Kept out of this file so the ABI
+/// surface stays readable.
+pub mod host;
+
 // ===========================================================================
 // the shell callback table
 // ===========================================================================
@@ -58,6 +62,13 @@ pub struct HostCallbacks {
         Option<unsafe extern "C" fn(title: *const u16, suggested: *const u16, out: *mut u16, cap: usize) -> i32>,
     /// Called by the renderer once per frame with the recorded draw commands.
     pub present: Option<unsafe extern "C" fn()>,
+    /// Read a file the game needs - the chart, its textures, a font.
+    ///
+    /// `name` is a NUL-terminated UTF-16 path relative to the app's local `charts\` folder;
+    /// `out`/`cap` receive the bytes. Returns the byte count, or a negative value when the file
+    /// does not exist. This is how the Rust game reaches the shell's storage without owning any
+    /// file IO itself.
+    pub load_asset: Option<unsafe extern "C" fn(name: *const u16, out: *mut u8, cap: usize) -> i32>,
 }
 
 static mut CALLBACKS: HostCallbacks = HostCallbacks {
@@ -76,6 +87,7 @@ static mut CALLBACKS: HostCallbacks = HostCallbacks {
     pick_file: None,
     save_file: None,
     present: None,
+    load_asset: None,
 };
 
 /// Installed once by the shell, before anything else is called.
@@ -320,7 +332,8 @@ static mut PARSED: Option<prpr::core::Chart> = None;
 pub extern "C" fn wp81_port_version() -> u32 {
     // Bump when the ABI changes; the shell logs it next to the DLL size.
     // 2: added the renderer drain (wp81_draw_* below).
-    2
+    // 3: added the game host (wp81_game_*), which runs the real prpr scene.
+    3
 }
 
 // ===========================================================================
@@ -394,6 +407,97 @@ pub unsafe extern "C" fn wp81_draw_selftest() {
     set_texture(None);
     set_draw_mode(macroquad::DrawMode::Triangles);
     push_geometry(&verts, &indices);
+}
+
+// ===========================================================================
+// the game host
+//
+// These are the entry points that make the *real* Rust Phira run: `wp81_game_create` builds a
+// `prpr::scene::GameScene` and wraps it in a `Main`, and `wp81_game_frame` ticks one frame, leaving
+// its draw commands for `wp81_draw_*` to hand to the shell.
+//
+// The split is deliberate. Construction is expensive (chart parse, texture registration, scene
+// setup) and happens once; a frame is cheap and happens 60 times a second. Keeping them separate
+// means the shell pays the cost once and never blocks the render loop on a parse.
+// ===========================================================================
+
+/// Build a game for a chart in the shell's `charts\<folder>\` directory.
+///
+/// `folder` and `chart_name` are UTF-16, NUL-terminated. Returns `0` on success, or a negative code
+/// (`PrprPort.cs` mirrors them):
+///
+///   -1  nothing to load          -2  the chart or scene failed to build
+///   -3  a game is already running  -100  the scene panicked
+#[no_mangle]
+pub unsafe extern "C" fn wp81_game_create(
+    folder: *const u16,
+    chart_name: *const u16,
+) -> i32 {
+    let folder = match utf16_to_string(folder) {
+        Some(s) => s,
+        None => return host::GAME_ERR_NO_CHART,
+    };
+    let chart_name = match utf16_to_string(chart_name) {
+        Some(s) => s,
+        None => return host::GAME_ERR_NO_CHART,
+    };
+    host::create(&folder, &chart_name)
+}
+
+/// Advance and render one frame. `dt` is the seconds since the previous call.
+///
+/// Returns the number of draw commands produced (readable through `wp81_draw_commands`), or a
+/// negative code when nothing is running.
+#[no_mangle]
+pub extern "C" fn wp81_game_frame(dt: f64) -> i32 {
+    host::frame(dt)
+}
+
+/// Stop the game and release the scene. Safe to call when nothing is running.
+#[no_mangle]
+pub extern "C" fn wp81_game_destroy() {
+    host::destroy()
+}
+
+/// Frames rendered so far, or -1 when no game is running.
+#[no_mangle]
+pub extern "C" fn wp81_game_frames() -> i64 {
+    host::frames()
+}
+
+/// Whether a game is currently hosted.
+#[no_mangle]
+pub extern "C" fn wp81_game_running() -> i32 {
+    if host::is_running() { 1 } else { 0 }
+}
+
+/// Tell the host the shell's screen size, before the first frame.
+///
+/// `prpr` projects through `screen_width`/`screen_height`/`screen_aspect`, which all read a static
+/// in the macroquad shim. Left at 0x0 every projection is degenerate and the chart renders as a
+/// single point, so this must be called once after the surface is measured.
+#[no_mangle]
+pub extern "C" fn wp81_game_set_screen(width: f32, height: f32) {
+    host::set_screen(width, height);
+}
+
+/// Decode a NUL-terminated UTF-16 string from the shell.
+///
+/// The shell hands over UTF-16 because that is what .NET strings and the WinRT file APIs use, so
+/// converting on the C# side would mean an extra allocation per call.
+unsafe fn utf16_to_string(p: *const u16) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    while *p.add(len) != 0 {
+        len += 1;
+    }
+    if len == 0 {
+        return None;
+    }
+    let slice = core::slice::from_raw_parts(p, len);
+    String::from_utf16(slice).ok()
 }
 
 /// The PEC sample the C# shell feeds to `RunSelfTest`, kept here so the two cannot drift.

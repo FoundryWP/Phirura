@@ -3216,9 +3216,14 @@ dependencies = [
 name = "prpr-port"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "glyph_brush",
  "libm",
  "macroquad",
+ "pollster",
  "prpr",
+ "tracing",
  "wp81-compat",
 ]
 

@@ -66,6 +66,15 @@ UNSUPPORTED = {
     # Confirmed missing on WP8.1 by wp81_probe_api_sets(): the set exists but does not
     # export it. Calling the resulting null pointer is what aborted the process.
     "GetActiveProcessorCount",
+    # Reached once std's `process` module is linked, which happens as soon as anything uses
+    # `catch_unwind`/the panic machinery - i.e. the moment the game host exists.
+    #   * CreateProcessW is bound to kernel32.dll in std's own windows_sys.rs.
+    #   * GetBinaryTypeW is bound to kernel32.dll by the `which` crate, and is called from
+    #     std's `Command` search path.
+    # Neither exists for a WP8.1 app: there is no process creation. compat supplies a
+    # definition that reports failure, so a path that would spawn a child process degrades to
+    # "command failed" instead of an unresolvable import.
+    "CreateProcessW", "GetBinaryTypeW",
 }
 
 # DLLs whose `raw-dylib` binding must be dropped so the symbol resolves from compat/ instead.

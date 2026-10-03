@@ -31,6 +31,23 @@ prpr = { path = "../prpr", default-features = false }
 # and cargo would pull the real (GL-only) macroquad beside the shim.
 macroquad = { git = "https://github.com/Mivik/prpr-macroquad", rev = "2150130", default-features = false }
 
+# The game host (src/host.rs) drives `GameScene::new` and `Main::new`, which are `async` and `!Send`.
+# `pollster` blocks on them to completion on the calling thread, which is correct here because every
+# await resolves synchronously through the shell callbacks.
+pollster = { workspace = true }
+
+# The host defines a `FileSystem`, whose trait methods are `async`.
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+
+# `TextPainter` takes a `glyph_brush::ab_glyph::FontArc`. Reached through `glyph_brush` rather than
+# depending on `ab_glyph` directly, so the graph keeps exactly one font-parsing crate and the type
+# matches the one `prpr` builds its painter from.
+glyph_brush = "0.7.12"
+
+# Diagnostics from the host go through the same logging facade `prpr` uses.
+tracing = { workspace = true }
+
 # `wp81-compat` must be in this crate's dependency graph, not merely in the workspace.
 #
 # The patched std references compat's symbols (`_tls_index`, `atexit`, the Win32 shims), but compat
