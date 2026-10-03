@@ -138,7 +138,8 @@ $linkArgs = @(
     "/EXPORT:wp81_rs_factory_is_current",
     "/EXPORT:wp81_rs_factory_qi_hr",
     "/EXPORT:wp81_rs_panel_iface",
-    "/EXPORT:wp81_rs_sc_hr"
+    "/EXPORT:wp81_rs_sc_hr",
+    "/EXPORT:wp81_rs_start_corewindow"
 )
 $savedEap2 = $ErrorActionPreference
 $ErrorActionPreference = "Continue"

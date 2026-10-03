@@ -76,6 +76,12 @@ namespace Phirura
         private static extern int wp81_rs_last_hr();
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr wp81_rs_last_hr_name();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_start_corewindow(IntPtr coreWindow, uint width, uint height);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern uint wp81_rs_vertex_count();
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -117,6 +123,23 @@ namespace Phirura
             {
                 try { return wp81_rs_last_hr(); }
                 catch (Exception) { return 0; }
+            }
+        }
+
+        /// <summary>
+        /// The last HRESULT decoded to a DXGI name, e.g. <c>DXGI_ERROR_INVALID_CALL</c>, or "" if
+        /// the value has no table entry. A name is what turns "hr=0x887A0001" into a sentence.
+        /// </summary>
+        public static string LastHrName
+        {
+            get
+            {
+                try
+                {
+                    IntPtr p = wp81_rs_last_hr_name();
+                    return p == IntPtr.Zero ? "" : Marshal.PtrToStringAnsi(p);
+                }
+                catch (Exception) { return ""; }
             }
         }
 
@@ -197,7 +220,10 @@ namespace Phirura
         {
             int stage = Stage;
             int hr = LastHr;
-            string s = "stage=" + stage + " hr=0x" + hr.ToString("X8") + " tick=" + Tick + " (" + TickName + ")";
+            string name = LastHrName;
+            string s = "stage=" + stage + " hr=0x" + hr.ToString("X8")
+                + (name.Length > 0 ? " (" + name + ")" : "")
+                + " tick=" + Tick + " (" + TickName + ")";
             if (stage >= 100)
             {
                 s += "  swapchain-step=" + ScStepName + " (code " + ScStep + ")";
@@ -315,6 +341,7 @@ namespace Phirura
                        : " (none)"));
                 // Every CreateSwapChainForComposition descriptor shape's HRESULT, in try order.
                 // All the same error = "no shape works with this API"; a mix = "one field is wrong".
+                // Each value is also decoded to a DXGI name, because the names are what diagnose it.
                 StringBuilder schr = new StringBuilder("RustRenderer.sc-hr:");
                 for (uint i = 0; i < 4; i++)
                 {
@@ -322,9 +349,23 @@ namespace Phirura
                     schr.Append(" v");
                     schr.Append(i);
                     schr.Append('=');
-                    schr.Append(h == 0x7FFFFFFF ? "n/a" : "0x" + h.ToString("X8"));
+                    if (h == 0x7FFFFFFF)
+                    {
+                        schr.Append("n/a");
+                    }
+                    else
+                    {
+                        schr.Append("0x");
+                        schr.Append(h.ToString("X8"));
+                        if (h >= 0)
+                        {
+                            schr.Append("(OK)");
+                        }
+                    }
                 }
                 AppLog.WriteSync(schr.ToString());
+                AppLog.WriteSync("RustRenderer.last-hr: 0x" + LastHr.ToString("X8")
+                    + (LastHrName.Length > 0 ? " (" + LastHrName + ")" : ""));
             }
             catch (Exception ex)
             {
@@ -536,9 +577,81 @@ namespace Phirura
             }
         }
 
-        /// <summary>Draw one frame: clear, one test quad, present. Returns false if not started.</summary>
-        public static bool DrawTestFrame()
+        /// <summary>
+        /// The fallback bring-up route: <c>IDXGIFactory2::CreateSwapChainForCoreWindow</c>.
+        ///
+        /// This exists because the composition route (<see cref="Bisect"/>) is the single riskiest
+        /// unknown on WP8.1, and the plan calls for measuring both. No `SwapChainPanel` is involved -
+        /// the swapchain targets the app's one `CoreWindow`, so there is nothing to attach and the
+        /// XAML tree is bypassed entirely.
+        ///
+        /// Must be called on the UI thread, because `CoreWindow.GetForCurrentThread()` is a
+        /// thread-affine API.
+        /// </summary>
+        public static bool StartCoreWindow(uint pixelWidth, uint pixelHeight)
         {
+            if (_started)
+            {
+                return true;
+            }
+            IntPtr window;
+            try
+            {
+                var cw = Windows.UI.Core.CoreWindow.GetForCurrentThread();
+                if (cw == null)
+                {
+                    AppLog.WriteSync("RustRenderer.StartCoreWindow: GetForCurrentThread returned null");
+                    return false;
+                }
+                window = Marshal.GetIUnknownForObject(cw);
+            }
+            catch (Exception ex)
+            {
+                AppLog.WriteSync("RustRenderer.StartCoreWindow: cannot get CoreWindow", ex);
+                return false;
+            }
+            if (window == IntPtr.Zero)
+            {
+                AppLog.WriteSync("RustRenderer.StartCoreWindow: GetIUnknownForObject returned null");
+                return false;
+            }
+
+            try
+            {
+                int rc;
+                AppLog.WriteSync("RustRenderer.StartCoreWindow: calling native (0x"
+                    + window.ToString("X8") + ", " + pixelWidth + "x" + pixelHeight + ")");
+                try
+                {
+                    rc = wp81_rs_start_corewindow(window, pixelWidth, pixelHeight);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.WriteSync("RustRenderer.StartCoreWindow: native threw", ex);
+                    return false;
+                }
+                finally
+                {
+                    Marshal.Release(window);
+                }
+                AppLog.WriteSync("RustRenderer.StartCoreWindow: native returned rc=" + rc
+                    + " " + Diagnose());
+                if (rc != 0)
+                {
+                    return false;
+                }
+                _started = true;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AppLog.WriteSync("RustRenderer.StartCoreWindow: FAILED", ex);
+                return false;
+            }
+        }
+
+        /// <summary>Draw one frame: clear, one test quad, present. Returns false if not started.</summary>
+        public static bool DrawTestFrame()        {
             if (!_started)
             {
                 return false;

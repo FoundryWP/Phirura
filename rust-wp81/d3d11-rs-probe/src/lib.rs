@@ -497,6 +497,137 @@ pub unsafe extern "C" fn wp81_rs_start_upto(
     0
 }
 
+/// The **CoreWindow** bring-up route, the fallback to `CreateSwapChainForComposition`.
+///
+/// Everything after the swapchain differs not at all, so this deliberately shares the same global
+/// `STATE` and the same downstream code path as [`wp81_rs_start`] - the only difference is the call
+/// that creates the swapchain. `wp81_rs_stop()` tears down either route identically.
+///
+/// `core_window` is the `ICoreWindow*` of `Windows.UI.Core.CoreWindow.GetForCurrentThread()`.
+/// Returns 0 on success; `stage` names the failing step (100+ = the CoreWindow sub-steps).
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_start_corewindow(
+    core_window: *mut c_void,
+    width: u32,
+    height: u32,
+) -> i32 {
+    let s = st();
+    release_all(s);
+    reset_sc_hrs();
+    s.width = width;
+    s.height = height;
+    s.limit = 0;
+    s.reached = 0;
+
+    bump(s, 2);
+    let (device, context, _level, _desc) = match create_device() {
+        Some(v) => v,
+        None => {
+            s.stage = 1;
+            return 1;
+        }
+    };
+    s.device = device;
+    s.context = context;
+
+    bump(s, 10);
+    // Reuse the tail of the composition path by wrapping the CoreWindow swapchain behind the same
+    // "create + RTV + pipeline + quad" sequence. The swapchain itself comes from the other function.
+    let swapchain = match create_swapchain_for_corewindow_traced(
+        device,
+        core_window,
+        width,
+        height,
+        s.sc_trace.as_mut_ptr(),
+    ) {
+        Some(sc) => sc,
+        None => {
+            s.stage = SC_BASE + s.sc_trace[0];
+            s.last_hr = s.sc_trace[1];
+            return 2;
+        }
+    };
+    s.swapchain = swapchain;
+
+    finish_up_from_swapchain(s)
+}
+
+/// The second half of bring-up, shared by both swapchain routes: back buffer -> RTV -> pipeline ->
+/// test texture -> viewport. Returns the same stage codes as [`wp81_rs_start`].
+unsafe fn finish_up_from_swapchain(s: &mut State) -> i32 {
+    let device = s.device;
+    let context = s.context;
+    let swapchain = s.swapchain;
+
+    let get_buffer: extern "system" fn(
+        *mut c_void,
+        UINT,
+        *const Guid,
+        *mut *mut c_void,
+    ) -> HRESULT = swapchain.method(IDXGISWAPCHAIN_GETBUFFER);
+    let mut backbuffer = ComPtr::NULL;
+    if get_buffer(
+        swapchain.vtbl as *mut c_void,
+        0,
+        &IID_ID3D11TEXTURE2D as *const Guid,
+        &mut backbuffer.vtbl as *mut _ as *mut *mut c_void,
+    ) < 0
+        || backbuffer.is_null()
+    {
+        s.stage = 3;
+        return 3;
+    }
+    let create_rtv: extern "system" fn(
+        *mut c_void,
+        *mut c_void,
+        *const c_void,
+        *mut *mut c_void,
+    ) -> HRESULT = device.method(D3D11DEVICE_CREATERENDERTARGETVIEW);
+    let mut rtv = ComPtr::NULL;
+    let hr = create_rtv(
+        device.vtbl as *mut c_void,
+        backbuffer.vtbl as *mut c_void,
+        core::ptr::null(),
+        &mut rtv.vtbl as *mut _ as *mut *mut c_void,
+    );
+    backbuffer.release();
+    s.last_hr = hr;
+    if hr < 0 || rtv.is_null() {
+        s.stage = 4;
+        return 4;
+    }
+    s.rtv = rtv;
+
+    let pipeline = match build_pipeline(device, context) {
+        Some(p) => p,
+        None => {
+            s.stage = 5;
+            return 5;
+        }
+    };
+    if !create_test_texture(device, s) {
+        s.stage = 6;
+        return 6;
+    }
+    s.pipeline = Some(pipeline);
+
+    let vp = D3D11_VIEWPORT {
+        TopLeftX: 0.0,
+        TopLeftY: 0.0,
+        Width: s.width as f32,
+        Height: s.height as f32,
+        MinDepth: 0.0,
+        MaxDepth: 1.0,
+    };
+    let set_viewports: extern "system" fn(*mut c_void, UINT, *const D3D11_VIEWPORT) =
+        context.method(D3D11CONTEXT_RSSETVIEWPORTS);
+    set_viewports(context.vtbl as *mut c_void, 1, &vp);
+
+    bump(s, 99);
+    s.stage = 0;
+    0
+}
+
 /// A 1x1 opaque-white RGBA texture + its shader resource view (the Stage 1 test texture).
 unsafe fn create_test_texture(device: ComPtr, s: &mut State) -> bool {
     let white: [u8; 4] = [255, 255, 255, 255];

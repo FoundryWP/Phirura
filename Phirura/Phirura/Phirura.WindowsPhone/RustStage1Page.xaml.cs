@@ -132,11 +132,28 @@ namespace Phirura
                 bool ok = RustRenderer.Started;
                 AppLog.WriteSync("RustStage1: bisect finished, reached=" + reached + " started=" + ok);
 
+                // Route 2: if the composition swapchain could not be created, fall back to the
+                // CoreWindow route before giving up. It bypasses XAML entirely, so if the failure is
+                // in the panel attach rather than in DXGI this still produces pixels. Must run on
+                // the UI thread - CoreWindow.GetForCurrentThread is thread-affine.
+                string route = "composition";
+                if (!ok)
+                {
+                    AppLog.WriteSync("RustStage1: composition route failed; trying CoreWindow route");
+                    ok = RustRenderer.StartCoreWindow(w, h);
+                    AppLog.WriteSync("RustStage1: CoreWindow route started=" + ok + " " + RustRenderer.Diagnose());
+                    if (ok)
+                    {
+                        route = "corewindow";
+                    }
+                }
+
                 StageText.Text = ok ? "启动成功 · stage=0" : "启动失败 · " + RustRenderer.Diagnose();
                 HrText.Text = ok
-                    ? "swapchain: " + RustRenderer.ScVariantName
+                    ? "route: " + route + (route == "composition" ? " · " + RustRenderer.ScVariantName : "")
                     : (RustRenderer.ScStep > 0
                         ? "swapchain 步: " + RustRenderer.ScStepName + "  hr=0x" + RustRenderer.LastHr.ToString("X8")
+                          + (RustRenderer.LastHrName.Length > 0 ? " (" + RustRenderer.LastHrName + ")" : "")
                         : "");
                 SizeText.Text = w + " x " + h + " px  (scale " + scale.ToString("0.00") + ")";
                 if (!ok)
