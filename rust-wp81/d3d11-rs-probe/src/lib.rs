@@ -58,6 +58,8 @@ struct State {
     last_hr: i32,
     /// (step, hresult) from the swapchain-attachment path, so a failure names its call.
     sc_trace: [i32; 2],
+    /// Which swapchain-descriptor variant was accepted (0 = first/flip-sequential).
+    sc_variant: i32,
     width: u32,
     height: u32,
     vertex_count: usize,
@@ -78,6 +80,7 @@ static mut STATE: State = State {
     stage: -1,
     last_hr: 0,
     sc_trace: [0, 0],
+    sc_variant: -1,
     width: 0,
     height: 0,
     vertex_count: 0,
@@ -114,7 +117,11 @@ pub unsafe extern "C" fn wp81_rs_start(panel: *mut c_void, width: u32, height: u
     let _ = level;
 
     let swapchain = match create_swapchain_for_panel_traced(device, panel, width, height, s.sc_trace.as_mut_ptr()) {
-        Some(sc) => sc,
+        Some(sc) => {
+            // SC_CREATE_OK + the accepted variant index, for the log.
+            s.sc_variant = s.sc_trace[1];
+            sc
+        }
         None => {
             // Report *which* call failed: s.stage carries the sub-step (20..25) and last_hr the
             // HRESULT, so the phone's log names the failing call instead of a bare "stage 2".
@@ -464,6 +471,7 @@ pub unsafe extern "C" fn wp81_rs_sc_step_name() -> *const u8 {
         23 => b"CreateSwapChainForComposition\0",
         24 => b"SwapChainPanel QI(ISwapChainPanelNative)\0",
         25 => b"ISwapChainPanelNative::SetSwapChain\0",
+        26 => b"(swapchain created)\0",
         _ => b"(none)\0",
     };
     s.as_ptr()
@@ -473,6 +481,23 @@ pub unsafe extern "C" fn wp81_rs_sc_step_name() -> *const u8 {
 #[no_mangle]
 pub unsafe extern "C" fn wp81_rs_sc_step() -> i32 {
     st().sc_trace[0]
+}
+
+/// Which swapchain-descriptor variant succeeded: -1 = none yet, 0..N = index into the table in
+/// `renderer.rs`. Lets the log record the working descriptor shape for the phone's driver.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_sc_variant() -> i32 {
+    st().sc_variant
+}
+
+/// A short ASCII name for the accepted swapchain-descriptor variant ("" if none).
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_sc_variant_name() -> *const u8 {
+    let i = st().sc_variant;
+    if i < 0 || i as usize >= renderer::SC_VARIANT_NAMES.len() {
+        return b"\0".as_ptr();
+    }
+    renderer::SC_VARIANT_NAMES[i as usize].as_ptr()
 }
 
 /// Vertices drawn by the last test quad (a sanity check the C# side can read).

@@ -1,3 +1,6 @@
+First mind:实践是检验真理的唯一标准
+一定要真机测试！！！！！！！！！！
+
 # Path A — the Rust-native D3D11 renderer
 
 > Status: **approved plan.** The import surface was verified against the WP8.1 kit's own ARM

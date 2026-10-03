@@ -59,6 +59,12 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr wp81_rs_sc_step_name();
 
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_sc_variant();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr wp81_rs_sc_variant_name();
+
         private static bool _started;
 
         public static bool Started { get { return _started; } }
@@ -104,6 +110,30 @@ namespace Phirura
                     return p == IntPtr.Zero ? "(null)" : Marshal.PtrToStringAnsi(p);
                 }
                 catch (Exception) { return "(unavailable)"; }
+            }
+        }
+
+        /// <summary>Which swapchain descriptor variant the phone's driver accepted (-1 = none).</summary>
+        public static int ScVariant
+        {
+            get
+            {
+                try { return wp81_rs_sc_variant(); }
+                catch (Exception) { return -1; }
+            }
+        }
+
+        /// <summary>The accepted descriptor shape by name, e.g. "FLIP_SEQUENTIAL x2 PREMULTIPLIED".</summary>
+        public static string ScVariantName
+        {
+            get
+            {
+                try
+                {
+                    IntPtr p = wp81_rs_sc_variant_name();
+                    return p == IntPtr.Zero ? "" : Marshal.PtrToStringAnsi(p);
+                }
+                catch (Exception) { return ""; }
             }
         }
 

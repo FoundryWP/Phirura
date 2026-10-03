@@ -77,9 +77,9 @@ namespace Phirura
                 + " " + RustRenderer.Diagnose());
 
             StageText.Text = ok ? "启动成功 · stage=0" : "启动失败 · " + RustRenderer.Diagnose();
-            HrText.Text = RustRenderer.ScStep > 0
-                ? "swapchain 步: " + RustRenderer.ScStepName
-                : "";
+            HrText.Text = ok
+                ? "swapchain: " + RustRenderer.ScVariantName
+                : (RustRenderer.ScStep > 0 ? "swapchain 步: " + RustRenderer.ScStepName : "");
             SizeText.Text = w + " x " + h + " px  (scale " + scale.ToString("0.00") + ")";
 
             if (!ok)

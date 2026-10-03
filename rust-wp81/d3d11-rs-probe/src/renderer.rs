@@ -227,6 +227,17 @@ pub const SC_GET_PARENT: i32 = 22;
 pub const SC_CREATE: i32 = 23;
 pub const SC_PANEL_QI: i32 = 24;
 pub const SC_SET_SWAPCHAIN: i32 = 25;
+/// Not a failure - reports which descriptor variant was accepted (see `create_swapchain_for_panel_traced`).
+pub const SC_CREATE_OK: i32 = 26;
+
+/// The descriptor shapes tried by [`create_swapchain_for_panel_traced`], in order. Index into this
+/// with `wp81_rs_sc_variant()` to name the one the device accepted.
+pub static SC_VARIANT_NAMES: [&[u8]; 4] = [
+    b"FLIP_SEQUENTIAL x2 PREMULTIPLIED\0",
+    b"FLIP_SEQUENTIAL x2 IGNORE\0",
+    b"DISCARD x1 IGNORE\0",
+    b"SEQUENTIAL x1 IGNORE\0",
+];
 
 pub unsafe fn create_swapchain_for_panel_traced(
     device: ComPtr,
@@ -235,15 +246,17 @@ pub unsafe fn create_swapchain_for_panel_traced(
     height: u32,
     trace: *mut i32,
 ) -> Option<ComPtr> {
-    let mut note = |step: i32, hr: i32| {
+    // A plain fn rather than a closure: the closure form borrows `trace`, which then conflicts
+    // with the direct writes further down (E0506).
+    unsafe fn note(trace: *mut i32, step: i32, hr: i32) {
         if !trace.is_null() {
             *trace = step;
             *trace.add(1) = hr;
         }
-    };
+    }
 
     if panel.is_null() {
-        note(SC_PANEL_QI, -1);
+        note(trace, SC_PANEL_QI, -1);
         return None;
     }
 
@@ -251,7 +264,7 @@ pub unsafe fn create_swapchain_for_panel_traced(
     let mut dxgi_device = ComPtr::NULL;
     let hr = device.query_interface(&IID_IDXGIDEVICE, &mut dxgi_device.vtbl as *mut _ as *mut *mut c_void);
     if hr < 0 || dxgi_device.is_null() {
-        note(SC_QI_DXGIDEVICE, hr);
+        note(trace, SC_QI_DXGIDEVICE, hr);
         return None;
     }
     let mut adapter = ComPtr::NULL;
@@ -260,7 +273,7 @@ pub unsafe fn create_swapchain_for_panel_traced(
     let hr = get_adapter(dxgi_device.vtbl as *mut c_void, &mut adapter.vtbl as *mut _ as *mut *mut c_void);
     if hr < 0 || adapter.is_null() {
         dxgi_device.release();
-        note(SC_GET_ADAPTER, hr);
+        note(trace, SC_GET_ADAPTER, hr);
         return None;
     }
     let mut factory = ComPtr::NULL;
@@ -275,46 +288,105 @@ pub unsafe fn create_swapchain_for_panel_traced(
     adapter.release();
     dxgi_device.release();
     if hr < 0 || factory.is_null() {
-        note(SC_GET_PARENT, hr);
+        note(trace, SC_GET_PARENT, hr);
         return None;
     }
 
-    let mut scd = DXGI_SWAP_CHAIN_DESC {
-        BufferDesc_Width: width,
-        BufferDesc_Height: height,
-        BufferDesc_RefreshRate_Numerator: 60,
-        BufferDesc_RefreshRate_Denominator: 1,
-        BufferDesc_Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        BufferDesc_ScanlineOrdering: 0,
-        BufferDesc_Scaling: 0,
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-        BufferCount: 2,
-        OutputWindow: core::ptr::null_mut(),
-        Windowed: 1,
-        SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-        Flags: 0,
-    };
-    let _ = &mut scd;
+    // `CreateSwapChainForComposition` takes a `DXGI_SWAP_CHAIN_DESC1`, NOT the legacy
+    // `DXGI_SWAP_CHAIN_DESC`. Pass the wrong one and the fields are read from the wrong offsets,
+    // which the runtime reports as `DXGI_ERROR_INVALID_CALL` (0x887A0001) - indistinguishable at
+    // the call site from "unsupported". Try the effect/buffer-count combinations in order so the
+    // log records which shape this driver accepts.
+    struct Variant {
+        swap_effect: UINT,
+        buffer_count: UINT,
+        alpha_mode: UINT,
+        name: &'static [u8],
+    }
+    let variants: [Variant; 4] = [
+        Variant {
+            swap_effect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+            buffer_count: 2,
+            alpha_mode: DXGI_ALPHA_MODE_PREMULTIPLIED,
+            name: b"FLIP_SEQUENTIAL x2 premultiplied\0",
+        },
+        Variant {
+            swap_effect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+            buffer_count: 2,
+            alpha_mode: DXGI_ALPHA_MODE_IGNORE,
+            name: b"FLIP_SEQUENTIAL x2 ignore-alpha\0",
+        },
+        Variant {
+            swap_effect: DXGI_SWAP_EFFECT_DISCARD,
+            buffer_count: 1,
+            alpha_mode: DXGI_ALPHA_MODE_IGNORE,
+            name: b"DISCARD x1 ignore-alpha\0",
+        },
+        Variant {
+            swap_effect: DXGI_SWAP_EFFECT_SEQUENTIAL,
+            buffer_count: 1,
+            alpha_mode: DXGI_ALPHA_MODE_IGNORE,
+            name: b"SEQUENTIAL x1 ignore-alpha\0",
+        },
+    ];
 
-    let mut swapchain = ComPtr::NULL;
     let create_for_comp: extern "system" fn(
         *mut c_void,
         *mut c_void,
-        *const DXGI_SWAP_CHAIN_DESC,
+        *const DXGI_SWAP_CHAIN_DESC1,
         *mut *mut c_void,
     ) -> HRESULT = factory.method(IDXGIFACTORY2_CREATESWAPCHAINFORCOMPOSITION);
-    let hr = create_for_comp(
-        factory.vtbl as *mut c_void,
-        device.vtbl as *mut c_void,
-        &scd,
-        &mut swapchain.vtbl as *mut _ as *mut *mut c_void,
-    );
+
+    let mut swapchain = ComPtr::NULL;
+    let mut hr = E_INVALIDARG;
+    let mut chosen: u32 = 0xFFFF_FFFF;
+    for (i, v) in variants.iter().enumerate() {
+        let scd = DXGI_SWAP_CHAIN_DESC1 {
+            Width: width,
+            Height: height,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Stereo: 0,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            BufferCount: v.buffer_count,
+            Scaling: DXGI_SCALING_STRETCH,
+            SwapEffect: v.swap_effect,
+            AlphaMode: v.alpha_mode,
+            Flags: 0,
+        };
+        let mut sc = ComPtr::NULL;
+        hr = create_for_comp(
+            factory.vtbl as *mut c_void,
+            device.vtbl as *mut c_void,
+            &scd,
+            &mut sc.vtbl as *mut _ as *mut *mut c_void,
+        );
+        if hr >= 0 && !sc.is_null() {
+            swapchain = sc;
+            chosen = i as u32;
+            break;
+        }
+        if !sc.is_null() {
+            sc.release();
+        }
+    }
     factory.release();
+
     if hr < 0 || swapchain.is_null() {
-        note(SC_CREATE, hr);
+        if !trace.is_null() {
+            *trace = SC_CREATE;
+            *trace.add(1) = hr;
+        }
+        let _ = chosen;
         return None;
     }
+
+    // Surface which variant worked, through the same trace slot the failure path uses.
+    if !trace.is_null() {
+        *trace = SC_CREATE_OK;
+        *trace.add(1) = chosen as i32;
+    }
+
 
     // Hand the swapchain to XAML.
     let mut native = ComPtr::NULL;
@@ -325,7 +397,7 @@ pub unsafe fn create_swapchain_for_panel_traced(
     );
     if hr < 0 || native.is_null() {
         swapchain.release();
-        note(SC_PANEL_QI, hr);
+        note(trace, SC_PANEL_QI, hr);
         return None;
     }
     let set_swapchain: extern "system" fn(*mut c_void, *mut c_void) -> HRESULT =
@@ -334,7 +406,7 @@ pub unsafe fn create_swapchain_for_panel_traced(
     native.release();
     if hr < 0 {
         swapchain.release();
-        note(SC_SET_SWAPCHAIN, hr);
+        note(trace, SC_SET_SWAPCHAIN, hr);
         return None;
     }
     Some(swapchain)

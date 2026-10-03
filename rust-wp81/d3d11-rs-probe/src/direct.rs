@@ -248,6 +248,40 @@ pub struct DXGI_SWAP_CHAIN_DESC {
     pub Flags: UINT,
 }
 
+/// `DXGI_SWAP_CHAIN_DESC1` (dxgi.h) - what `CreateSwapChainForComposition` actually takes.
+///
+/// This is a DIFFERENT struct from [`DXGI_SWAP_CHAIN_DESC`], despite the similar name: it drops
+/// `RefreshRate`, `ScanlineOrdering`, `OutputWindow` and `Windowed`, and adds `Stereo`, `Scaling`
+/// and `AlphaMode`. Passing the legacy descriptor to `CreateSwapChainForComposition` reads every
+/// field from the wrong offset and the call fails with `DXGI_ERROR_INVALID_CALL` (`0x887A0001`) -
+/// which looks exactly like "the feature is unsupported", but is really a layout mismatch.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DXGI_SWAP_CHAIN_DESC1 {
+    pub Width: UINT,
+    pub Height: UINT,
+    pub Format: UINT,
+    pub Stereo: BOOL,
+    pub SampleDesc: DXGI_SAMPLE_DESC,
+    pub BufferUsage: UINT,
+    pub BufferCount: UINT,
+    pub Scaling: UINT,
+    pub SwapEffect: UINT,
+    pub AlphaMode: UINT,
+    pub Flags: UINT,
+}
+
+// dxgi.h - DXGI_SCALING
+pub const DXGI_SCALING_STRETCH: UINT = 0;
+pub const DXGI_SCALING_NONE: UINT = 1;
+pub const DXGI_SCALING_ASPECT_RATIO_STRETCH: UINT = 2;
+
+// dxgi.h - DXGI_ALPHA_MODE
+pub const DXGI_ALPHA_MODE_UNSPECIFIED: UINT = 0;
+pub const DXGI_ALPHA_MODE_PREMULTIPLIED: UINT = 1;
+pub const DXGI_ALPHA_MODE_STRAIGHT: UINT = 2;
+pub const DXGI_ALPHA_MODE_IGNORE: UINT = 3;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DXGI_ADAPTER_DESC1 {
