@@ -61,7 +61,21 @@ foreach ($p in @($cargo, $armLink, $vcLibArm, $wpLibArm, $chkstk, $target, $ws))
 
 Set-Location $ws
 
-Write-Host "=== 1. cargo build -p prpr-port (staticlib) ==="
+Write-Host "=== 0. patch the registry crates that bind Win32 with raw-dylib ==="
+# `which` and `getrandom` each declare their Win32 imports with `#[link(kind = "raw-dylib")]` in
+# their own source. That attribute makes rustc emit an ARM *import descriptor*, which the linker
+# puts in `.idata` no matter what `/FORCE:MULTIPLE` decides about the duplicate symbol - so the
+# DLL ends up importing kernel32.dll and bcryptprimitives.dll, and WP8.1's loader refuses it.
+#
+# `wp81_std_patch.py` fixes the same mistake in std, but it only walks rust-src; cargo compiles
+# dependencies out of $CARGO_HOME, where nothing patches them. This is that missing pass. It is
+# idempotent - a second run reports 0 changes - and `check_imports.py` in step 3 is what proves it
+# worked.
+$py = "C:\Users\admin\.workbuddy-ai\binaries\python\versions\3.13.12\python.exe"
+& $py (Join-Path $here "wp81_registry_patch.py") --apply
+if ($LASTEXITCODE -ne 0) { throw "registry patch failed ($LASTEXITCODE)" }
+
+Write-Host "`n=== 1. cargo build -p prpr-port (staticlib) ==="
 # Every -Z argument containing a comma MUST be quoted: unquoted, the shell parses `std,panic_abort`
 # as an array literal and fails to parse the whole script, so nothing runs at all.
 $cargoArgs = @(
@@ -112,6 +126,11 @@ $exports = @(
     "wp81_draw_indices",
     "wp81_draw_reset",
     "wp81_draw_selftest",
+    # the texture registry - see `wp81_texture_*`, which lets the shell rebuild an id as a bitmap
+    "wp81_texture_count",
+    "wp81_texture_id_at",
+    "wp81_texture_data",
+    "wp81_texture_overflow",
     # the game host - see `wp81_game_*`, which runs the real prpr scene
     "wp81_game_create",
     "wp81_game_frame",
@@ -123,23 +142,33 @@ $exports = @(
 
 # /FORCE:MULTIPLE is load-bearing, and the reason is not obvious from the log.
 #
-# Seven third-party crates bind Win32 entry points with `#[link(kind = "raw-dylib")]` in their own
-# source - `which` (GetLastError), `winapi-util` (GetConsoleMode), `walkdir`/`same-file`
-# (GetFileInformationByHandle) and `getrandom` via `rand`/`twox-hash` (ProcessPrng from
-# bcryptprimitives). raw-dylib makes rustc synthesise an ARM *import-descriptor member* into the
-# object, so the archive holds members literally named `kernel32.dll`, `ntdll.dll`,
-# `bcryptprimitives.dll`, ... (551 of them). `wp81-compat` defines the same four names as
-# `#[no_mangle]`, so the linker sees two definitions and stops with LNK2005.
+# Several third-party crates bind Win32 entry points with `#[link(kind = "raw-dylib")]` in their own
+# source - `which` (GetLastError, GetBinaryTypeW), `winapi-util` (GetConsoleMode),
+# `walkdir`/`same-file` (GetFileInformationByHandle) and `getrandom` via `rand`/`twox-hash`
+# (ProcessPrng from bcryptprimitives). raw-dylib makes rustc synthesise an ARM *import-descriptor
+# member* into the object, so the archive holds hundreds of members literally named `kernel32.dll`,
+# `ntdll.dll`, `bcryptprimitives.dll`, ... `wp81-compat` defines the same names as `#[no_mangle]`,
+# so the linker sees two definitions and stops with LNK2005.
 #
-# /FORCE:MULTIPLE keeps the FIRST definition - compat's - and drops the import descriptor. The
-# image then imports no desktop DLL at all. That outcome is verified, not assumed: the check
-# below re-reads the import table and fails the build if anything other than an `api-ms-win-*`
-# API set got in. Without that check /FORCE:MULTIPLE would also happily link a symbol that
-# NOTHING implements, through a null IAT slot that only faults on the device.
+# /FORCE:MULTIPLE keeps the FIRST definition - compat's - and reports the other as LNK4006 "second
+# definition ignored".
 #
-# Do NOT "clean this up" by removing /FORCE:MULTIPLE and patching the four crates: it is ~25,000
-# lines across seven crates for four symbols. Do NOT remove ws2_32.lib either - std's net module
-# imports the whole winsock set through it, and dropping it brings back ~35 LNK2019s.
+# CRITICAL, and the trap this file used to fall into: LNK4006 dropping the *duplicate symbol* does
+# NOT drop the *import descriptor*. The descriptor is a separate contribution to `.idata`, and the
+# linker emits it regardless of which function definition it kept. The build therefore linked
+# cleanly, printed only LNK4006, and still produced a DLL whose import table named kernel32.dll and
+# bcryptprimitives.dll - a load-time failure on the device, with no build error to warn anyone.
+#
+# The fix is NOT /FORCE:MULTIPLE alone. It is step 0 (wp81_registry_patch.py) plus the std patch
+# (wp81_std_patch.py), which together delete every `raw-dylib` attribute for a symbol compat
+# provides, so no descriptor is generated in the first place. /FORCE:MULTIPLE then only has to
+# absorb the benign duplicates that remain.
+#
+# Do NOT treat a passing link as proof. `check_imports.py` in step 3 re-reads the import table and
+# is the only thing that says whether the descriptors are gone. Without it, /FORCE:MULTIPLE would
+# also happily link a symbol NOTHING implements, through a null IAT slot that only faults on the
+# device. Do NOT remove ws2_32.lib either - std's net module imports the whole winsock set through
+# it, and dropping it brings back ~35 LNK2019s.
 $linkArgs = @(
     "/DLL", "/NODEFAULTLIB", "/MACHINE:ARM", "/SUBSYSTEM:WINDOWS",
     "/ENTRY:_DllMainCRTStartup",
@@ -163,7 +192,6 @@ if ($linkCode -ne 0) { throw "link failed ($linkCode) - see port-link.log" }
 # The gate that makes /FORCE:MULTIPLE safe. LNK4006 warnings are expected and printed above; an
 # unexpected import is not, and must stop the build rather than crash on the device.
 Write-Host "`n=== 3. verify every import is a WP8.1 API set ==="
-$py = "C:\Users\admin\.workbuddy-ai\binaries\python\versions\3.13.12\python.exe"
 & $py (Join-Path $here "tools\check_imports.py") $dll
 if ($LASTEXITCODE -ne 0) {
     throw "import check failed ($LASTEXITCODE) - the DLL imports a library WP8.1 does not have. " +

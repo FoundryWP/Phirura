@@ -55,6 +55,58 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern void wp81_draw_selftest();
 
+        // --- the texture registry ------------------------------------------
+        //
+        // A Texture record in the drain carries only a u32 id. The Rust shim allocates those ids
+        // where it has pixels rather than filenames, so the shell cannot resolve one by itself;
+        // these calls are how it does. The shell reads each texture once, builds a CanvasBitmap and
+        // keeps it, so the copy happens once per texture per session rather than once per frame.
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint wp81_texture_count();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint wp81_texture_id_at(uint index);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_texture_data(uint id, out uint width, out uint height, IntPtr outBytes, uint cap);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint wp81_texture_overflow();
+
+        // --- the game host -------------------------------------------------
+        //
+        // This is the real thing: `wp81_game_create` builds a `prpr::scene::GameScene` from the
+        // chart on disk and wraps it in a `Main`; `wp81_game_frame` advances and renders exactly one
+        // frame and leaves the recorded draw commands for `Drain`. The scene lives in the DLL, so
+        // these are the only three calls the shell makes per session plus one per frame.
+
+        /// <summary>
+        /// Builds the game. Both strings are UTF-16 and NUL-terminated; the first is the chart's
+        /// folder name under the shell's local <c>charts\</c> folder, the second the chart file.
+        ///
+        /// Returns 0 on success, or a negative code:
+        ///   -1 nothing to load, -2 the chart or scene failed to build, -3 a game is already
+        ///   running, -100 the scene panicked.
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int wp81_game_create(string folder, string chartName);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_game_frame(double dt);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void wp81_game_destroy();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern long wp81_game_frames();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_game_running();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void wp81_game_set_screen(float width, float height);
+
         // --- the Rust -> C# direction -------------------------------------
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -97,12 +149,24 @@ namespace Phirura
         private delegate void PresentFn();
 
         /// <summary>
+        /// Reads a file the Rust game asked for. Returns the byte count, or -1 if it is not there.
+        ///
+        /// <c>name</c> is NUL-terminated UTF-16, relative to the app's local <c>charts\</c> folder.
+        /// </summary>
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int LoadAssetFn(IntPtr name, IntPtr outBytes, IntPtr cap);
+
+        /// <summary>
         /// Mirrors <c>HostCallbacks</c> in the Rust port.
         ///
         /// Laid out by hand rather than with <c>[MarshalAs]</c> because it is passed by pointer,
         /// not marshalled: the Rust side copies the struct wholesale, so the layout has to be the
         /// natural one for the target. Every field is a function pointer (4 bytes on ARM), which
         /// makes the layout uniform.
+        ///
+        /// FIELD ORDER IS THE ABI. <c>load_asset</c> is appended last to match the Rust struct - if
+        /// either side gains a field in the middle, this compiles and then calls the wrong function
+        /// pointer. <see cref="CallbacksLayoutOk"/> is the guard.
         /// </summary>
         [StructLayout(LayoutKind.Sequential)]
         private struct HostCallbacks
@@ -122,7 +186,15 @@ namespace Phirura
             public IntPtr pick_file;
             public IntPtr save_file;
             public IntPtr present;
+            public IntPtr load_asset;
         }
+
+        /// <summary>
+        /// Number of function pointers in the Rust <c>HostCallbacks</c>. Kept as a literal because
+        /// the C# struct cannot be counted at compile time; the point is that a mismatch is caught
+        /// by <see cref="CallbacksLayoutOk"/> instead of by a crash inside a Rust callback.
+        /// </summary>
+        private const int ExpectedCallbackCount = 16;
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern void wp81_install_callbacks(ref HostCallbacks callbacks);
@@ -249,6 +321,81 @@ namespace Phirura
             return new DrainFrame { Count = n, Commands = cmds, Vertices = verts, Indices = idx };
         }
 
+        // --- the game host's managed surface ------------------------------
+
+        /// <summary>Result codes from <see cref="GameCreate"/>, mirroring the Rust constants.</summary>
+        public enum GameResult
+        {
+            Ok = 0,
+            NoChart = -1,
+            ParseFailed = -2,
+            AlreadyRunning = -3,
+            Panicked = -100,
+        }
+
+        /// <summary>
+        /// Starts the real Rust game for a chart.
+        ///
+        /// <paramref name="folder"/> is the chart's directory name under the shell's local
+        /// <c>charts\</c> folder; <paramref name="chartName"/> is the chart file inside it.
+        /// <see cref="AssetRoot"/> must already point at that folder - the chart parse, the
+        /// illustration and the audio all come back through <c>load_asset</c>.
+        /// </summary>
+        public static GameResult GameCreate(string folder, string chartName)
+        {
+            Install();
+            return (GameResult)wp81_game_create(folder, chartName);
+        }
+
+        /// <summary>
+        /// Advances and renders one frame, then returns the recorded draw commands.
+        ///
+        /// Returns an empty frame when nothing is running, so the caller can call this
+        /// unconditionally from the render loop.
+        /// </summary>
+        public static DrainFrame GameFrame(double dt, uint vertexCapacity, uint indexCapacity)
+        {
+            int n = wp81_game_frame(dt);
+            if (n < 0)
+            {
+                return new DrainFrame
+                {
+                    Count = 0,
+                    Commands = new PortCmd[0],
+                    Vertices = new PortVertex[0],
+                    Indices = new ushort[0],
+                };
+            }
+            return Drain(vertexCapacity, indexCapacity);
+        }
+
+        public static void GameDestroy()
+        {
+            wp81_game_destroy();
+        }
+
+        public static bool GameRunning()
+        {
+            return wp81_game_running() != 0;
+        }
+
+        public static long GameFrames()
+        {
+            return wp81_game_frames();
+        }
+
+        /// <summary>
+        /// Reports the shell's surface size to the Rust renderer.
+        ///
+        /// Must be called once after the drawing surface is measured and before the first frame:
+        /// <c>prpr</c> projects through statics that default to 0x0, and at 0x0 the aspect ratio is
+        /// degenerate so the whole chart collapses to a single point.
+        /// </summary>
+        public static void GameSetScreen(float width, float height)
+        {
+            wp81_game_set_screen(width, height);
+        }
+
         private static PortCmd ReadCmd(IntPtr basePtr, int index)
         {
             int off = index * CmdStride;
@@ -339,8 +486,20 @@ namespace Phirura
         private static PickFileFn _pickFile;
         private static SaveFileFn _saveFile;
         private static PresentFn _present;
+        private static LoadAssetFn _loadAsset;
 
         private static bool _installed;
+
+        /// <summary>
+        /// True when the managed <see cref="HostCallbacks"/> has the size the Rust struct expects.
+        ///
+        /// The struct is all function pointers, so on ARM its size *is* the field count times four.
+        /// A drift of one field would otherwise only show up as Rust calling a garbage pointer.
+        /// </summary>
+        public static bool CallbacksLayoutOk()
+        {
+            return Marshal.SizeOf<HostCallbacks>() == ExpectedCallbackCount * IntPtr.Size;
+        }
 
         /// <summary>
         /// Hand Rust the callbacks it needs. Safe to call more than once.
@@ -371,6 +530,7 @@ namespace Phirura
             _pickFile = OnPickFile;
             _saveFile = OnSaveFile;
             _present = OnPresent;
+            _loadAsset = OnLoadAsset;
 
             HostCallbacks cb = new HostCallbacks();
             cb.audio_decode = Marshal.GetFunctionPointerForDelegate(_audioDecode);
@@ -388,6 +548,7 @@ namespace Phirura
             cb.pick_file = Marshal.GetFunctionPointerForDelegate(_pickFile);
             cb.save_file = Marshal.GetFunctionPointerForDelegate(_saveFile);
             cb.present = Marshal.GetFunctionPointerForDelegate(_present);
+            cb.load_asset = Marshal.GetFunctionPointerForDelegate(_loadAsset);
 
             wp81_install_callbacks(ref cb);
             _installed = true;
@@ -461,6 +622,134 @@ namespace Phirura
 
         private static void OnPresent()
         {
+        }
+
+        // ===========================================================================
+        // asset loading
+        //
+        // The Rust game asks the shell for a file by a path relative to the app's local `charts\`
+        // folder. This is the only file IO the Rust side has - it owns none of its own, which is
+        // the whole point of the split: WP8.1's brokered storage is reachable from managed code
+        // and from nowhere else.
+        //
+        // SYNCHRONOUS BY NECESSITY. The call arrives on the UI thread from inside the Rust frame
+        // loop, so there is no thread to await on: an `await` here would either deadlock (the
+        // continuation needs the UI thread that is blocked in Rust) or, unwound through the FFI
+        // boundary, take the process down. `.AsTask().Result` is the one form that works, and it
+        // is already the established pattern in `NativeProbe.cs` and `D3D11Probe.cs`.
+        //
+        // Result codes: byte count on success; -1 when the file is not there; -2 when it exists but
+        // does not fit the caller's buffer. The Rust side treats anything negative as "absent", so
+        // the distinction is for the log rather than for control flow.
+        // ===========================================================================
+
+        /// <summary>Where a chart's files live. Set before the Rust game is created.</summary>
+        public static string AssetRoot
+        {
+            get { return _assetRoot; }
+            set
+            {
+                if (_assetRoot != value)
+                {
+                    _assetRoot = value;
+                    _assetCache.Clear();
+                }
+            }
+        }
+
+        private static string _assetRoot;
+
+        /// <summary>
+        /// Whole-file cache, keyed by the relative name.
+        ///
+        /// The game re-requests the same illustrations and the font on every scene entry (and the
+        /// hold texture every frame in the worst case), and each uncached read is a brokered
+        /// StorageFile round trip that blocks the UI thread. Charts are a few megabytes, so holding
+        /// them is cheap next to the stalls it removes.
+        /// </summary>
+        private static readonly System.Collections.Generic.Dictionary<string, byte[]> _assetCache =
+            new System.Collections.Generic.Dictionary<string, byte[]>();
+
+        private static int OnLoadAsset(IntPtr name, IntPtr outBytes, IntPtr cap)
+        {
+            try
+            {
+                if (name == IntPtr.Zero || outBytes == IntPtr.Zero)
+                {
+                    return -1;
+                }
+
+                string relative = Marshal.PtrToStringUni(name);
+                if (string.IsNullOrEmpty(relative))
+                {
+                    return -1;
+                }
+
+                byte[] data;
+                if (!_assetCache.TryGetValue(relative, out data))
+                {
+                    data = ReadAsset(relative);
+                    if (data == null)
+                    {
+                        AppLog.WriteSync("PrprPort: asset missing: " + relative);
+                        return -1;
+                    }
+                    _assetCache[relative] = data;
+                }
+
+                int want = cap.ToInt32();
+                if (data.Length > want)
+                {
+                    // The caller sized its buffer from a promise we cannot see; refusing is better
+                    // than copying a prefix and letting it parse a truncated chart.
+                    AppLog.WriteSync("PrprPort: asset too large: " + relative
+                        + " (" + data.Length + " > " + want + ")");
+                    return -2;
+                }
+
+                Marshal.Copy(data, 0, outBytes, data.Length);
+                return data.Length;
+            }
+            catch (Exception ex)
+            {
+                // Never let an exception cross back into Rust: it would unwind through frames that
+                // have no idea how to handle it.
+                AppLog.WriteSync("PrprPort: load_asset failed", ex);
+                return -1;
+            }
+        }
+
+        /// <summary>
+        /// Reads one asset into memory, synchronously.
+        ///
+        /// Relative names resolve under <see cref="AssetRoot"/>, which is either a chart folder in
+        /// local storage or the bundled `ms-appx:` demo. Both are read through the same broker
+        /// calls, so there is no second code path to keep correct.
+        /// </summary>
+        private static byte[] ReadAsset(string relative)
+        {
+            string root = _assetRoot;
+            if (string.IsNullOrEmpty(root))
+            {
+                return null;
+            }
+
+            string normalised = relative.Replace('/', '\\').TrimStart('\\');
+
+            Windows.Storage.StorageFile file =
+                Windows.Storage.StorageFolder.GetFolderFromPathAsync(root).AsTask().Result
+                    .GetFileAsync(normalised).AsTask().Result;
+
+            Windows.Storage.Streams.IBuffer buffer =
+                Windows.Storage.FileIO.ReadBufferAsync(file).AsTask().Result;
+
+            byte[] bytes = new byte[buffer.Length];
+            using (Windows.Storage.Streams.DataReader reader =
+                   Windows.Storage.Streams.DataReader.FromBuffer(buffer))
+            {
+                reader.ReadBytes(bytes);
+            }
+            return bytes;
         }
 
         // ===========================================================================

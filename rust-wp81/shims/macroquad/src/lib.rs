@@ -335,9 +335,15 @@ impl Texture2D {
     ///
     /// The pixels are not uploaded: the shell owns the real textures. The handle records the
     /// dimensions so `prpr` can measure with them, which is the only thing it does with the result.
-    pub fn from_rgba8(width: u16, height: u16, _bytes: &[u8]) -> Self {
+    ///
+    /// The pixels *are* copied into the texture registry, because that is the only place the shell
+    /// can get them from - a texture command in the drain carries just an id, and this function never
+    /// sees a filename. See `draw::register_texture`.
+    pub fn from_rgba8(width: u16, height: u16, bytes: &[u8]) -> Self {
+        let id = draw::next_texture_id();
+        draw::register_texture(id, width as u32, height as u32, bytes);
         Texture2D {
-            id: draw::next_texture_id(),
+            id,
             width: width as u32,
             height: height as u32,
         }
@@ -919,6 +925,132 @@ pub mod draw {
 
     pub fn next_texture_id() -> u32 {
         TEX_ID.fetch_add(1, Ordering::Relaxed)
+    }
+
+    // =======================================================================
+    // the texture registry
+    //
+    // A texture command in the drain carries only a `u32` id, and the shim allocates those ids in
+    // `from_rgba8` - which never sees a filename, only pixels. So the shell cannot map an id back to
+    // an image on its own, and a frame of textures would draw nothing.
+    //
+    // This records the pixels at creation time. The shell asks for a texture once
+    // (`port_texture_data`) and keeps the resulting `CanvasBitmap`, so the cost is one copy per
+    // texture per session, not per frame.
+    //
+    // A fixed arena rather than a Vec for the same reason as the draw buffers: this runs on a phone
+    // and a texture set is bounded by the chart. The budget is deliberately generous - a chart's
+    // illustration can be a full-screen PNG - and overflow is reported rather than silently
+    // truncating, because a half-copied texture would render as garbled pixels with no clue why.
+    // =======================================================================
+
+    /// Largest single texture the registry will hold, and the total across all of them.
+    const TEX_MAX_BYTES: usize = 8 * 1024 * 1024;
+    const TEX_SLOTS: usize = 64;
+
+    #[derive(Copy, Clone)]
+    struct TexEntry {
+        id: u32,
+        width: u32,
+        height: u32,
+        offset: usize,
+        len: usize,
+    }
+
+    static mut TEX_ENTRIES: [TexEntry; TEX_SLOTS] = [TexEntry {
+        id: 0,
+        width: 0,
+        height: 0,
+        offset: 0,
+        len: 0,
+    }; TEX_SLOTS];
+    static mut TEX_COUNT: usize = 0;
+    static mut TEX_BYTES: Vec<u8> = Vec::new();
+    static mut TEX_OVERFLOW: u32 = 0;
+
+    /// Records a texture's pixels so the shell can rebuild it. Called from `from_rgba8`.
+    ///
+    /// Silently ignoring an already-known id is correct: `prpr` re-creates the same texture on scene
+    /// re-entry, and the pixels are identical, so the older copy is as good.
+    pub fn register_texture(id: u32, width: u32, height: u32, bytes: &[u8]) {
+        unsafe {
+            let count = TEX_COUNT;
+            for i in 0..count {
+                if TEX_ENTRIES[i].id == id {
+                    return;
+                }
+            }
+            if count >= TEX_SLOTS || bytes.len() > TEX_MAX_BYTES {
+                TEX_OVERFLOW = TEX_OVERFLOW.wrapping_add(1);
+                return;
+            }
+            let offset = (&TEX_BYTES).len();
+            let end = offset + bytes.len();
+            if end > TEX_MAX_BYTES {
+                TEX_OVERFLOW = TEX_OVERFLOW.wrapping_add(1);
+                return;
+            }
+            TEX_BYTES.extend_from_slice(bytes);
+            TEX_ENTRIES[count] = TexEntry {
+                id,
+                width,
+                height,
+                offset,
+                len: bytes.len(),
+            };
+            TEX_COUNT = count + 1;
+        }
+    }
+
+    /// Looks a texture up. Returns its byte length and writes its metadata, or -1 when unknown.
+    ///
+    /// # Safety
+    /// `width`/`height` must be valid for four bytes; `out` must have room for `cap` bytes.
+    pub unsafe fn texture_data(id: u32, width: *mut u32, height: *mut u32, out: *mut u8, cap: usize) -> i32 {
+        let count = TEX_COUNT;
+        for i in 0..count {
+            let e = TEX_ENTRIES[i];
+            if e.id != id {
+                continue;
+            }
+            if !width.is_null() {
+                *width = e.width;
+            }
+            if !height.is_null() {
+                *height = e.height;
+            }
+            if out.is_null() {
+                // Metadata query only - the caller is sizing its buffer.
+                return e.len as i32;
+            }
+            if e.len > cap {
+                return -2;
+            }
+            core::ptr::copy_nonoverlapping(TEX_BYTES.as_ptr().add(e.offset), out, e.len);
+            return e.len as i32;
+        }
+        -1
+    }
+
+    /// How many textures the registry holds, so the shell can iterate without guessing ids.
+    pub fn texture_count() -> u32 {
+        unsafe { TEX_COUNT as u32 }
+    }
+
+    /// The id of the n-th registered texture, or 0 when out of range.
+    pub fn texture_id_at(index: u32) -> u32 {
+        unsafe {
+            if (index as usize) < TEX_COUNT {
+                TEX_ENTRIES[index as usize].id
+            } else {
+                0
+            }
+        }
+    }
+
+    /// Textures dropped for lack of room. Non-zero means a chart exceeded the registry budget.
+    pub fn texture_overflow() -> u32 {
+        unsafe { TEX_OVERFLOW }
     }
 
     /// Called by the shell after it has replayed a frame.

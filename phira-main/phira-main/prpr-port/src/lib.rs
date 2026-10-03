@@ -387,6 +387,53 @@ pub extern "C" fn wp81_draw_reset() {
     macroquad::draw::drain_reset();
 }
 
+// ===========================================================================
+// the texture registry
+//
+// A `Texture` record in the drain carries only a `u32` id, and the shim allocates those ids where
+// it sees pixels rather than filenames - so the shell cannot resolve an id to an image by itself.
+// These three calls are how it does: enumerate the ids, ask for one's bytes, build a
+// `CanvasBitmap`, keep it. One copy per texture per session, not per frame.
+// ===========================================================================
+
+/// How many textures the shim has registered. The shell iterates `0..count`.
+#[no_mangle]
+pub extern "C" fn wp81_texture_count() -> u32 {
+    macroquad::draw::texture_count()
+}
+
+/// The id of the `index`-th registered texture, or 0 when out of range.
+#[no_mangle]
+pub extern "C" fn wp81_texture_id_at(index: u32) -> u32 {
+    macroquad::draw::texture_id_at(index)
+}
+
+/// Copy a texture's RGBA pixels out.
+///
+/// `width`/`height` receive the dimensions (nullable for a metadata-only query). `out`/`cap` receive
+/// the pixels; passing a null `out` returns the byte length so the caller can size its buffer.
+///
+/// Returns the byte count, -1 when the id is unknown, or -2 when it does not fit `cap`.
+///
+/// # Safety
+/// `out` must have room for `cap` bytes; `width`/`height` must be valid for one `u32` each or null.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_texture_data(
+    id: u32,
+    width: *mut u32,
+    height: *mut u32,
+    out: *mut u8,
+    cap: usize,
+) -> i32 {
+    macroquad::draw::texture_data(id, width, height, out, cap)
+}
+
+/// Textures the registry had to drop for lack of room. Non-zero means a chart exceeded its budget.
+#[no_mangle]
+pub extern "C" fn wp81_texture_overflow() -> u32 {
+    macroquad::draw::texture_overflow()
+}
+
 /// Record a test triangle so the drain can be verified end to end on the device.
 ///
 /// The real scene is not driven from the shell yet, so without this the drain has nothing to
