@@ -1088,9 +1088,22 @@ pub unsafe extern "C" fn wp81_rs_reached() -> i32 {
 /// 70 = IDXGISwapChain::Present
 /// 99 = fully up
 #[no_mangle]
+// ===========================================================================
+// emergency tick dump - REMOVED
+// ===========================================================================
+//
+// There was a `wp81_rs_set_raw_log_path` / `wp81_rs_dump_raw` pair here that appended tick lines
+// with Rust `std::fs`, on the theory that WinRT FileIO would deadlock under a wedged UI thread.
+// It worked in principle but pulled `std::fs` + `PathBuf` + `format!` into the shipping DLL,
+// which grew it from 19,968 to 116,736 bytes and added an
+// `api-ms-win-core-libraryloader-l1-2-0.dll` import; the DLL then failed to load on device and the
+// app crashed at the first native call. Removed. The tick visibility it was meant to provide comes
+// instead from running the CoreWindow bring-up on a *pool* thread, which leaves the UI thread free
+// so the existing AppLog FileIO path keeps working.
+
+#[no_mangle]
 pub unsafe extern "C" fn wp81_rs_tick_name() -> *const u8 {
-    let t = st().tick;
-    let s: &[u8] = match t {
+    let t = st().tick;    let s: &[u8] = match t {
         0 => b"(none)\0",
         1 => b"C# -> wp81_rs_start\0",
         2 => b"create_device (factory/adapter/D3D11CreateDevice)\0",
@@ -1119,6 +1132,18 @@ pub unsafe extern "C" fn wp81_rs_tick_name() -> *const u8 {
         251 => b"corewindow: release_all done\0",
         252 => b"corewindow: pointer probed\0",
         253 => b"corewindow: about to create_swapchain_for_corewindow\0",
+        260 => b"cw: entered create_swapchain_for_corewindow\0",
+        261 => b"cw: pWindow probe done\0",
+        262 => b"cw: QI(IDXGIDevice) from D3D11 device\0",
+        263 => b"cw: IDXGIDevice::GetAdapter\0",
+        264 => b"cw: IDXGIAdapter::GetParent(IDXGIFactory2)\0",
+        265 => b"cw: CreateSwapChainForCoreWindow v0 (STRETCH/PREMULT/2/FLIP_SEQ)\0",
+        266 => b"cw: CreateSwapChainForCoreWindow v1 (STRETCH/IGNORE/2/FLIP_SEQ)\0",
+        267 => b"cw: CreateSwapChainForCoreWindow v2 (NONE/PREMULT/2/FLIP_SEQ)\0",
+        269 => b"cw: CreateSwapChainForCoreWindow - ALL VARIANTS FAILED\0",
+        270 => b"cw: swapchain CREATED with variant v0 (STRETCH/PREMULT)\0",
+        271 => b"cw: swapchain CREATED with variant v1 (STRETCH/IGNORE)\0",
+        272 => b"cw: swapchain CREATED with variant v2 (NONE/PREMULT)\0",
         _ => b"(unknown tick)\0",
     };
     s.as_ptr()

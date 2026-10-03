@@ -1,0 +1,134 @@
+02:52:58.694  === Phirura launched ===
+02:52:58.738  PrprPort: callbacks installed at startup
+02:52:59.270  MainPage: loaded 1 chart(s)
+02:53:00.154  RustStage1: OnPageLoaded; ActualWidth=384 ActualHeight=614.5
+02:53:00.202  RustStage1: StartRenderer entered
+02:53:00.297  RustStage1: [bg] tick -> 0 ((none))
+02:53:00.329  RustStage1: panel 384x614.5 -> 768x1229 px @ 2.0
+02:53:00.357  RustStage1: starting bisect on pool thread
+02:53:00.385  RustRenderer.Bisect: begin 768x1229
+02:53:00.417  RustRenderer.Bisect: step limit=2 -> calling native  [next: create_swapchain_for_panel_traced (QI/GetAdapter/GetParent/Create/attach)]
+02:53:00.447  RustRenderer.Bisect: step limit=2 returned rc=0 reached=2 stage=-1 hr=0x00000000
+02:53:00.477  RustRenderer.Bisect: step limit=10 -> calling native  [next: enter the swapchain+panel-attach path]
+02:53:00.516  RustRenderer.Bisect: step limit=10 returned rc=0 reached=10 stage=-1 hr=0x00000000
+02:53:00.549  RustRenderer.vtable: readable slots = 0
+02:53:00.586  RustRenderer.Bisect: step limit=13 -> calling native  [next: IDXGIFactory2::IsCurrent (probe ON) then CreateSwapChainForComposition]
+02:53:00.606  RustStage1: [bg] tick -> 10 (swapchain: enter (QI IDXGIDevice))
+02:53:00.632  RustRenderer.Bisect: step limit=13 returned rc=0 reached=13 stage=-1 hr=0x00000000
+02:53:00.641  RustStage1: tick -> 13 (swapchain: CreateSwapChainForComposition)
+02:53:00.702  RustRenderer.vtable: readable slots = 32
+02:53:00.766  RustRenderer.vtable: 0=0x71ED3825 1=0x71EDE735 2=0x71ED2FF1 3=0x71EFD1C5 4=0x71EFD1B5 5=0x71EF8F59 6=0x71EDE721 7=0x71ECF8C1 8=0x71EDE3E5 9=0x71EF5D91 10=0x71ED04D9 11=0x71ED0FC9 12=0x71ED17FD 13=0x71ECEF95 14=0x71EFFCF9 15=0x71EDE451 16=0x71EFD365 17=0x71EF57BD 18=0x71EFFE89 19=0x71EFFE2D 20=0x71EF5615 21=0x71EF9959 22=0x71EDBA25 23=0x71EF55CD 24=0x71F00D21 25=0x71EDE461
+02:53:00.796  RustRenderer.vtable: slot3(GetParent)=0x71EFD1C5 slot24(CreateSwapChainForComposition)=0x71F00D21
+02:53:00.826  RustRenderer.factory: IsCurrent=1 QI(IDXGIFactory2) hr=0x00000000
+02:53:00.859  RustRenderer.panel: iface=-1 (none)
+02:53:00.895  RustRenderer.sc-hr: v0=n/a v1=n/a v2=n/a v3=n/a
+02:53:00.940  RustRenderer.last-hr: 0x00000000
+02:53:00.976  RustRenderer.Bisect: step limit=18 -> calling native  [next: CreateSwapChainForComposition (probe OFF - isolates slot 24 if this dies)]
+02:53:01.018  RustRenderer.Bisect: step limit=18 returned rc=0 reached=18 stage=-1 hr=0x00000000
+02:53:01.048  RustRenderer.vtable: readable slots = 32
+02:53:01.079  RustRenderer.vtable: 0=0x71ED3825 1=0x71EDE735 2=0x71ED2FF1 3=0x71EFD1C5 4=0x71EFD1B5 5=0x71EF8F59 6=0x71EDE721 7=0x71ECF8C1 8=0x71EDE3E5 9=0x71EF5D91 10=0x71ED04D9 11=0x71ED0FC9 12=0x71ED17FD 13=0x71ECEF95 14=0x71EFFCF9 15=0x71EDE451 16=0x71EFD365 17=0x71EF57BD 18=0x71EFFE89 19=0x71EFFE2D 20=0x71EF5615 21=0x71EF9959 22=0x71EDBA25 23=0x71EF55CD 24=0x71F00D21 25=0x71EDE461
+02:53:01.109  RustRenderer.vtable: slot3(GetParent)=0x71EFD1C5 slot24(CreateSwapChainForComposition)=0x71F00D21
+02:53:01.138  RustRenderer.factory: IsCurrent=1 QI(IDXGIFactory2) hr=0x00000000
+02:53:01.164  RustRenderer.panel: iface=-1 (none)
+02:53:01.194  RustRenderer.sc-hr: v0=n/a v1=n/a v2=n/a v3=n/a
+02:53:01.224  RustRenderer.last-hr: 0x00000000
+02:53:01.260  RustRenderer.Bisect: step limit=19 -> calling native  [next: CreateSwapChainForComposition on a direct CreateDXGIFactory1 factory]
+02:53:01.301  RustRenderer.Bisect: step limit=19 returned rc=0 reached=19 stage=-1 hr=0x00000000
+02:53:01.330  RustRenderer.vtable: readable slots = 32
+02:53:01.358  RustRenderer.vtable: 0=0x71ED3825 1=0x71EDE735 2=0x71ED2FF1 3=0x71EFD1C5 4=0x71EFD1B5 5=0x71EF8F59 6=0x71EDE721 7=0x71ECF8C1 8=0x71EDE3E5 9=0x71EF5D91 10=0x71ED04D9 11=0x71ED0FC9 12=0x71ED17FD 13=0x71ECEF95 14=0x71EFFCF9 15=0x71EDE451 16=0x71EFD365 17=0x71EF57BD 18=0x71EFFE89 19=0x71EFFE2D 20=0x71EF5615 21=0x71EF9959 22=0x71EDBA25 23=0x71EF55CD 24=0x71F00D21 25=0x71EDE461
+02:53:01.386  RustRenderer.vtable: slot3(GetParent)=0x71EFD1C5 slot24(CreateSwapChainForComposition)=0x71F00D21
+02:53:01.416  RustRenderer.factory: IsCurrent=1 QI(IDXGIFactory2) hr=0x00000000
+02:53:01.444  RustRenderer.panel: iface=-1 (none)
+02:53:01.474  RustRenderer.sc-hr: v0=0x887A0001 v1=0x887A0001 v2=0x887A0001 v3=0x887A0001
+02:53:01.503  RustRenderer.last-hr: 0x00000000
+02:53:01.535  RustRenderer.Bisect: step limit=16 -> calling native  [next: IDXGISwapChain::GetBuffer(0) + CreateRenderTargetView]
+02:53:01.574  RustRenderer.Bisect: step limit=16 returned rc=2 reached=10 stage=123 hr=0x887A0001
+02:53:01.602  RustRenderer.Bisect: step limit=16 FAILED rc=2 stage=123 hr=0x887A0001 (DXGI_ERROR_INVALID_CALL) tick=13 (swapchain: CreateSwapChainForComposition)  swapchain-step=CreateSwapChainForComposition (code 23)
+02:53:01.631  RustRenderer.vtable: readable slots = 32
+02:53:01.660  RustRenderer.vtable: 0=0x71ED3825 1=0x71EDE735 2=0x71ED2FF1 3=0x71EFD1C5 4=0x71EFD1B5 5=0x71EF8F59 6=0x71EDE721 7=0x71ECF8C1 8=0x71EDE3E5 9=0x71EF5D91 10=0x71ED04D9 11=0x71ED0FC9 12=0x71ED17FD 13=0x71ECEF95 14=0x71EFFCF9 15=0x71EDE451 16=0x71EFD365 17=0x71EF57BD 18=0x71EFFE89 19=0x71EFFE2D 20=0x71EF5615 21=0x71EF9959 22=0x71EDBA25 23=0x71EF55CD 24=0x71F00D21 25=0x71EDE461
+02:53:01.687  RustRenderer.vtable: slot3(GetParent)=0x71EFD1C5 slot24(CreateSwapChainForComposition)=0x71F00D21
+02:53:01.713  RustRenderer.factory: IsCurrent=1 QI(IDXGIFactory2) hr=0x00000000
+02:53:01.740  RustRenderer.panel: iface=-1 (none)
+02:53:01.768  RustRenderer.sc-hr: v0=0x887A0001 v1=0x887A0001 v2=0x887A0001 v3=0x887A0001
+02:53:01.794  RustRenderer.last-hr: 0x887A0001 (DXGI_ERROR_INVALID_CALL)
+02:53:01.821  RustStage1: bisect finished, reached=19 started=False
+02:53:01.847  RustStage1: composition route failed; trying CoreWindow route
+02:53:01.876  RustRenderer.ResolveCoreWindow: interface IUnknown=0x04BE6228
+02:53:01.903  RustRenderer.cw-probe: ptr=0x04BE6228 qi(IUnknown)=0x00000000 as=Windows.UI.Core.CoreWindow isCoreWindow=yes
+02:53:01.930  RustRenderer.StartCoreWindow: calling native (0x04BE6228, 768x1229)
+02:53:01.976  RustRenderer.StartCoreWindow: native returned rc=2 stage=134 hr=0x887A0001 (DXGI_ERROR_INVALID_CALL) tick=269 (cw: CreateSwapChainForCoreWindow - ALL VARIANTS FAILED)  swapchain-step=(none) (code 34)  cw-obj=0x04BE6228 cw-vtbl=0x6A4EDEE0 cw-qi=S_OK
+02:53:02.004  RustStage1: CoreWindow route started=False stage=134 hr=0x887A0001 (DXGI_ERROR_INVALID_CALL) tick=269 (cw: CreateSwapChainForCoreWindow - ALL VARIANTS FAILED)  swapchain-step=(none) (code 34)  cw-obj=0x04BE6228 cw-vtbl=0x6A4EDEE0 cw-qi=S_OK
+02:53:02.069  RustRenderer.cw-probe:   cw-obj=0x04BE6228 cw-vtbl=0x6A4EDEE0 cw-qi=S_OK
+02:53:02.100  RustStage1: [bg] tick -> 269 (cw: CreateSwapChainForCoreWindow - ALL VARIANTS FAILED)
+02:53:04.336  RustStage1: StartRenderer entered
+02:53:04.439  RustStage1: panel 384x614.5 -> 768x1229 px @ 2.0
+02:53:04.468  RustStage1: starting bisect on pool thread
+02:53:04.497  RustRenderer.Bisect: begin 768x1229
+02:53:04.528  RustRenderer.Bisect: step limit=2 -> calling native  [next: create_swapchain_for_panel_traced (QI/GetAdapter/GetParent/Create/attach)]
+02:53:04.508  RustStage1: StartRenderer re-entry blocked (already running)
+02:53:04.558  RustRenderer.Bisect: step limit=2 returned rc=0 reached=2 stage=-1 hr=0x887A0001
+02:53:04.618  RustRenderer.Bisect: step limit=10 -> calling native  [next: enter the swapchain+panel-attach path]
+02:53:04.644  RustStage1: StartRenderer re-entry blocked (already running)
+02:53:04.671  RustRenderer.Bisect: step limit=10 returned rc=0 reached=10 stage=-1 hr=0x887A0001
+02:53:04.722  RustRenderer.vtable: readable slots = 32
+02:53:04.776  RustRenderer.vtable: 0=0x71ED3825 1=0x71EDE735 2=0x71ED2FF1 3=0x71EFD1C5 4=0x71EFD1B5 5=0x71EF8F59 6=0x71EDE721 7=0x71ECF8C1 8=0x71EDE3E5 9=0x71EF5D91 10=0x71ED04D9 11=0x71ED0FC9 12=0x71ED17FD 13=0x71ECEF95 14=0x71EFFCF9 15=0x71EDE451 16=0x71EFD365 17=0x71EF57BD 18=0x71EFFE89 19=0x71EFFE2D 20=0x71EF5615 21=0x71EF9959 22=0x71EDBA25 23=0x71EF55CD 24=0x71F00D21 25=0x71EDE461
+02:53:04.807  RustRenderer.vtable: slot3(GetParent)=0x71EFD1C5 slot24(CreateSwapChainForComposition)=0x71F00D21
+02:53:04.841  RustRenderer.factory: IsCurrent=1 QI(IDXGIFactory2) hr=0x00000000
+02:53:04.823  RustStage1: StartRenderer re-entry blocked (already running)
+02:53:04.867  RustRenderer.panel: iface=-1 (none)
+02:53:04.926  RustRenderer.sc-hr: v0=n/a v1=n/a v2=n/a v3=n/a
+02:53:04.956  RustRenderer.last-hr: 0x887A0001 (DXGI_ERROR_INVALID_CALL)
+02:53:04.987  RustStage1: StartRenderer re-entry blocked (already running)
+02:53:04.995  RustRenderer.Bisect: step limit=13 -> calling native  [next: IDXGIFactory2::IsCurrent (probe ON) then CreateSwapChainForComposition]
+02:53:05.059  RustRenderer.Bisect: step limit=13 returned rc=0 reached=13 stage=-1 hr=0x887A0001
+02:53:05.086  RustRenderer.vtable: readable slots = 32
+02:53:05.114  RustRenderer.vtable: 0=0x71ED3825 1=0x71EDE735 2=0x71ED2FF1 3=0x71EFD1C5 4=0x71EFD1B5 5=0x71EF8F59 6=0x71EDE721 7=0x71ECF8C1 8=0x71EDE3E5 9=0x71EF5D91 10=0x71ED04D9 11=0x71ED0FC9 12=0x71ED17FD 13=0x71ECEF95 14=0x71EFFCF9 15=0x71EDE451 16=0x71EFD365 17=0x71EF57BD 18=0x71EFFE89 19=0x71EFFE2D 20=0x71EF5615 21=0x71EF9959 22=0x71EDBA25 23=0x71EF55CD 24=0x71F00D21 25=0x71EDE461
+02:53:05.143  RustRenderer.vtable: slot3(GetParent)=0x71EFD1C5 slot24(CreateSwapChainForComposition)=0x71F00D21
+02:53:05.174  RustRenderer.factory: IsCurrent=1 QI(IDXGIFactory2) hr=0x00000000
+02:53:05.208  RustRenderer.panel: iface=-1 (none)
+02:53:05.199  RustStage1: StartRenderer re-entry blocked (already running)
+02:53:05.236  RustRenderer.sc-hr: v0=n/a v1=n/a v2=n/a v3=n/a
+02:53:05.293  RustRenderer.last-hr: 0x887A0001 (DXGI_ERROR_INVALID_CALL)
+02:53:05.327  RustRenderer.Bisect: step limit=18 -> calling native  [next: CreateSwapChainForComposition (probe OFF - isolates slot 24 if this dies)]
+02:53:05.329  RustStage1: StartRenderer re-entry blocked (already running)
+02:53:05.370  RustRenderer.Bisect: step limit=18 returned rc=0 reached=18 stage=-1 hr=0x887A0001
+02:53:05.422  RustRenderer.vtable: readable slots = 32
+02:53:05.453  RustRenderer.vtable: 0=0x71ED3825 1=0x71EDE735 2=0x71ED2FF1 3=0x71EFD1C5 4=0x71EFD1B5 5=0x71EF8F59 6=0x71EDE721 7=0x71ECF8C1 8=0x71EDE3E5 9=0x71EF5D91 10=0x71ED04D9 11=0x71ED0FC9 12=0x71ED17FD 13=0x71ECEF95 14=0x71EFFCF9 15=0x71EDE451 16=0x71EFD365 17=0x71EF57BD 18=0x71EFFE89 19=0x71EFFE2D 20=0x71EF5615 21=0x71EF9959 22=0x71EDBA25 23=0x71EF55CD 24=0x71F00D21 25=0x71EDE461
+02:53:05.483  RustRenderer.vtable: slot3(GetParent)=0x71EFD1C5 slot24(CreateSwapChainForComposition)=0x71F00D21
+02:53:05.518  RustRenderer.factory: IsCurrent=1 QI(IDXGIFactory2) hr=0x00000000
+02:53:05.500  RustStage1: StartRenderer re-entry blocked (already running)
+02:53:05.545  RustRenderer.panel: iface=-1 (none)
+02:53:05.603  RustRenderer.sc-hr: v0=n/a v1=n/a v2=n/a v3=n/a
+02:53:05.637  RustRenderer.last-hr: 0x887A0001 (DXGI_ERROR_INVALID_CALL)
+02:53:05.673  RustRenderer.Bisect: step limit=19 -> calling native  [next: CreateSwapChainForComposition on a direct CreateDXGIFactory1 factory]
+02:53:05.679  RustStage1: StartRenderer re-entry blocked (already running)
+02:53:05.716  RustRenderer.Bisect: step limit=19 returned rc=0 reached=19 stage=-1 hr=0x887A0001
+02:53:05.768  RustRenderer.vtable: readable slots = 32
+02:53:05.799  RustRenderer.vtable: 0=0x71ED3825 1=0x71EDE735 2=0x71ED2FF1 3=0x71EFD1C5 4=0x71EFD1B5 5=0x71EF8F59 6=0x71EDE721 7=0x71ECF8C1 8=0x71EDE3E5 9=0x71EF5D91 10=0x71ED04D9 11=0x71ED0FC9 12=0x71ED17FD 13=0x71ECEF95 14=0x71EFFCF9 15=0x71EDE451 16=0x71EFD365 17=0x71EF57BD 18=0x71EFFE89 19=0x71EFFE2D 20=0x71EF5615 21=0x71EF9959 22=0x71EDBA25 23=0x71EF55CD 24=0x71F00D21 25=0x71EDE461
+02:53:05.831  RustRenderer.vtable: slot3(GetParent)=0x71EFD1C5 slot24(CreateSwapChainForComposition)=0x71F00D21
+02:53:05.816  RustStage1: StartRenderer re-entry blocked (already running)
+02:53:05.858  RustRenderer.factory: IsCurrent=1 QI(IDXGIFactory2) hr=0x00000000
+02:53:05.917  RustRenderer.panel: iface=-1 (none)
+02:53:05.945  RustRenderer.sc-hr: v0=0x887A0001 v1=0x887A0001 v2=0x887A0001 v3=0x887A0001
+02:53:05.974  RustRenderer.last-hr: 0x887A0001 (DXGI_ERROR_INVALID_CALL)
+02:53:05.988  RustStage1: StartRenderer re-entry blocked (already running)
+02:53:06.010  RustRenderer.Bisect: step limit=16 -> calling native  [next: IDXGISwapChain::GetBuffer(0) + CreateRenderTargetView]
+02:53:06.078  RustRenderer.Bisect: step limit=16 returned rc=2 reached=10 stage=123 hr=0x887A0001
+02:53:06.141  RustRenderer.Bisect: step limit=16 FAILED rc=2 stage=123 hr=0x887A0001 (DXGI_ERROR_INVALID_CALL) tick=13 (swapchain: CreateSwapChainForComposition)  swapchain-step=CreateSwapChainForComposition (code 23)  cw-obj=0x04BE6228 cw-vtbl=0x6A4EDEE0 cw-qi=S_OK
+02:53:06.173  RustRenderer.vtable: readable slots = 32
+02:53:06.207  RustRenderer.vtable: 0=0x71ED3825 1=0x71EDE735 2=0x71ED2FF1 3=0x71EFD1C5 4=0x71EFD1B5 5=0x71EF8F59 6=0x71EDE721 7=0x71ECF8C1 8=0x71EDE3E5 9=0x71EF5D91 10=0x71ED04D9 11=0x71ED0FC9 12=0x71ED17FD 13=0x71ECEF95 14=0x71EFFCF9 15=0x71EDE451 16=0x71EFD365 17=0x71EF57BD 18=0x71EFFE89 19=0x71EFFE2D 20=0x71EF5615 21=0x71EF9959 22=0x71EDBA25 23=0x71EF55CD 24=0x71F00D21 25=0x71EDE461
+02:53:06.186  RustStage1: StartRenderer re-entry blocked (already running)
+02:53:06.237  RustRenderer.vtable: slot3(GetParent)=0x71EFD1C5 slot24(CreateSwapChainForComposition)=0x71F00D21
+02:53:06.309  RustRenderer.factory: IsCurrent=1 QI(IDXGIFactory2) hr=0x00000000
+02:53:06.290  RustStage1: StartRenderer re-entry blocked (already running)
+02:53:06.335  RustRenderer.panel: iface=-1 (none)
+02:53:06.394  RustRenderer.sc-hr: v0=0x887A0001 v1=0x887A0001 v2=0x887A0001 v3=0x887A0001
+02:53:06.427  RustRenderer.last-hr: 0x887A0001 (DXGI_ERROR_INVALID_CALL)
+02:53:06.462  RustStage1: StartRenderer re-entry blocked (already running)
+02:53:06.494  RustStage1: bisect finished, reached=19 started=False
+02:53:06.520  RustStage1: composition route failed; trying CoreWindow route
+02:53:06.548  RustRenderer.ResolveCoreWindow: interface IUnknown=0x04BE6228
+02:53:06.575  RustRenderer.cw-probe: ptr=0x04BE6228 qi(IUnknown)=0x00000000 as=Windows.UI.Core.CoreWindow isCoreWindow=yes
+02:53:06.602  RustRenderer.StartCoreWindow: calling native (0x04BE6228, 768x1229)
+02:53:06.649  RustRenderer.StartCoreWindow: native returned rc=2 stage=134 hr=0x887A0001 (DXGI_ERROR_INVALID_CALL) tick=269 (cw: CreateSwapChainForCoreWindow - ALL VARIANTS FAILED)  swapchain-step=(none) (code 34)  cw-obj=0x04BE6228 cw-vtbl=0x6A4EDEE0 cw-qi=S_OK
+02:53:06.677  RustStage1: CoreWindow route started=False stage=134 hr=0x887A0001 (DXGI_ERROR_INVALID_CALL) tick=269 (cw: CreateSwapChainForCoreWindow - ALL VARIANTS FAILED)  swapchain-step=(none) (code 34)  cw-obj=0x04BE6228 cw-vtbl=0x6A4EDEE0 cw-qi=S_OK

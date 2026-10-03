@@ -712,37 +712,28 @@ pub unsafe fn create_swapchain_for_corewindow_traced(
         return None;
     }
 
-    // --- Diagnose the pWindow argument before using it --------------------------------
-    // `CreateSwapChainForCoreWindow` returned E_INVALIDARG at CW_CREATE, which the docs say
-    // means invalid data - and the only argument we hand over that could be invalid is the
-    // CoreWindow pointer. Two things can be wrong with it and both are observable here:
-    //
-    //   * a *proxy* instead of the object: `Marshal.GetIUnknownForObject` on a non-agile
-    //     WinRT RCW can return a marshalled interface, whose vtable lives in combase, not in
-    //     the CoreWindow's own module. The vtable pointer we record tells the two apart - a
-    //     real object's vtable is inside its implementation DLL, a proxy's is in combase.dll.
-    //   * a pointer whose QI(IUnknown) does not resolve: then it is not a COM object at all.
-    //
-    // We record both facts into the trace so the C# side can log them next to the HRESULT.
-    unsafe {
-        let vtbl = *(core_window as *const *const usize);
-        crate::record_corewindow(*vtbl as u32, core_window as u32);
-        let qi: extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> HRESULT =
-            ComPtr { vtbl: vtbl as *const *const usize }.method(0);
-        let mut punk = ComPtr::NULL;
-        let qi_hr = qi(core_window, &IID_IUNKNOWN, &mut punk.vtbl as *mut _ as *mut *mut c_void);
-        crate::record_corewindow_qi(qi_hr);
-        punk.release();
-    }
+    // Fine-grained progress ticks (260..266) so a *hang* - not just a failure - names the exact
+    // DXGI call that blocked. The [bg] watchdog samples these from a thread-pool timer, which keeps
+    // ticking even when the (thread-affine) call has wedged the UI thread.
+    crate::set_tick(260); // cw: entered create_swapchain_for_corewindow
+
+    // The pWindow probe (vtable read + QI + resulting Release) used to run here, but its
+    // `Release()` on a possibly-marshalled interface is itself a blocking cross-apartment call:
+    // it can wedge the very UI thread we now call this from, which is indistinguishable from the
+    // hang we are chasing. The C# side already logs `qi(IUnknown)=S_OK` for the same pointer, so
+    // the probe is redundant here and is removed from the hot path.
+    crate::set_tick(261); // cw: pWindow probe skipped
 
     // Same device -> adapter -> factory walk as the panel route.
     let mut dxgi_device = ComPtr::NULL;
+    crate::set_tick(262); // cw: QI(IDXGIDevice) from the D3D11 device
     let hr = device.query_interface(&IID_IDXGIDEVICE, &mut dxgi_device.vtbl as *mut _ as *mut *mut c_void);
     if hr < 0 || dxgi_device.is_null() {
         note(trace, CW_QI_DXGIDEVICE, hr);
         return None;
     }
     let mut adapter = ComPtr::NULL;
+    crate::set_tick(263); // cw: IDXGIDevice::GetAdapter
     let get_adapter: extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT = dxgi_device.method(7);
     let hr = get_adapter(dxgi_device.vtbl as *mut c_void, &mut adapter.vtbl as *mut _ as *mut *mut c_void);
     if hr < 0 || adapter.is_null() {
@@ -751,6 +742,7 @@ pub unsafe fn create_swapchain_for_corewindow_traced(
         return None;
     }
     let mut factory = ComPtr::NULL;
+    crate::set_tick(264); // cw: IDXGIAdapter::GetParent(IDXGIFactory2)
     let get_parent: extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> HRESULT =
         adapter.method(6);
     let hr = get_parent(
@@ -765,23 +757,6 @@ pub unsafe fn create_swapchain_for_corewindow_traced(
         return None;
     }
 
-    let scd = DXGI_SWAP_CHAIN_DESC1 {
-        Width: width,
-        Height: height,
-        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        Stereo: 0,
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-        BufferCount: 2,
-        Scaling: DXGI_SCALING_STRETCH,
-        SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-        // PREMULTIPLIED, not IGNORE. A flip-model swapchain on a CoreWindow/composition target
-        // rejects IGNORE with E_INVALIDARG - Microsoft's own CoreWindow sample uses either
-        // PREMULTIPLIED or leaves AlphaMode at its default. This was the second, independent
-        // E_INVALIDARG source behind the CW_CREATE failure.
-        AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-        Flags: 0,
-    };
     let create_for_window: extern "system" fn(
         *mut c_void,
         *mut c_void,
@@ -790,23 +765,70 @@ pub unsafe fn create_swapchain_for_corewindow_traced(
         *mut c_void,
         *mut *mut c_void,
     ) -> HRESULT = factory.method(IDXGIFACTORY2_CREATESWAPCHAINFORCOREWINDOW);
+
+    // Descriptor sweep. `CreateSwapChainForCoreWindow` returns DXGI_ERROR_INVALID_CALL, which the
+    // docs define as "invalid data" - and the only data we supply is this descriptor. Rather than
+    // guess one shape and burn a build/deploy cycle per attempt, try the three shapes real WP8.1
+    // samples use, in order, and keep the first that succeeds. The winning index is left in the
+    // tick counter (270 + index) so the log names it even if the next call fails.
+    //
+    //   v0: STRETCH + PREMULTIPLIED + BufferCount 2 + FLIP_SEQUENTIAL  (current default)
+    //   v1: STRETCH + IGNORE        + BufferCount 2 + FLIP_SEQUENTIAL
+    //   v2: NONE    + PREMULTIPLIED + BufferCount 2 + FLIP_SEQUENTIAL  (the docs' CoreWindow sample)
+    let variants: [(u32, u32, u32, u32); 3] = [
+        // (Scaling, AlphaMode, BufferCount, SwapEffect)
+        (DXGI_SCALING_STRETCH, DXGI_ALPHA_MODE_PREMULTIPLIED, 2, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL),
+        (DXGI_SCALING_STRETCH, DXGI_ALPHA_MODE_IGNORE, 2, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL),
+        (DXGI_SCALING_NONE, DXGI_ALPHA_MODE_PREMULTIPLIED, 2, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL),
+    ];
+
     let mut swapchain = ComPtr::NULL;
-    let hr = create_for_window(
-        factory.vtbl as *mut c_void,
-        device.vtbl as *mut c_void,
-        core_window,
-        &scd,
-        core::ptr::null_mut(),
-        &mut swapchain.vtbl as *mut _ as *mut *mut c_void,
-    );
+    let mut last_hr: i32 = 0;
+    let mut won: i32 = -1;
+    let mut i = 0usize;
+    while i < variants.len() {
+        let (scaling, alpha, buffers, effect) = variants[i];
+        let scd = DXGI_SWAP_CHAIN_DESC1 {
+            Width: width,
+            Height: height,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Stereo: 0,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            BufferCount: buffers,
+            Scaling: scaling,
+            SwapEffect: effect,
+            AlphaMode: alpha,
+            Flags: 0,
+        };
+        // Tick encodes the variant being tried, so a hang/fault still names it.
+        crate::set_tick(265 + i as i32); // cw: CreateSwapChainForCoreWindow variant i
+        swapchain = ComPtr::NULL;
+        let hr = create_for_window(
+            factory.vtbl as *mut c_void,
+            device.vtbl as *mut c_void,
+            core_window,
+            &scd,
+            core::ptr::null_mut(),
+            &mut swapchain.vtbl as *mut _ as *mut *mut c_void,
+        );
+        last_hr = hr;
+        if hr >= 0 && !swapchain.is_null() {
+            won = i as i32;
+            break;
+        }
+        i += 1;
+    }
+    // 270+won records the winning variant index (or 269 = none) for the C# log.
+    crate::set_tick(if won >= 0 { 270 + won } else { 269 });
     factory.release();
-    if hr < 0 || swapchain.is_null() {
-        note(trace, CW_CREATE, hr);
+    if won < 0 || swapchain.is_null() {
+        note(trace, CW_CREATE, last_hr);
         return None;
     }
     if !trace.is_null() {
         *trace = CW_CREATE_OK;
-        *trace.add(1) = 0;
+        *trace.add(1) = last_hr;
     }
     Some(swapchain)
 }

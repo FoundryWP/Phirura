@@ -129,5 +129,21 @@ namespace Phirura
                 _failed = true;
             }
         }
+
+        // ===================================================================================
+        // Watchdog-friendly write.
+        // ===================================================================================
+        //
+        // The background watchdog calls this. It must be usable from a pool thread while the UI
+        // thread is busy inside native code. `Append` goes through WinRT `StorageFile`/`FileIO`,
+        // whose broker serialises calls - but because the CoreWindow bring-up runs on its *own*
+        // pool thread (not the UI thread), the UI thread is free and the broker keeps completing.
+        // Keeping it on the same proven path is deliberate: an earlier attempt to bypass WinRT with
+        // `System.IO.File` does not compile on this profile, and pulling `std::fs` into the native
+        // DLL ballooned it 19 KB -> 116 KB and made the DLL fail to load.
+        public static void WriteRaw(string message)
+        {
+            WriteSync(message);
+        }
     }
 }

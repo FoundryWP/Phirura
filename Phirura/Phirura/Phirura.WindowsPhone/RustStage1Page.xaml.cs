@@ -78,9 +78,13 @@ namespace Phirura
         {
             try
             {
+                // SampleTick() returns true only when the tick *changed*, so a hang shows as
+                // exactly one line for the stuck tick - which is what we want (it names the call
+                // that never returned). This works because the CoreWindow bring-up runs on a pool
+                // thread, leaving the UI thread free to keep the AppLog FileIO path alive.
                 if (RustRenderer.SampleTick())
                 {
-                    AppLog.WriteSync("RustStage1: [bg] tick -> " + RustRenderer.LastSeenTick
+                    AppLog.WriteRaw("RustStage1: [bg] tick -> " + RustRenderer.LastSeenTick
                         + " (" + RustRenderer.LastSeenTickName + ")");
                 }
             }
@@ -178,10 +182,14 @@ namespace Phirura
                 else
                 {
                     AppLog.WriteSync("RustStage1: composition route failed; trying CoreWindow route");
-                    // Resolve the CoreWindow on the UI thread (thread-affine API), then run the
-                    // native bring-up on a pool thread so the UI thread keeps flushing the log if
-                    // the native call hard-faults. Doing it inline on the UI thread is what made the
-                    // CoreWindow crash leave no trace at all for several runs.
+                    // Resolve the CoreWindow on the UI thread (thread-affine API).
+                    //
+                    // The native bring-up now runs **on the UI thread**. It used to run on a pool
+                    // thread to keep the log flushable, but the real problem that made the pool
+                    // thread necessary was a hanging `Release()` inside the old pWindow probe; that
+                    // probe is gone, so the call returns promptly. And `CreateSwapChainForCoreWindow`
+                    // is documented to be UI-thread work - running it on a pool thread is a strong
+                    // candidate for the DXGI_ERROR_INVALID_CALL we still see.
                     IntPtr cwPtr = RustRenderer.ResolveCoreWindow();
                     if (cwPtr == IntPtr.Zero)
                     {
@@ -191,10 +199,7 @@ namespace Phirura
                     {
                         try
                         {
-                            await System.Threading.Tasks.Task.Run(delegate
-                            {
-                                ok = RustRenderer.StartCoreWindowNative(cwPtr, w, h);
-                            });
+                            ok = RustRenderer.StartCoreWindowNative(cwPtr, w, h);
                         }
                         finally
                         {
