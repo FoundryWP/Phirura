@@ -142,6 +142,15 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr wp81_rs_ot_step_name();
 
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_ot_surface_kind();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_interop_source();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_interop_trace(int i);
+
         private static bool _started;
 
         public static bool Started { get { return _started; } }
@@ -244,13 +253,81 @@ namespace Phirura
             }
         }
 
-        /// <summary>Raw offscreen sub-step code (40..46), 0 if the offscreen route never ran.</summary>
+        /// <summary>Raw offscreen sub-step code (40..47), 0 if the offscreen route never ran.</summary>
         public static int OtStep
         {
             get
             {
                 try { return wp81_rs_ot_step(); }
                 catch (Exception) { return 0; }
+            }
+        }
+
+        /// <summary>
+        /// Which DXGI surface interface the QI chain resolved on the offscreen texture:
+        /// 2 = IDXGISurface2, 1 = IDXGISurface1, 0 = IDXGISurface, -1 = none answered.
+        ///
+        /// Carried in the second slot of Rust's offscreen trace once step 47 has run, because
+        /// which interface the WP8.1 interop helper accepts is the one thing that cannot be
+        /// determined off-device.
+        /// </summary>
+        public static int OtSurfaceKind
+        {
+            get
+            {
+                try
+                {
+                    if (wp81_rs_ot_step() != 47) { return -1; }
+                    return wp81_rs_ot_surface_kind();
+                }
+                catch (Exception) { return -1; }
+            }
+        }
+
+        /// <summary>Name for <see cref="OtSurfaceKind"/>.</summary>
+        public static string OtSurfaceKindName
+        {
+            get
+            {
+                switch (OtSurfaceKind)
+                {
+                    case 2: return "IDXGISurface2";
+                    case 1: return "IDXGISurface1";
+                    case 0: return "IDXGISurface";
+                    default: return "(none)";
+                }
+            }
+        }
+
+        /// <summary>
+        /// Which module the D3D11/XAML interop helpers resolved from: 1 = winrt.dll (the phone's
+        /// implementation), 2 = d3d11.dll (desktop Windows), 0 = neither, -1 = never attempted.
+        ///
+        /// This is the fix for the E_NOINTERFACE that survived two rounds: resolving
+        /// CreateDirect3D11SurfaceFromDXGISurface out of d3d11.dll finds a symbol on this phone,
+        /// but not a working one. Win2D's ARM DLL imports both helpers from winrt.dll.
+        /// </summary>
+        public static int InteropSource
+        {
+            get
+            {
+                try { return wp81_rs_interop_source(); }
+                catch (Exception) { return -1; }
+            }
+        }
+
+        /// <summary>Name for <see cref="InteropSource"/>.</summary>
+        public static string InteropSourceName
+        {
+            get
+            {
+                switch (InteropSource)
+                {
+                    case 1: return "winrt.dll";
+                    case 2: return "d3d11.dll";
+                    case 0: return "(none)";
+                    default: return "(n/a)";
+                }
             }
         }
 

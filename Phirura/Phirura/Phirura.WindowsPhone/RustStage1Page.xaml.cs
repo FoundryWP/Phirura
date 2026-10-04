@@ -172,6 +172,9 @@ namespace Phirura
 
                 AppLog.WriteSync("RustStage1: offscreen bring-up finished, ok=" + ok
                     + " route=" + RustRenderer.Route + " (" + RustRenderer.RouteName + ")"
+                    + " ot-step=" + RustRenderer.OtStep
+                    + " surface-kind=" + RustRenderer.OtSurfaceKindName
+                    + " interop-src=" + RustRenderer.InteropSourceName
                     + " surface=0x" + RustRenderer.GfxSurface.ToInt32().ToString("X8")
                     + " device=0x" + RustRenderer.GfxDevice.ToInt32().ToString("X8")
                     + " " + RustRenderer.Diagnose());

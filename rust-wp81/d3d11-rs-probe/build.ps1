@@ -150,7 +150,10 @@ $linkArgs = @(
     "/EXPORT:wp81_rs_gfx_device",
     "/EXPORT:wp81_rs_route",
     "/EXPORT:wp81_rs_ot_step",
-    "/EXPORT:wp81_rs_ot_step_name"
+    "/EXPORT:wp81_rs_ot_step_name",
+    "/EXPORT:wp81_rs_ot_surface_kind",
+    "/EXPORT:wp81_rs_interop_source",
+    "/EXPORT:wp81_rs_interop_trace"
 )
 $savedEap2 = $ErrorActionPreference
 $ErrorActionPreference = "Continue"

@@ -346,20 +346,38 @@ pub unsafe fn create_offscreen_target(
     // `CreateDirect3D11SurfaceFromDXGISurface` takes an **IDXGISurface***, and an `ID3D11Texture2D`
     // is NOT one: they are siblings under `IDXGIDeviceSubObject` (see `IID_IDXGISURFACE` in
     // direct.rs). Passing the texture pointer straight through "worked" on desktop only because the
-    // desktop helper QIs leniently; the WP8.1 FL 9.3 driver returns E_NOINTERFACE, which is exactly
-    // what step 43 reported on device. So QI for the surface interface first and pass THAT.
+    // desktop helper QIs leniently; the WP8.1 driver returns E_NOINTERFACE.
+    //
+    // A plain `IDXGISurface` was not enough on the phone either - the error survived that fix. The
+    // helper is a DXGI-1.2-era API and wants the most derived surface interface available, so the
+    // chain is probed newest-first and the first hit is used.
     crate::set_tick(282); // offscreen: CreateDirect3D11SurfaceFromDXGISurface
     let mut dxgi_surface = ComPtr::NULL;
-    let hr = texture.query_interface(
-        &IID_IDXGISURFACE as *const Guid,
-        &mut dxgi_surface.vtbl as *mut _ as *mut *mut c_void,
-    );
-    if hr < 0 || dxgi_surface.is_null() {
+    let chain: [(Guid, i32); 3] = [
+        (IID_IDXGISURFACE2, OT_SURFACE_IS_2),
+        (IID_IDXGISURFACE1, OT_SURFACE_IS_1),
+        (IID_IDXGISURFACE, OT_SURFACE_IS_0),
+    ];
+    let mut which = OT_SURFACE_IS_0;
+    let mut hr = E_NOINTERFACE;
+    for (iid, code) in chain.iter() {
+        let mut p = ComPtr::NULL;
+        let r = texture.query_interface(iid as *const Guid, &mut p.vtbl as *mut _ as *mut *mut c_void);
+        if r >= 0 && !p.is_null() {
+            dxgi_surface = p;
+            which = *code;
+            hr = r;
+            break;
+        }
+    }
+    if dxgi_surface.is_null() {
         note(trace, OT_QI_SURFACE, hr);
         rtv.release();
         texture.release();
         return None;
     }
+    // Report which surface interface answered, so a future failure is unambiguous.
+    note(trace, OT_QI_SURFACE, which);
     let mut surface = ComPtr::NULL;
     let hr = create_direct3d11_surface_from_dxgi_surface(
         dxgi_surface.vtbl as *mut c_void,
@@ -379,7 +397,7 @@ pub unsafe fn create_offscreen_target(
     Some((texture, rtv, surface))
 }
 
-/// Step codes for [`create_offscreen_target`] (40..46).
+/// Step codes for [`create_offscreen_target`] (40..47).
 pub const OT_BAD_SIZE: i32 = 40;
 pub const OT_CREATE_TEXTURE: i32 = 41;
 pub const OT_CREATE_RTV: i32 = 42;
@@ -387,9 +405,13 @@ pub const OT_CREATE_SURFACE: i32 = 43;
 pub const OT_OK: i32 = 44;
 pub const OT_QI_DXGIDEVICE: i32 = 45;
 pub const OT_CREATE_GFX_DEVICE: i32 = 46;
-/// `QueryInterface(IID_IDXGISurface)` on the offscreen texture - the step that failed with
-/// `E_NOINTERFACE` on device before the QI was added (see `direct::IID_IDXGISURFACE`).
+/// `QueryInterface` on the offscreen texture - a *step* code that also carries which surface
+/// interface answered (see `OT_SURFACE_IS_*` below).
 pub const OT_QI_SURFACE: i32 = 47;
+/// Recorded as the HRESULT half of the `OT_QI_SURFACE` trace entry when the QI chain resolved.
+pub const OT_SURFACE_IS_0: i32 = 0; // IDXGISurface
+pub const OT_SURFACE_IS_1: i32 = 1; // IDXGISurface1
+pub const OT_SURFACE_IS_2: i32 = 2; // IDXGISurface2
 
 /// Wrap a D3D11 device as the WinRT `IDirect3DDevice` the XAML compositor needs alongside a surface.
 pub unsafe fn wrap_device_for_compositor(device: ComPtr, trace: *mut i32) -> Option<ComPtr> {
@@ -424,10 +446,6 @@ pub unsafe fn wrap_device_for_compositor(device: ComPtr, trace: *mut i32) -> Opt
     note(trace, OT_OK, 0);
     Some(gfx_device)
 }
-
-/// Step codes for [`wrap_device_for_compositor`] (45..46).
-pub const OT_QI_DXGIDEVICE: i32 = 45;
-pub const OT_CREATE_GFX_DEVICE: i32 = 46;
 
 /// Create a composition swapchain for a XAML `SwapChainPanel` and attach it.
 ///

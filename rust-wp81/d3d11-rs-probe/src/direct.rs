@@ -496,19 +496,27 @@ extern "system" {
 // the `D3DKMT*` entries. `CreateDirect3D11DeviceFromDXGIDevice` is **not** among them (verified by
 // scanning the lib's symbol table).
 //
-// They *are* exported by `d3d11.dll` at runtime — Win2D's own ARM
-// `Microsoft.Graphics.Canvas.dll` imports exactly these two names, which is the evidence. They are
-// undocumented only because they live in `windows.graphics.directx.direct3d11.interop.h`, a header
-// the WP8.1 kit does not ship.
+// **Which DLL exports them.** Not `d3d11.dll` on this platform. Win2D's own ARM
+// `Microsoft.Graphics.Canvas.dll` - which renders fine on the Lumia 925 - imports both names from
+// **`winrt.dll`** (found by locating the two name strings and the DLL-name strings in its import
+// table). That is the decisive evidence: on WP8.1 these interop helpers live in the WinRT core
+// DLL, and the `winrt.dll` copy is the one with a working implementation. Resolving them out of
+// `d3d11.dll` found *a* symbol, but it returns E_NOINTERFACE for every surface - which is exactly
+// what the device log showed after the first QI fix.
 //
-// So resolve them by name from the already-loaded `d3d11.dll`, using `LoadLibraryExW` +
-// `GetProcAddress`. **That pair is safe to import here**: the WP8.1 kit's own
-// `WindowsPhoneCore.lib` — which this DLL already links — carries
-// `__IMPORT_DESCRIPTOR_api-ms-win-core-libraryloader-l1-2-0` with exactly `LoadLibraryExW` and
-// `GetProcAddress` (20 `GetModuleHandle`, 5 `GetProcAddress`, 5 `LoadLibraryExW` symbols). That is
-// the phone kit naming the API set that provides them, so the import is a platform-guaranteed one,
-// not a desktop-only accident. `LoadLibraryExW` on a module the process already has returns the
-// existing handle, so this loads nothing and adds no second copy.
+// So the resolution order is `winrt.dll` first, `d3d11.dll` second (desktop Windows keeps them in
+// `d3d11.dll`, so the fallback is what makes this same source run under `hostcheck`).
+//
+// They cannot be *linked* either way: the WP8.1 kit's ARM `d3d11.lib` is a limited import library
+// (only `D3D11CreateDevice`, `D3D11CreateDeviceAndSwapChain`, the `D3D11Core*` family and
+// `D3DKMT*`), and there is no `winrt.lib` in the kit at all. Hence `LoadLibraryExW` +
+// `GetProcAddress`.
+//
+// **That pair is safe to import.** The WP8.1 kit's own `WindowsPhoneCore.lib` - which this DLL
+// already links - carries `__IMPORT_DESCRIPTOR_api-ms-win-core-libraryloader-l1-2-0` with exactly
+// `LoadLibraryExW` and `GetProcAddress`. That is the phone kit naming the API set that provides
+// them, so it is platform-guaranteed, not a desktop-only accident. `LoadLibraryExW` on a module
+// the process already has returns the existing handle, so this loads nothing new.
 //
 // Signatures are from the interop header:
 //
@@ -525,6 +533,11 @@ const D3D11_DLL_W: [u16; 10] = [
     0x0064, 0x0033, 0x0064, 0x0031, 0x0031, 0x002E, 0x0064, 0x006C, 0x006C, 0x0000,
 ];
 
+/// `winrt.dll` as UTF-16LE, NUL-terminated. The phone's home for the D3D11/XAML interop helpers.
+const WINRT_DLL_W: [u16; 10] = [
+    0x0077, 0x0069, 0x006E, 0x0072, 0x0074, 0x002E, 0x0064, 0x006C, 0x006C, 0x0000,
+];
+
 /// Resolve an export of the already-loaded `d3d11.dll`.
 pub unsafe fn d3d11_export(name: *const u8) -> *mut c_void {
     let h = LoadLibraryExW(D3D11_DLL_W.as_ptr(), core::ptr::null_mut(), 0);
@@ -534,12 +547,41 @@ pub unsafe fn d3d11_export(name: *const u8) -> *mut c_void {
     GetProcAddress(h, name)
 }
 
+/// Resolve a D3D11/XAML interop helper, preferring `winrt.dll` (the phone's implementation).
+///
+/// Tries `winrt.dll` first - that is where Win2D's ARM DLL imports these from on WP8.1 - then
+/// falls back to `d3d11.dll`, which is where they live on desktop Windows. Returns null if neither
+/// module exports the name, and records which one answered in [`INTEROP_SOURCE`].
+pub unsafe fn interop_export(name: *const u8) -> *mut c_void {
+    let h = LoadLibraryExW(WINRT_DLL_W.as_ptr(), core::ptr::null_mut(), 0);
+    INTEROP_TRACE[0] = if h.is_null() { 0 } else { 1 };
+    if !h.is_null() {
+        let p = GetProcAddress(h, name);
+        INTEROP_TRACE[1] = if p.is_null() { 0 } else { 1 };
+        if !p.is_null() {
+            note_interop_source(1); // winrt.dll
+            return p;
+        }
+    }
+
+    let h11 = LoadLibraryExW(D3D11_DLL_W.as_ptr(), core::ptr::null_mut(), 0);
+    INTEROP_TRACE[2] = if h11.is_null() { 0 } else { 1 };
+    let p = if h11.is_null() {
+        core::ptr::null_mut()
+    } else {
+        GetProcAddress(h11, name)
+    };
+    INTEROP_TRACE[3] = if p.is_null() { 0 } else { 1 };
+    note_interop_source(if p.is_null() { 0 } else { 2 }); // 0 = neither, 2 = d3d11.dll
+    p
+}
+
 /// Wrap a DXGI device as the WinRT `IDirect3DDevice` the XAML compositor accepts.
 pub unsafe fn create_direct3d11_device_from_dxgi_device(
     dxgi_device: *mut c_void,
     gfx_device: *mut *mut c_void,
 ) -> HRESULT {
-    let p = d3d11_export(b"CreateDirect3D11DeviceFromDXGIDevice\0".as_ptr());
+    let p = interop_export(b"CreateDirect3D11DeviceFromDXGIDevice\0".as_ptr());
     if p.is_null() {
         return E_NOINTERFACE;
     }
@@ -552,12 +594,30 @@ pub unsafe fn create_direct3d11_surface_from_dxgi_surface(
     dxgi_surface: *mut c_void,
     gfx_surface: *mut *mut c_void,
 ) -> HRESULT {
-    let p = d3d11_export(b"CreateDirect3D11SurfaceFromDXGISurface\0".as_ptr());
+    let p = interop_export(b"CreateDirect3D11SurfaceFromDXGISurface\0".as_ptr());
     if p.is_null() {
         return E_NOINTERFACE;
     }
     let f: extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT = core::mem::transmute(p);
     f(dxgi_surface, gfx_surface)
+}
+
+/// Which module the interop helpers resolved from: 1 = `winrt.dll`, 2 = `d3d11.dll`, 0 = neither.
+///
+/// Exposed so the phone log can say whether the resolution took the platform-correct path.
+#[no_mangle]
+pub static mut INTEROP_SOURCE: i32 = 0;
+
+/// Diagnostics for the resolution attempt, readable from C# so a failure is unambiguous:
+///   [0] = 1 if `LoadLibraryExW("winrt.dll")` returned a handle, else 0
+///   [1] = 1 if it exported the name, else 0
+///   [2] = 1 if `LoadLibraryExW("d3d11.dll")` returned a handle, else 0
+///   [3] = 1 if it exported the name, else 0
+#[no_mangle]
+pub static mut INTEROP_TRACE: [i32; 4] = [0; 4];
+
+unsafe fn note_interop_source(v: i32) {
+    INTEROP_SOURCE = v;
 }
 
 extern "system" {
@@ -639,6 +699,27 @@ pub const IID_IDXGISURFACE: Guid = Guid {
     data2: 0x6ac3,
     data3: 0x4889,
     data4: [0xbf, 0x47, 0x9e, 0x23, 0xbb, 0xd2, 0x60, 0xec],
+};
+
+/// `IDXGISurface1` (dxgi.h: `4ae63092-6327-4c1b-80ae-bfe12ea32b86`), derives from `IDXGISurface`.
+pub const IID_IDXGISURFACE1: Guid = Guid {
+    data1: 0x4ae6_3092,
+    data2: 0x6327,
+    data3: 0x4c1b,
+    data4: [0x80, 0xae, 0xbf, 0xe1, 0x2e, 0xa3, 0x2b, 0x86],
+};
+
+/// `IDXGISurface2` (DXGI1_2.h: `aba496dd-b617-4cb8-a866-bc44d7eb1fa2`), derives from
+/// `IDXGISurface1`.
+///
+/// The WP8.1 interop helper is a DXGI-1.2-era API and, on the FL 9.3 driver, asks for the *most
+/// derived* surface interface it can get - an `IDXGISurface` alone is not enough there, which is
+/// why the E_NOINTERFACE survived the first QI fix. The chain is therefore probed newest-first.
+pub const IID_IDXGISURFACE2: Guid = Guid {
+    data1: 0xaba4_96dd,
+    data2: 0xb617,
+    data3: 0x4cb8,
+    data4: [0xa8, 0x66, 0xbc, 0x44, 0xd7, 0xeb, 0x1f, 0xa2],
 };
 
 // dxgi1_2.h

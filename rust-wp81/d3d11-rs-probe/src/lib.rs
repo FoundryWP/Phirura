@@ -526,6 +526,37 @@ pub unsafe extern "C" fn wp81_rs_ot_step_name() -> *const u8 {
     s.as_ptr()
 }
 
+/// Which module the D3D11/XAML interop helpers resolved from: 1 = `winrt.dll` (the phone's home
+/// for them), 2 = `d3d11.dll` (desktop Windows), 0 = neither. -1 if never attempted.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_interop_source() -> i32 {
+    crate::direct::INTEROP_SOURCE
+}
+
+/// One element of the interop-resolution diagnostic trace (see `direct::INTEROP_TRACE`).
+///   index 0 = winrt.dll handle obtained, 1 = winrt.dll exported the name,
+///   index 2 = d3d11.dll handle obtained, 3 = d3d11.dll exported the name.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_interop_trace(i: i32) -> i32 {
+    if i < 0 || i > 3 {
+        return -1;
+    }
+    crate::direct::INTEROP_TRACE[i as usize]
+}
+
+///
+/// Only meaningful once `wp81_rs_ot_step()` is 47 (the QI step). The value is the second slot of
+/// the offscreen trace, where `create_offscreen_target` stashes it: 2 = `IDXGISurface2`,
+/// 1 = `IDXGISurface1`, 0 = `IDXGISurface`. -1 means the QI step has not run.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_ot_surface_kind() -> i32 {
+    let s = st();
+    if s.ot_trace[0] != OT_QI_SURFACE {
+        return -1;
+    }
+    s.ot_trace[1]
+}
+
 /// Create the device, the composition swapchain, its render target view, and the pipeline.
 ///
 /// `panel` is the `IInspectable*` of the XAML `SwapChainPanel` (passed from C# as the
