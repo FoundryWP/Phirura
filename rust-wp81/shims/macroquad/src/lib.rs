@@ -1487,16 +1487,64 @@ pub use std::thread;
 /// to configure - `prpr::core::init` calls this unconditionally at startup.
 pub fn set_pc_assets_folder(_path: &str) {}
 
+/// The shell's asset reader, installed once by the bridge crate at startup.
+///
+/// # Why this hook exists
+///
+/// `prpr` reads almost everything through its own `FileSystem`, which the bridge implements by
+/// handing paths to the shell. But two paths bypass it and land here instead:
+///
+///   * `ResourcePack` - `GameScene` does not take a resource pack, so it calls
+///     `ResourcePack::from_path(None)`, which becomes `fs_from_assets("respack/")` and hence
+///     `load_file("respack/<name>")`. That is every note texture and every hit sound.
+///   * `ResourcePack::load_clip!`'s last resort, which asks for `click.ogg` and friends with no
+///     prefix at all.
+///
+/// Both used to return a hard `NotFound`, so the scene could not be constructed no matter what the
+/// shell had on disk - the failure arrived as `GameScene::new failed: ... Missing info.yml` with
+/// no indication that the file had never been asked for *from anywhere that could answer*.
+///
+/// The hook is a plain `fn`, not a closure: it has to survive being stored in a `static` and be
+/// callable from whatever thread the scene happens to be built on.
+type AssetHook = fn(&str) -> Option<Vec<u8>>;
+
+/// Held as an address in an atomic rather than a `static mut` because reading a `static mut` from
+/// a function pointer field draws a lint that is one release away from being a hard error, and
+/// because the writer (`set_asset_hook`) and the reader (`load_file`) are genuinely concurrent:
+/// the shell installs it before the first frame, and the scene may load assets mid-frame.
+static ASSET_HOOK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Install the shell's asset reader. Passing a hook makes `load_file` answer; there is no
+/// "uninstall", because the shell installs exactly one for the process lifetime.
+pub fn set_asset_hook(hook: AssetHook) {
+    ASSET_HOOK.store(hook as usize, core::sync::atomic::Ordering::Relaxed);
+}
+
+fn asset_hook() -> Option<AssetHook> {
+    match ASSET_HOOK.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        // `usize` and a function pointer are the same width on every target this builds for
+        // (x86_64 host, thumbv7 phone), and the value was stored from a real function pointer.
+        p => Some(unsafe { core::mem::transmute::<usize, AssetHook>(p) }),
+    }
+}
+
 /// Loads a file relative to the asset root.
 ///
-/// `prpr` has its own `FileSystem` abstraction and uses that for real IO; this exists only because
-/// the prelude exports it. It reports failure rather than panicking so a stray call surfaces as an
-/// error instead of a crash.
+/// With a hook installed this is a straight hand-off to the shell, path unchanged - the shell
+/// decides what "relative to the asset root" means, which on the phone is the app's local folder.
+/// Without one it reports failure rather than panicking, so a shell that has not wired the hook
+/// gets an error line naming the file instead of a crash.
 pub async fn load_file(path: &str) -> Result<Vec<u8>, std::io::Error> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        format!("asset IO is owned by the shell: {path}"),
-    ))
+    match asset_hook() {
+        Some(hook) => hook(path).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, format!("asset not found: {path}"))
+        }),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("asset IO is owned by the shell: {path}"),
+        )),
+    }
 }
 
 /// Input plumbing.
@@ -1590,12 +1638,48 @@ pub struct GlPipeline {
     pub pipeline: miniquad::Pipeline,
 }
 
-/// Loads an image from the asset root.
+/// Loads and decodes an image from the asset root.
 ///
-/// `prpr` decodes its own images through `image`; this exists because the prelude exports it. It
-/// reports failure rather than panicking.
-pub async fn load_image(_path: &str) -> Result<Image, Error> {
-    Err(Error::Unsupported("load_image"))
+/// Upstream macroquad reads the file and decodes it with the `image` crate, and so does this: the
+/// bytes come through the same shell hook `load_file` uses, so the shell's job is identical
+/// either way - it is asked for a path and returns bytes, and it never needs to know whether the
+/// caller was going to parse them as JSON or as pixels.
+///
+/// `prpr` reaches this for the artwork that belongs to the *player* rather than to any one chart:
+/// the eight `rank/*.png` badges, the `back`/`retry`/`resume`/`proceed` icons, and the
+/// `info`/`warn`/`ok`/`error` billboards `Main::new` hangs off the global `BILLBOARD`. A chart can
+/// be parsed with none of them present, but `GameScene::new` cannot: it loads four of these before
+/// it returns, and while this was a stub every construction failed with `unsupported on this
+/// platform: load_image` no matter what the shell had on disk.
+///
+/// The `Unsupported` answer survives for the one case that still means it - no shell installed -
+/// because then there is genuinely nowhere to read from.
+pub async fn load_image(path: &str) -> Result<Image, Error> {
+    if asset_hook().is_none() {
+        return Err(Error::Unsupported("load_image"));
+    }
+    let bytes = load_file(path)
+        .await
+        .map_err(|e| Error::Other(format!("{path}: {e}")))?;
+    // `load_from_memory` answers `DynamicImage`, so the conversion to a concrete RGBA8 buffer is
+    // what `to_rgba8` does - it is also the point at which a palette or grayscale file becomes the
+    // four-channel layout `Image` stores.
+    let rgba = image::load_from_memory(&bytes)
+        .map_err(|e| Error::Other(format!("{path}: {e}")))?
+        .to_rgba8();
+    let (width, height) = (rgba.width(), rgba.height());
+    // `Image` carries `u16` dimensions because macroquad's does. A wider image would truncate
+    // silently and misdraw forever, so it is refused as a decodable-but-unusable file instead.
+    if width > u16::MAX as u32 || height > u16::MAX as u32 {
+        return Err(Error::Other(format!(
+            "{path}: {width}x{height} exceeds macroquad's u16 dimensions"
+        )));
+    }
+    Ok(Image {
+        width: width as u16,
+        height: height as u16,
+        bytes: rgba.into_raw(),
+    })
 }
 
 pub mod prelude {

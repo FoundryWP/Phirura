@@ -14,13 +14,28 @@ edition = "2021"
 # rendering is already solved there and re-solving it in Rust would mean writing a GL-to-D3D11
 # translation layer (see rust-wp81/README.md).
 #
-# This crate deliberately has no dependencies beyond std, so it builds for
-# thumbv7a-windows-phone without pulling anything that cannot be built there.
+# This crate's dependencies all have to build for `thumbv7a-windows-phone`. "No dependencies"
+# was the original rule and is not the real one - the real one is about what can be *compiled for
+# that target*, which `glam` and `log` already had to satisfy. What is deliberately avoided is a
+# dependency that would drag in a GL context, an async runtime, or anything that spawns threads
+# (`std::thread` aborts with 0xC0000409 on the phone).
 
 [lib]
 crate-type = ["lib"]
 
 [dependencies]
+# Image decoding, for `load_image`.
+#
+# Upstream macroquad decodes with this crate too, so implementing it here keeps the function
+# faithful rather than special: read the asset through the shell hook, decode, hand back pixels.
+# `prpr` already depends on the same crate for its own texture loads, so this adds no new code to
+# either build - it is the *same* code.
+#
+# `default-features = false` matters: the default feature set is where `rayon` comes in, and while
+# `prpr` does enable it (so feature unification builds `image` with it regardless), nothing in this
+# crate should be *asking* for a thread pool it must not use on the phone.
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+
 # The handle types (`Texture`, `RenderPass`, `TextureParams`, ...) live in the miniquad shim and are
 # re-exported here. They must be the *same* types in both crates: `prpr` converts between them via
 # `Texture2D::from_miniquad_texture` and `raw_miniquad_texture_handle`, and two structurally

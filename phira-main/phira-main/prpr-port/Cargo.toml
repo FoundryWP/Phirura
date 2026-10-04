@@ -48,15 +48,41 @@ glyph_brush = "0.7.12"
 # Diagnostics from the host go through the same logging facade `prpr` uses.
 tracing = { workspace = true }
 
+# Float maths. `pxfm` (reached through prpr's image/blur path) calls the C libm entry points, and a
+# `/NODEFAULTLIB` link has no libm to resolve them against. `libm` is a pure-Rust implementation, so
+# the symbols can be supplied from Rust instead of from a CRT that cannot be linked.
+#
+# Not in a `[target]` section: the host link is missing the same C99/C11 maths names (no UCRT in
+# `LIB`), so `src/lib.rs`'s `libm_shim!` needs `libm` on every target.
+libm = "0.2"
+
+# ---------------------------------------------------------------------------
+# Host-only.
+# ---------------------------------------------------------------------------
+
+# `host.rs` reports every scene-construction failure through `tracing::error!`, and `tracing`
+# with no subscriber installed discards the event outright - which is how `wp81_game_create`
+# returning -2 can mean five different things with nothing to tell them apart. Gated off the phone
+# because there the C# shell is the one that will install a subscriber (or read the code straight
+# from the log), and this crate is linked into a DLL whose size is a gate of its own.
+[target.'cfg(not(target_arch = "arm"))'.dependencies]
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+
+# ---------------------------------------------------------------------------
+# Phone-only. Everything below is inside a `[target]` section, which is what
+# keeps `cargo build` for the host out of it.
+# ---------------------------------------------------------------------------
+
 # `wp81-compat` must be in this crate's dependency graph, not merely in the workspace.
 #
 # The patched std references compat's symbols (`_tls_index`, `atexit`, the Win32 shims), but compat
 # is not a dependency of prpr - it is a standalone crate that *defines* symbols std expects the CRT
 # to provide. Nothing pulls it in, so without this line the link fails with 36 `_tls_index` and
 # dozens of other unresolved externals even though the definitions exist one directory away.
+#
+# ARM-gated on purpose. Those are the *phone's* substitutes for a CRT that WP8.1 does not ship; on a
+# host build the real CRT defines them too, and two definitions of `_tls_index` is a link error
+# rather than a fallback. Gating on `target_arch` (and not on a feature) keeps `build-port.ps1`
+# unchanged: it still passes no flags, and the thumbv7a JSON target reports `arch = "arm"`.
+[target.'cfg(target_arch = "arm")'.dependencies]
 wp81-compat = { path = "../../../rust-wp81/compat" }
-
-# Float maths. `pxfm` (reached through prpr's image/blur path) calls the C libm entry points, and a
-# CRT-free link has no libm to resolve them against. `libm` is a pure-Rust implementation, so the
-# symbols can be supplied from here instead of from a CRT that cannot be linked.
-libm = "0.2"

@@ -2169,6 +2169,7 @@ name = "macroquad"
 version = "0.3.25"
 dependencies = [
  "glam 0.30.10",
+ "image",
  "log",
  "miniquad",
 ]
@@ -3224,6 +3225,7 @@ dependencies = [
  "pollster",
  "prpr",
  "tracing",
+ "tracing-subscriber",
  "wp81-compat",
 ]
 

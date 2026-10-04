@@ -1,2 +1,24 @@
 *main/
 *master/
+190/
+
+# `*main/` / `*master/` exist to keep the vendored source dumps (docs.rs-main,
+# phira-docs-main, d3d9-to-11-master, ...) out of the repo. `phira-main` is vendored too, but it
+# is ALREADY COMMITTED - 681 files - and `prpr-port`, the crate we wrote, lives inside it.
+#
+# A directory pattern excludes the directory *itself*, and git cannot re-include a file whose
+# parent directory is excluded. So without the negations below, every new file under `phira-main`
+# needed `git add -f` and nothing said so: `prpr-port/src/host.rs` and
+# `prpr-port/src/bin/host_m1.rs` were silently invisible to `git status` until this was noticed.
+# Un-ignoring the tree also has the side benefit that an edit to a vendored source becomes a
+# visible diff instead of an un-diffable one.
+!phira-main/
+
+# Matches the outer and the inner `phira-main` directory; both end in "main".
+# Everything else under those (prpr, mpr, docs, ...) is tracked or will now show up as ??.
+
+# Build output, not source.
+phira-main/**/target/
+
+# Written by rust-wp81/build-m1.ps1 next to the script.
+*.log

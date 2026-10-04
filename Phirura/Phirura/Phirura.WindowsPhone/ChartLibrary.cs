@@ -25,6 +25,9 @@ namespace Phirura
         private const string LocalChartsFolder = "charts";
         private const string DemoBase = "ms-appx:///Assets/demo";
 
+        /// <summary>Uri of the local chart root; a chart's directory name follows it.</summary>
+        private const string LocalBaseUri = "ms-appdata:///local/charts/";
+
         public static async Task<List<ChartEntry>> LoadAllAsync()
         {
             List<ChartEntry> list = new List<ChartEntry>();
@@ -469,18 +472,34 @@ namespace Phirura
             return null;
         }
 
+        /// <summary>
+        /// The chart's directory name inside <c>LocalFolder\charts</c> - <c>190</c> for
+        /// <c>ms-appdata:///local/charts/190</c>.
+        ///
+        /// Null for packaged content (the bundled demo), which has no directory in local storage at
+        /// all. That distinction matters more than it looks: the Rust engine reads every asset -
+        /// chart, illustration, audio, resource pack, UI images - through one
+        /// <see cref="PrprPort.AssetRoot"/>, a real filesystem path resolved with
+        /// <c>GetFolderFromPathAsync</c>, which cannot address <c>ms-appx:</c> content.
+        /// </summary>
+        public static string LocalFolderName(ChartEntry entry)
+        {
+            if (entry == null || !entry.IsLocalFolder)
+            {
+                return null;
+            }
+            string tail = entry.BasePath.Substring(LocalBaseUri.Length);
+            int slash = tail.IndexOf('/');
+            return slash >= 0 ? tail.Substring(0, slash) : tail;
+        }
+
         public static async Task DeleteAsync(ChartEntry entry)
         {
             if (entry == null || !entry.IsLocalFolder)
             {
                 return;
             }
-            string tail = entry.BasePath.Substring("ms-appdata:///local/charts/".Length);
-            int slash = tail.IndexOf('/');
-            if (slash >= 0)
-            {
-                tail = tail.Substring(0, slash);
-            }
+            string tail = LocalFolderName(entry);
             StorageFolder root = await ApplicationData.Current.LocalFolder.CreateFolderAsync(
                 LocalChartsFolder, CreationCollisionOption.OpenIfExists);
             try

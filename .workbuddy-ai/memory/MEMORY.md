@@ -16,7 +16,58 @@ ref: `phira-main/phira-main/` (`prpr`, `prpr-*`). 2nd workstream: `rust-wp81/`. 
 textured quad on a real device.**
 
 ---
-## Current state (R50)
+## Current state (R53)
+
+**R51–R52, Stage 1 is DONE and on the phone:** the textured quad renders (`mid=FFFF6633`,
+`frame#1 rc=0 verts=6`, `vp=(0,2) 768x1229`), touch follows the finger (`tk=FFFF6633` on probe,
+`mid=FF4C8CE5` far from centre), and the **5 s average is 60.2 idle / 56.8 startup / 58.6–59.4
+touching**. ARM DLL 32,256 B, 6 shippable imports, `check_imports` exit 0, export table contains
+`wp81_rs_set_touch`. Desktop gate stayed green throughout (`=== ALL STAGE 1 CHECKS PASSED ===`).
+**Stage 3's gate is open.**
+
+**R53, M1 is running on the desktop host** (`rust-wp81\build-m1.ps1 -ChartsDir <dir> -Folder 190
+-Chart 57649733.json`): the real `prpr` parses an 8.8 MB RPE chart, loads the full resource pack,
+registers every texture, and the engine no longer has `wp81_game_create` with zero callers.
+What it took, and what breaks again easily:
+
+- **Build env is `build-prpr.ps1`'s three rules** — `VC\bin` first on PATH (Git Bash's coreutils
+  `link` shadows it), `Common7\IDE` on PATH (`0xc0000135` without `mspdb110.dll`), `LIB` =
+  `VC\lib\amd64;winv6.3\um\x64` — **plus `workdir = phira-main\phira-main`**. Never
+  `$ErrorActionPreference = "Stop"` with `2>&1`: it converts cargo's warnings into a
+  `NativeCommandError` that hides the exit code.
+- **`#[cfg(target_arch = "arm")]` goes on the compat anchors, `_fltused`, `_DllMainCRTStartup` and
+  `wp81_anchor_port`** (host CRT already defines them → `LNK2005`), **but NOT on `libm_shim!`**:
+  this `LIB` has no UCRT, so `msvcrt.lib` supplies the C89 maths and not `roundf`/`round`/`truncf`/
+  `log2f`/`log2`/`fma`. Import-lib members are pulled only for still-undefined symbols, so the
+  forwarders coexist. **Let the linker decide what to gate.**
+- **No `tracing` subscriber = every `GameCreate -> -2` is opaque.** `tracing-subscriber` is added
+  under `[target.'cfg(not(target_arch = "arm"))'.dependencies]` so the phone never sees it.
+- **Two asset paths bypass `HostFileSystem`:** the resource pack (`ResourcePack::from_path(None)` →
+  `fs_from_assets("respack/")` → `macroquad::load_file`) and **every UI image** (`load_image` for
+  `back/retry/resume/proceed` + `info/warn/ok/error`, loaded *inside* `GameScene::new`). Both fixed
+  by the shim's `set_asset_hook`; `load_image` decodes in the shim with `image`.
+  **Shim dependency rule (user): buildable for WP ARM, not "zero deps".**
+- **`ChartInfo::default()` carries placeholder *file names* (`music: song.mp3`)**, and a chart folder
+  with no `info.yml` and an empty RPE `META` will try to load exactly those. **Chart folders need an
+  `info.yml`.** `host.rs` now uses `prpr::fs::load_info` with a seeded `chart`.
+- **Asset buffer grew on demand:** 4 MiB flat rejected an 8.8 MB chart as `-2`, the same code the
+  shells use for "not there". Now a thread-local scratch starting at 4 MiB, doubling on `-2` to a
+  64 MiB ceiling.
+- **`DecodedAudio` needs a header read, not a decoder** — WAVE, Ogg granule, and MPEG Layer III
+  (ID3v2 skip → `Xing`/`Info` count, else per-frame walk; `(spf/8)*bitrate/rate + pad`, i.e. 144 for
+  MPEG-1 and 72 for MPEG-2/2.5). Verified `57649733.mp3 = 44100 Hz, 214.80 s`.
+- **unsafe budget:** a safe `extern "C" fn` coerces into `HostCallbacks`'s `unsafe extern "C" fn`
+  fields — **but a Rust-ABI `fn()` does not**, that was `E0308 expected "C" fn, found "Rust" fn`.
+  Of 16 callbacks only `load_asset` and `audio_decode` stay `unsafe`; each converts raw → safe once
+  at the top. `wide_string` is the third and last `unsafe fn`.
+
+**Test chart: `Phirura\190`** (Transcendence, complete Phira folder) staged under
+`E:\_phirura_m1\charts\190`, with `phira-main/assets/*` copied to the charts root for `load_image`.
+
+**Standing decisions:** network / login / online charts are **implemented in C# and called from
+Rust** (more `HostCallbacks` entries later — never `tokio`/`reqwest` in the Rust half, which
+`std::thread` aborting `0xC0000409` forbids on device anyway). Playable chart = `190`, not the
+bundled demo.
 
 **R49–R50, the two rules that made route 3 come up and are easy to break again:**
 

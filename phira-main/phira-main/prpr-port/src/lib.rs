@@ -101,6 +101,22 @@ pub unsafe extern "C" fn wp81_install_callbacks(cb: *const HostCallbacks) {
         return;
     }
     CALLBACKS = *cb;
+    // The macroquad shim's `load_file` cannot see `CALLBACKS` - it is a different crate with no
+    // dependency on this one, which is deliberate. So the address of this plain function is
+    // handed over instead, and `prpr`'s resource pack (`respack/info.yml`, the note textures, the
+    // hit sounds) resolves through the same shell callback as the chart itself. Without this the
+    // scene cannot be constructed at all: `ResourcePack` falls back to
+    // `fs_from_assets("respack/")`, which has no way to ask anyone for bytes.
+    macroquad::set_asset_hook(asset_hook);
+}
+
+/// Forwarder for the macroquad shim's asset hook.
+///
+/// A plain `fn`, not a closure, because that is what the shim stores in a `static`. The path
+/// arrives unchanged - `respack/info.yml` from the resource pack, `click.ogg` from the sound
+/// fallback - and the shell resolves both against its asset root.
+fn asset_hook(path: &str) -> Option<Vec<u8>> {
+    host::load_asset(path)
 }
 
 #[inline]
@@ -629,23 +645,33 @@ mod tests {
 // list and this function are one mechanism; a symbol in neither is not linked.
 // ===========================================================================
 
+// The whole anchor mechanism below is ARM-only: it exists purely to stop the `/NODEFAULTLIB` link
+// from dropping shims and MSVC ARM runtime helpers that are referenced from *outside* this crate.
+// On a host link the CRT supplies every one of those names already, `wp81-compat` is not even in
+// the dependency graph (see the `cfg` on its manifest entry), and taking the address of the
+// externs below would be an unresolved external rather than an anchor.
+
 // The two `global_asm!` divide helpers have no Rust item to name, so they are opened as `extern`
 // declarations purely to take their addresses for the anchor.
+#[cfg(target_arch = "arm")]
 extern "C" {
     fn __rt_udiv64();
     fn __rt_sdiv64();
 }
 
+#[cfg(target_arch = "arm")]
 #[inline]
 fn __rt_udiv64_addr() -> usize {
     __rt_udiv64 as unsafe extern "C" fn() as usize
 }
 
+#[cfg(target_arch = "arm")]
 #[inline]
 fn __rt_sdiv64_addr() -> usize {
     __rt_sdiv64 as unsafe extern "C" fn() as usize
 }
 
+#[cfg(target_arch = "arm")]
 #[no_mangle]
 pub extern "C" fn wp81_anchor_port() -> usize {
     let anchors: [usize; 45] = [
@@ -729,6 +755,15 @@ pub extern "C" fn wp81_anchor_port() -> usize {
 // build cycle and not a silent misbehaviour.
 // ===========================================================================
 
+// Needed on the host build as well as the phone, which is not obvious: the host link here has no
+// UCRT in `LIB` (only `VC\lib\amd64` plus `winv6.3\um\x64`), and `msvcrt.dll`'s import library
+// exports the C89 names - `sin`, `cos`, `floor`, `pow`, `sqrtf` - and not the C99/C11 ones. Six
+// symbols came back `LNK2019` when this block was `cfg`-ed out for the host: `roundf`, `round`,
+// `truncf`, `log2f`, `log2`, `fma`. So the forwarders stay unconditional.
+//
+// They do not collide with `msvcrt.lib` on the host despite both being able to define `sin`: an
+// import library contributes a member only for a symbol that is still undefined, and these
+// definitions satisfy it first.
 macro_rules! libm_shim {
     ($name:ident, $imp:path, ($($a:ident : $t:ty),*) -> $ret:ty) => {
         #[no_mangle]
@@ -772,6 +807,10 @@ libm_shim!(exp, libm::exp, (x: f64) -> f64);
 libm_shim!(pow, libm::pow, (x: f64, y: f64) -> f64);
 libm_shim!(atan2, libm::atan2, (y: f64, x: f64) -> f64);
 libm_shim!(fma, libm::fma, (x: f64, y: f64, z: f64) -> f64);
+// Added because the host link of `host_m1` asked for it and the f32 `log2f` above did not cover
+// it: `zopfli`'s entropy calculation is `f64`. Same story as the rest - `msvcrt.lib` has no
+// `log2`.
+libm_shim!(log2, libm::log2, (x: f64) -> f64);
 
 // ===========================================================================
 // CRT-free DLL entry point
@@ -780,6 +819,12 @@ libm_shim!(fma, libm::fma, (x: f64, y: f64, z: f64) -> f64);
 // uses /NODEFAULTLIB and the entry point comes from here.
 // ===========================================================================
 
+// Both of the following are ARM-only, and for the same reason as `libm_shim!`: they exist because
+// the phone's link is `/NODEFAULTLIB` and supplies no CRT. On a host link the CRT supplies all
+// three - `_fltused` and `_DllMainCRTStartup` are *defined* by it, so emitting them a second time
+// is a duplicate-symbol error. `DllMain` itself is kept unguarded: it is a plain function with a
+// name no CRT defines, and `_DllMainCRTStartup` above is its only caller.
+#[cfg(target_arch = "arm")]
 #[no_mangle]
 pub static _fltused: i32 = 0;
 
@@ -794,6 +839,7 @@ pub unsafe extern "system" fn DllMain(
     1
 }
 
+#[cfg(target_arch = "arm")]
 #[no_mangle]
 pub unsafe extern "system" fn _DllMainCRTStartup(
     module: *mut c_void,
