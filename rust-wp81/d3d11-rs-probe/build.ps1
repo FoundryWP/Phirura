@@ -164,6 +164,11 @@ $linkArgs = @(
     "/EXPORT:wp81_rs_interop_source",
     "/EXPORT:wp81_rs_interop_trace",
     "/EXPORT:wp81_rs_start_surface",
+    # The split halves of the route-3 bring-up. `SurfaceImageSource` is a XAML object, so creating
+    # it (and SetDevice) must run on the UI thread, while the device+pipeline half belongs on a
+    # pool thread where the UI thread survives to flush the log if a driver call faults.
+    "/EXPORT:wp81_rs_start_surface_prepare",
+    "/EXPORT:wp81_rs_start_surface_attach",
     "/EXPORT:wp81_rs_sis_source",
     "/EXPORT:wp81_rs_sis_step",
     "/EXPORT:wp81_rs_sis_step_name",

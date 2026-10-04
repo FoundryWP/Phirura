@@ -525,8 +525,33 @@ pub unsafe extern "C" fn wp81_rs_start_offscreen(width: u32, height: u32) -> i32
 /// The caller must read the `SurfaceImageSource` `IInspectable*` with [`wp81_rs_sis_source`] and
 /// assign it to a XAML `Image.Source` (it is a `Windows.UI.Xaml.Media.ImageSource`). Rust owns the
 /// device, the surface and every draw call; XAML only displays.
+///
+/// ## ⚠ CALL THIS ON THE UI THREAD
+///
+/// `SurfaceImageSource` is a **XAML** object and therefore carries a XAML thread affinity: creating
+/// it, `SetDevice` on it, and every `BeginDraw`/`EndDraw` must happen on the UI thread. Doing any of
+/// it from a pool thread fails with **`RPC_E_WRONG_THREAD` (`0x8001010E`)** — measured on device, and
+/// the reason [`wp81_rs_start_surface_prepare`] exists separately.
+///
+/// That is an unfortunate trade for the crash-survivability rule (a native bring-up on the UI thread
+/// blocks WinRT `FileIO`, so the log cannot flush if it faults). The split keeps the best of both:
+/// the unbounded, crash-prone part — device creation and pipeline build — runs in
+/// `_prepare` on a pool thread, and only the small, deterministic surface activation runs here.
 #[no_mangle]
 pub unsafe extern "C" fn wp81_rs_start_surface(width: u32, height: u32) -> i32 {
+    let rc = wp81_rs_start_surface_prepare(width, height);
+    if rc != 0 {
+        return rc;
+    }
+    wp81_rs_start_surface_attach()
+}
+
+/// Stage 1 of the route-3 bring-up: device, `IDXGIDevice`, pipeline, test texture. **Any thread.**
+///
+/// This is the half that can fault in a driver call, so it belongs on a pool thread where the UI
+/// thread survives to flush the log. It deliberately does *not* touch WinRT.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_start_surface_prepare(width: u32, height: u32) -> i32 {
     let s = st();
     release_all(s);
     reset_sc_hrs();
@@ -564,9 +589,37 @@ pub unsafe extern "C" fn wp81_rs_start_surface(width: u32, height: u32) -> i32 {
     }
     s.dxgi_device = dxgi_device;
 
+    bump(s, 30); // build_pipeline
+    let pipeline = match build_pipeline(device, context) {
+        Some(p) => p,
+        None => {
+            s.stage = 5;
+            return 5;
+        }
+    };
+
+    bump(s, 40); // create_test_texture
+    if !create_test_texture(device, s) {
+        s.pipeline = Some(pipeline);
+        s.stage = 6;
+        return 6;
+    }
+    s.pipeline = Some(pipeline);
+    0
+}
+
+/// Stage 2 of the route-3 bring-up: activate the WinRT class, QI `ISurfaceImageSourceNative`,
+/// `SetDevice`. **MUST run on the UI thread** — see [`wp81_rs_start_surface`].
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_start_surface_attach() -> i32 {
+    let s = st();
+    if s.device.is_null() || s.dxgi_device.is_null() {
+        return 7; // _prepare was not called (or failed) - nothing to attach to
+    }
+
     // Activate the WinRT class, create the instance, QI the native interface.
     bump(s, 286); // surface: activate + create + QI native
-    let mut chain = match SurfaceChain::create(width as i32, height as i32, true) {
+    let mut chain = match SurfaceChain::create(s.width as i32, s.height as i32, true) {
         Ok(c) => c,
         Err((step, hr)) => {
             s.sis_trace[0] = step;
@@ -578,7 +631,7 @@ pub unsafe extern "C" fn wp81_rs_start_surface(width: u32, height: u32) -> i32 {
     };
 
     bump(s, 287); // surface: SetDevice
-    let hr = chain.set_device(dxgi_device.vtbl as *mut c_void);
+    let hr = chain.set_device(s.dxgi_device.vtbl as *mut c_void);
     if hr < 0 {
         chain.release_all();
         s.sis_trace[0] = SIS_SET_DEVICE;
@@ -588,26 +641,7 @@ pub unsafe extern "C" fn wp81_rs_start_surface(width: u32, height: u32) -> i32 {
         return 4;
     }
 
-    bump(s, 30); // build_pipeline
-    let pipeline = match build_pipeline(device, context) {
-        Some(p) => p,
-        None => {
-            chain.release_all();
-            s.stage = 5;
-            return 5;
-        }
-    };
-
-    bump(s, 40); // create_test_texture
-    if !create_test_texture(device, s) {
-        s.pipeline = Some(pipeline);
-        chain.release_all();
-        s.stage = 6;
-        return 6;
-    }
-    s.pipeline = Some(pipeline);
     s.surface = chain;
-
     s.route = 3; // XAML SurfaceImageSource
     bump(s, 99);
     s.stage = 0;

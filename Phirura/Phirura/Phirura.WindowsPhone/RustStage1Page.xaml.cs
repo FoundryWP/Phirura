@@ -151,9 +151,17 @@ namespace Phirura
                 AppLog.WriteSync("RustStage1: viewport " + RootGrid.ActualWidth + "x" + RootGrid.ActualHeight
                     + " -> " + w + "x" + h + " px @ " + scale.ToString("0.0"));
 
-                // Run the native bring-up on a pool thread so the UI thread stays alive to flush the
-                // log if a native step hard-faults. Each step is logged before and after, so the last
-                // line in phirura.log names the call that killed the process.
+                // The bring-up is split in two because the two halves have different thread
+                // requirements, and both requirements were measured on the device:
+                //
+                //  * `_prepare` (pool thread) - device, IDXGIDevice, pipeline, test texture. This is
+                //    the unbounded half that can fault inside a driver call, so it must NOT run on
+                //    the UI thread: a native fault there blocks WinRT FileIO, AppLog never flushes,
+                //    and the crash arrives with no log at all.
+                //  * `_attach` (UI thread)   - SurfaceImageSource activation + SetDevice. Running
+                //    this half from a pool thread returns RPC_E_WRONG_THREAD (0x8001010E) at
+                //    CreateInstanceWithDimensionsAndOpacity, because SurfaceImageSource is a XAML
+                //    object with XAML's thread affinity. Measured on device (Round 49).
                 //
                 // ROUTE (Round 48): neither a swapchain nor the D3D/WinRT interop helpers are
                 // reachable from a WP8.1 phone app. CreateSwapChainForCoreWindow and
@@ -168,19 +176,30 @@ namespace Phirura
                 // QueryInterface - no interop helper - and draws into the IDXGISurface that
                 // BeginDraw hands back, which lives inside the compositor's own render target.
                 // Drawing into it *is* presenting.
-                AppLog.WriteSync("RustStage1: starting surface bring-up on pool thread");
+                AppLog.WriteSync("RustStage1: surface prepare on pool thread");
                 bool ok = false;
                 await System.Threading.Tasks.Task.Run(delegate
                 {
-                    ok = RustRenderer.StartSurface(w, h);
+                    ok = RustRenderer.StartSurfacePrepare(w, h);
                 });
 
-                AppLog.WriteSync("RustStage1: surface bring-up finished, ok=" + ok
-                    + " route=" + RustRenderer.Route + " (" + RustRenderer.RouteName + ")"
-                    + " sis-step=" + RustRenderer.SisStep
-                    + " sis-hr=0x" + RustRenderer.SisHr.ToString("X8")
-                    + " source=0x" + RustRenderer.SisSource.ToInt32().ToString("X8")
-                    + " " + RustRenderer.Diagnose());
+                AppLog.WriteSync("RustStage1: surface prepare finished ok=" + ok
+                    + " tick=" + RustRenderer.Tick + " (" + RustRenderer.TickName + ")");
+
+                // UI thread from here down (this method resumed on it after the await).
+                bool attached = false;
+                if (ok)
+                {
+                    AppLog.WriteSync("RustStage1: surface attach on UI thread");
+                    attached = RustRenderer.StartSurfaceAttach();
+                    AppLog.WriteSync("RustStage1: surface attach finished ok=" + attached
+                        + " route=" + RustRenderer.Route + " (" + RustRenderer.RouteName + ")"
+                        + " sis-step=" + RustRenderer.SisStep
+                        + " sis-hr=0x" + RustRenderer.SisHr.ToString("X8")
+                        + " source=0x" + RustRenderer.SisSource.ToInt32().ToString("X8")
+                        + " " + RustRenderer.Diagnose());
+                }
+                ok = ok && attached;
 
                 // The SurfaceImageSource object exists only if the route came all the way up. If it
                 // did, hand it to XAML (UI thread - it touches XAML).
@@ -189,6 +208,9 @@ namespace Phirura
                 {
                     presented = AttachSurfaceSource(w, h);
                     AppLog.WriteSync("RustStage1: surface attach -> " + presented);
+                    // A live renderer with nothing to show is still a failure - the frame loop would
+                    // run and report fps against an invisible Image.
+                    ok = presented;
                 }
 
                 string route = RustRenderer.RouteName;
@@ -211,7 +233,18 @@ namespace Phirura
                     + (ok ? "  · attach=" + (presented ? "yes" : "no") : "");
                 if (!ok)
                 {
-                    // Do not attach the frame loop to a renderer that never came up.
+                    // Do not attach the frame loop to a renderer that never came up - and release
+                    // whatever half did (a prepared device, or a live one with no XAML source),
+                    // otherwise a failed run leaves a D3D11 device behind on a 512 MB phone. Hand
+                    // XAML's reference back first (same order as TearDown) so the compositor cannot
+                    // be left holding a surface Rust is about to free.
+                    try
+                    {
+                        RustImage.Source = null;
+                        RustImage.Visibility = Visibility.Collapsed;
+                    }
+                    catch (Exception) { }
+                    RustRenderer.Stop();
                     return;
                 }
 

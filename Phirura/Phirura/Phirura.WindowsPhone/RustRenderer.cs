@@ -176,6 +176,26 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_rs_start_surface(uint width, uint height);
 
+        /// <summary>
+        /// The two halves of the route-3 bring-up, split because the two halves have different
+        /// thread requirements.
+        ///
+        /// <b>`_prepare` (any thread)</b> - device, `IDXGIDevice`, pipeline, test texture. This is
+        /// the unbounded half that can fault inside a driver call, so it runs on a pool thread,
+        /// where a hard fault still leaves the UI thread free to flush AppLog's FileIO.
+        ///
+        /// <b>`_attach` (UI thread ONLY)</b> - `RoGetActivationFactory(SurfaceImageSource)`,
+        /// `CreateInstanceWithDimensionsAndOpacity`, `QI(ISurfaceImageSourceNative)`, `SetDevice`.
+        /// `SurfaceImageSource` is a XAML object and carries XAML's thread affinity: measured on
+        /// device, running this half from a pool thread returns
+        /// **`RPC_E_WRONG_THREAD` (`0x8001010E`)** at `CreateInstanceWithDimensionsAndOpacity`.
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_start_surface_prepare(uint width, uint height);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_start_surface_attach();
+
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr wp81_rs_sis_source();
 
@@ -190,20 +210,24 @@ namespace Phirura
 
         private static bool _started;
 
+        /// <summary>
+        /// The device + pipeline half came up but the UI-thread surface half has not run yet.
+        ///
+        /// Kept separate from <see cref="Started"/> so <see cref="Stop"/> still tears down a
+        /// prepare-only state - otherwise a `SetDevice` failure would leak a D3D11 device on a
+        /// 512 MB phone.
+        /// </summary>
+        private static bool _prepared;
+
         public static bool Started { get { return _started; } }
 
         /// <summary>
-        /// Bring the Rust renderer up on the **XAML `SurfaceImageSource`** route - the present path
-        /// that actually works on a WP8.1 phone.
-        ///
-        /// Rust creates the device, activates the WinRT `SurfaceImageSource`, QIs
-        /// `ISurfaceImageSourceNative` and calls `SetDevice`, then builds the full pipeline. The
-        /// <c>IInspectable*</c> to show is read back with <see cref="SisSource"/>.
-        ///
-        /// Runs the native call on the calling thread; the page calls it from a pool thread so the
-        /// UI thread stays alive to flush the log if a native step hard-faults.
+        /// Route 3, stage 1 of 2: device, `IDXGIDevice`, pipeline, test texture. **Call from a pool
+        /// thread.** Touches no WinRT object, so it is safe there - and it is the half that may fault
+        /// inside a driver call, which is exactly why it must NOT run on the UI thread (a fault there
+        /// blocks WinRT FileIO and the log never flushes).
         /// </summary>
-        public static bool StartSurface(uint pixelWidth, uint pixelHeight)
+        public static bool StartSurfacePrepare(uint pixelWidth, uint pixelHeight)
         {
             if (_started)
             {
@@ -211,36 +235,92 @@ namespace Phirura
             }
             try
             {
-                AppLog.WriteSync("RustRenderer.StartSurface: calling native " + pixelWidth + "x" + pixelHeight);
+                AppLog.WriteSync("RustRenderer.Prepare: calling native " + pixelWidth + "x" + pixelHeight);
                 int rc;
                 try
                 {
-                    rc = wp81_rs_start_surface(pixelWidth, pixelHeight);
+                    rc = wp81_rs_start_surface_prepare(pixelWidth, pixelHeight);
                 }
                 catch (Exception ex)
                 {
-                    AppLog.WriteSync("RustRenderer.StartSurface: native threw", ex);
+                    AppLog.WriteSync("RustRenderer.Prepare: native threw", ex);
                     return false;
                 }
-
-                AppLog.WriteSync("RustRenderer.StartSurface: native returned rc=" + rc
+                AppLog.WriteSync("RustRenderer.Prepare: native returned rc=" + rc
                     + " tick=" + Tick + " (" + TickName + ")");
                 if (rc != 0)
                 {
-                    AppLog.WriteSync("RustRenderer.StartSurface: failed rc=" + rc + " " + Diagnose());
+                    AppLog.WriteSync("RustRenderer.Prepare: failed rc=" + rc + " " + Diagnose());
+                    return false;
+                }
+                _prepared = true;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AppLog.WriteSync("RustRenderer.Prepare: FAILED", ex);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Route 3, stage 2 of 2: activate `SurfaceImageSource`, QI its native interface,
+        /// `SetDevice`. **Call from the UI thread only** - see
+        /// <see cref="wp81_rs_start_surface_attach"/>. The <c>IInspectable*</c> to show is read back
+        /// with <see cref="SisSource"/> once this returns true.
+        /// </summary>
+        public static bool StartSurfaceAttach()
+        {
+            if (_started)
+            {
+                return true;
+            }
+            if (!_prepared)
+            {
+                AppLog.WriteSync("RustRenderer.Attach: no prepared device - StartSurfacePrepare first");
+                return false;
+            }
+            try
+            {
+                AppLog.WriteSync("RustRenderer.Attach: calling native (UI thread)");
+                int rc;
+                try
+                {
+                    rc = wp81_rs_start_surface_attach();
+                }
+                catch (Exception ex)
+                {
+                    AppLog.WriteSync("RustRenderer.Attach: native threw", ex);
+                    return false;
+                }
+                AppLog.WriteSync("RustRenderer.Attach: native returned rc=" + rc
+                    + " tick=" + Tick + " (" + TickName + ")"
+                    + " sis-step=" + SisStep + " sis-hr=0x" + SisHr.ToString("X8"));
+                if (rc != 0)
+                {
+                    AppLog.WriteSync("RustRenderer.Attach: failed rc=" + rc + " " + Diagnose());
                     return false;
                 }
 
-                AppLog.WriteSync("RustRenderer.StartSurface: up. route=" + Route
+                AppLog.WriteSync("RustRenderer.Attach: up. route=" + Route
                     + " source=0x" + SisSource.ToInt32().ToString("X8"));
                 _started = true;
                 return true;
             }
             catch (Exception ex)
             {
-                AppLog.WriteSync("RustRenderer.StartSurface: FAILED", ex);
+                AppLog.WriteSync("RustRenderer.Attach: FAILED", ex);
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Both halves in one call, **on the UI thread**. Kept only for callers that cannot split
+        /// the two; the page uses <see cref="StartSurfacePrepare"/> + <see cref="StartSurfaceAttach"/>.
+        /// </summary>
+        public static bool StartSurface(uint pixelWidth, uint pixelHeight)
+        {
+            return StartSurfacePrepare(pixelWidth, pixelHeight) && StartSurfaceAttach();
         }
 
         /// <summary>
@@ -1332,7 +1412,9 @@ namespace Phirura
 
         public static void Stop()
         {
-            if (!_started)
+            // Tear down a *prepare*-only state too: if the UI-thread attach failed, `_started` is
+            // still false but Rust already holds a device. Returning early there would leak it.
+            if (!_started && !_prepared)
             {
                 return;
             }
@@ -1345,6 +1427,7 @@ namespace Phirura
                 AppLog.WriteSync("RustRenderer.Stop", ex);
             }
             _started = false;
+            _prepared = false;
         }
 
         /// <summary>
