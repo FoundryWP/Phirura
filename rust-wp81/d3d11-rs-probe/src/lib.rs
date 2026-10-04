@@ -705,7 +705,10 @@ pub unsafe extern "C" fn wp81_rs_sis_hr() -> i32 {
 /// 10 whether the texture's `GetDevice` is our device (1 same, 0 other, -1 unknown),
 /// 11 which path the frame took (0 direct, 1 own-texture + `CopyResource`, -1 texture refused,
 ///    -2 view refused),
-/// 12 the HRESULT that refused that path. Out-of-range returns -1.
+/// 12 the HRESULT that refused that path,
+/// 13/14 `BeginDraw`'s offset of this frame inside the source's atlas,
+/// 15 whether `IDXGISurface*` and `ID3D11Texture2D*` are the same address (1 same, 0 different,
+///    -1 unknown). Out-of-range returns -1.
 ///
 /// The surface is XAML's, so this is the only channel through which the phone log can explain a
 /// refused view: `E_INVALIDARG` alone does not say whether the format was typeless, the resource

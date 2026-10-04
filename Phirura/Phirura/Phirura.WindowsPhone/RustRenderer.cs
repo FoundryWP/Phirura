@@ -415,7 +415,9 @@ namespace Phirura
                         + " rtv(null)=0x" + unchecked((uint)SisDiag(7)).ToString("X8")
                         + " " + Rtv2Text
                         + " dev=" + DevText
-                        + " path=" + PathText;
+                        + " path=" + PathText
+                        + " off=(" + SisDiag(13) + "," + SisDiag(14) + ")"
+                        + " ptr=" + PtrText;
                 }
                 catch (Exception ex)
                 {
@@ -495,6 +497,25 @@ namespace Phirura
                 // 0 means "direct" only once something tried to make that view; before the first
                 // frame it means nothing has happened yet.
                 return SisDiag(7) == 0 && SisDiag(8) == 0 ? "not attempted yet" : "direct";
+            }
+        }
+
+        /// <summary>
+        /// Whether the <c>IDXGISurface*</c> from <c>BeginDraw</c> and the <c>ID3D11Texture2D*</c>
+        /// from QI are the same address.
+        ///
+        /// If they are, passing either one anywhere is interchangeable and pointer identity was
+        /// never the issue. If they are not, every call that was given the surface pointer where a
+        /// resource was wanted was aimed at the wrong address - which is a *quiet* failure in
+        /// <c>CopyResource</c> (it returns void) and an <c>E_INVALIDARG</c> in
+        /// <c>CreateRenderTargetView</c>, i.e. exactly what the log has been showing.
+        /// </summary>
+        private static string PtrText
+        {
+            get
+            {
+                int p = SisDiag(15);
+                return p == 1 ? "same" : p == 0 ? "DIFFERENT" : "unknown";
             }
         }
 
@@ -1537,7 +1558,12 @@ namespace Phirura
             {
                 return false;
             }
-            wp81_rs_clear(0.10f, 0.11f, 0.13f, 1.0f);
+            // **Bring-up marker, not the product's colour.** Route 3 clears our own texture, which
+            // then has to survive CopyResource + EndDraw to be visible at all - and the previous
+            // value (0.10, 0.11, 0.13 = #1A1C21) is indistinguishable from "nothing was presented"
+            // on a phone screen, so a *working* copy and a broken one looked identical. Cornflower
+            // blue is unmistakable: blue on screen means the whole chain reached the compositor.
+            wp81_rs_clear(0.30f, 0.55f, 0.90f, 1.0f);
             try
             {
                 LastFrameRc = wp81_rs_draw_test_quad();

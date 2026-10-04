@@ -420,6 +420,7 @@ impl SurfaceChain {
     pub unsafe fn inspect_surface(&mut self, device: &ComPtr) {
         self.diag[6] = E_NOINTERFACE;
         self.diag[10] = -1; // not known, unless the QI below gets far enough to ask
+        self.diag[15] = -1; // likewise: no texture pointer yet, so no identity to compare
         if self.frame_surface.is_null() {
             return;
         }
@@ -435,6 +436,7 @@ impl SurfaceChain {
                 *slot = 0;
             }
             return;
+        }
         let get_desc: extern "system" fn(*mut c_void, *mut D3D11_TEXTURE2D_DESC) =
             tex.method(ID3D11TEXTURE2D_GETDESC);
         let mut d = D3D11_TEXTURE2D_DESC::default();
