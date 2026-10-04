@@ -1365,6 +1365,33 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
     // `set_tick` (not `bump(s, ..)`) because `p` holds an immutable borrow of `s.pipeline` here.
     set_tick(60); // frame: Map(constant buffer) + Map(vertex buffer) + bind + Draw(4)
 
+    // ---- which experiment this frame runs -------------------------------------------------
+    //
+    // The readback window is five frames long, and one looking at a screen cannot test one
+    // hypothesis per deploy. So each of those frames varies exactly one pipeline setting and the
+    // pixels say which setting was hiding the quad:
+    //
+    //   0 baseline — textured, alpha-blended, projection as designed
+    //   1 no blend — `OMSetBlendState(NULL)` is D3D11's default, an *opaque copy*. If the quad
+    //                 appears, blending was eating it: the pixel shader's output alpha was < 1.
+    //                 If it appears **black**, the shader output zero, i.e. the texture is the
+    //                 fault and the blend was merely hiding the zero.
+    //   2 no blend + quad stretched to fill clip space
+    //   3           + quad stretched to fill clip space (blending as normal)
+    //
+    // Variants 2/3 remove position as an explanation: a quad spanning `-1..1` cannot be off screen,
+    // so a screen that still shows only the clear colour with it would be a draw that never
+    // rasterized rather than one drawn somewhere else. All four use objects the pipeline already
+    // has, so no experiment can fail by not being able to build itself.
+    //
+    // The variant equals the `pixel_seq` the probe will log for this frame, so the log line and
+    // the experiment it belongs to cannot drift apart.
+    let variant: i32 = if s.surface.pixel_seq < 4 {
+        s.surface.pixel_seq + 1
+    } else {
+        0
+    };
+
     // ---- open the compositor's frame, and target the surface it hands back -----------------
     //
     // On route 1 (offscreen) we draw into our own texture. On route 3 (XAML SurfaceImageSource)
@@ -1462,7 +1489,20 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
         return 1;
     }
     let aspect = s.height as f32 / s.width as f32;
-    let proj = projection(aspect);
+    // Variants 2/3 stretch the quad to the whole of clip space. Same layout convention as
+    // `projection`: HLSL reads this column-major, so `mul(v, M)` comes out as `x' = 2x`,
+    // `y' = 2y`, `z' = z`, `w' = 1`.
+    const WIDE_PROJ: [f32; 16] = [
+        2.0, 0.0, 0.0, 0.0, //
+        0.0, 2.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let proj = if variant == 2 || variant == 3 {
+        WIDE_PROJ
+    } else {
+        projection(aspect)
+    };
     core::ptr::copy_nonoverlapping(
         proj.as_ptr() as *const u8,
         mapped.pData as *mut u8,
@@ -1559,7 +1599,14 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
 
     let set_blend: extern "system" fn(*mut c_void, *mut c_void, *const FLOAT, UINT) =
         ctx.method(D3D11CONTEXT_OMSETBLENDSTATE);
-    set_blend(ctx.vtbl as *mut c_void, p.blend.vtbl as *mut c_void, core::ptr::null(), 0xffffffff);
+    // Variants 1/2 bind *no* blend state. Passing null asks for D3D11's default, which is an
+    // opaque copy with no blending at all — the one setting that makes whatever the pixel shader
+    // produced reach the surface untouched, which is what the whole experiment is asking.
+    if variant == 1 || variant == 2 {
+        set_blend(ctx.vtbl as *mut c_void, core::ptr::null_mut(), core::ptr::null(), 0xffffffff);
+    } else {
+        set_blend(ctx.vtbl as *mut c_void, p.blend.vtbl as *mut c_void, core::ptr::null(), 0xffffffff);
+    }
 
     let set_raster: extern "system" fn(*mut c_void, *mut c_void) =
         ctx.method(D3D11CONTEXT_RSSETSTATE);

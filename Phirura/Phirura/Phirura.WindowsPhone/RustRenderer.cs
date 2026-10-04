@@ -473,7 +473,7 @@ namespace Phirura
             {
                 try
                 {
-                    return "px seq=" + PxSeq
+                    return "px seq=" + PxSeq + " [" + VariantName + "]"
                         + " st=" + Vd(7)
                         + " | top=" + PxHex(0) + " mid=" + PxHex(1)
                         + " mid2=" + PxHex(2) + " bot=" + PxHex(3)
@@ -485,6 +485,31 @@ namespace Phirura
                 catch (Exception ex)
                 {
                     return "px unavailable: " + ex.Message;
+                }
+            }
+        }
+
+        /// <summary>
+        /// What the frame behind a probe sequence was asked to do.
+        ///
+        /// The readback window runs one experiment per frame, and the variant number <em>is</em> the
+        /// sequence number (see the table in <c>draw_test_quad</c>), so a log line and the experiment
+        /// it describes cannot drift apart. Sequence 4 repeats the baseline as a control: if its
+        /// pixels differ from sequence 0's, the measurement is unstable and neither should be read
+        /// as a finding.
+        /// </summary>
+        private static string VariantName
+        {
+            get
+            {
+                switch (PxSeq)
+                {
+                    case 0: return "baseline";
+                    case 1: return "no-blend";
+                    case 2: return "no-blend+wide";
+                    case 3: return "wide";
+                    case 4: return "control-baseline";
+                    default: return PxSeq < 0 ? "no-readback" : "idle";
                 }
             }
         }
