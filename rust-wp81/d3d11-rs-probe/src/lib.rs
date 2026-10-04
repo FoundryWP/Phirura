@@ -16,6 +16,7 @@
 //!
 //! * `direct.rs`   - the binding: types, constants, vtable slots, all taken from the kit's headers.
 //! * `renderer.rs` - device, swapchain, shaders, pipeline, the quad.
+//! * `scene.rs`    - Stage 3: decode, validate and replay a recorded frame's `PortCmd` stream.
 //! * this file     - the `#[no_mangle]` entry points the C# side calls.
 //!
 //! ## The entry points
@@ -33,6 +34,7 @@
 
 pub mod direct;
 pub mod renderer;
+pub mod scene;
 pub mod surface_source;
 
 use core::ffi::c_void;

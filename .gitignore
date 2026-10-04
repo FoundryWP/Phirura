@@ -20,5 +20,23 @@
 # Build output, not source.
 phira-main/**/target/
 
+# Same for the port's own crates. `rust-wp81/shims/{macroquad,miniquad}/.gitignore` already say
+# `target/`, but those files are untracked and the directories were committed before they existed,
+# so a rule here is what actually keeps them out.
+#
+# Listed one crate at a time rather than as `rust-wp81/**/target/`, because that pattern also
+# matches `rust-wp81/work/library/vendor/cc-1.4.3/src/target/` - which is *source* (apple.rs,
+# llvm.rs, parser.rs, ...), not build output. A new crate needs a line here.
+rust-wp81/compat/target/
+rust-wp81/d3d11-rs-probe/target/
+rust-wp81/link-probe/target/
+rust-wp81/shims/macroquad/target/
+rust-wp81/shims/miniquad/target/
+rust-wp81/shims/rfd/target/
+rust-wp81/shims/sasa/target/
+
 # Written by rust-wp81/build-m1.ps1 next to the script.
 *.log
+
+prpr-macroquad/
+prpr-miniquad/

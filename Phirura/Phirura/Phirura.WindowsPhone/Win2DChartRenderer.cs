@@ -260,6 +260,10 @@ namespace Phirura.Game
             {
                 if (_hitFxPerfect != null) { _hitFxPerfect.Dispose(); _hitFxPerfect = null; }
                 if (_hitFxGood != null) { _hitFxGood.Dispose(); _hitFxGood = null; }
+                // The port's carriers go with them for the same reason: they are GPU resources
+                // holding a whole chart's sprites plus the glyph atlas, and a page that has gone
+                // away has no use for either.
+                DisposePortTextures();
             }
             catch (Exception)
             {
@@ -750,11 +754,65 @@ namespace Phirura.Game
         // sources of truth for the camera.
         // ==================================================================
 
-        /// <summary>Rust texture id -> bitmap, built lazily from the shim's registry.</summary>
-        private readonly Dictionary<uint, CanvasBitmap> _portTextures =
-            new Dictionary<uint, CanvasBitmap>();
+        /// <summary>
+        /// One Rust texture and the carrier the shell draws it from.
+        ///
+        /// The carrier is a <see cref="CanvasRenderTarget"/> for *every* texture, not only for the
+        /// atlas. A <see cref="CanvasBitmap"/> is immutable, so patching one glyph would mean
+        /// rebuilding the whole image; and keeping both carrier types would double every draw
+        /// site's branch for no gain - they cost the same in memory, and both reach the draw calls
+        /// through <see cref="ICanvasImage"/>.
+        /// </summary>
+        private sealed class PortTexture
+        {
+            /// <summary>The image that is actually drawn - the same object as <see cref="Target"/>.</summary>
+            public CanvasRenderTarget Target;
 
-        /// <summary>True once the port's textures have been resolved for the current game.</summary>
+            /// <summary>
+            /// The atlas's pixel size, fixed when the carrier is built.
+            ///
+            /// Read here rather than from the image because uv and the drain's source rectangles
+            /// are *atlas* pixels. If the carrier's own metrics ever disagreed (a dpi change, a
+            /// device-loss rebuild) this keeps the glyphs correctly sized instead of scaling them
+            /// silently, and the mismatch is logged when the carrier is created.
+            /// </summary>
+            public uint PixelWidth;
+            public uint PixelHeight;
+
+            public void Dispose()
+            {
+                if (Target != null)
+                {
+                    Target.Dispose();
+                    Target = null;
+                }
+            }
+        }
+
+        /// <summary>Rust texture id -> carrier, mirroring the shim's registry one for one.</summary>
+        private readonly Dictionary<uint, PortTexture> _portTextures =
+            new Dictionary<uint, PortTexture>();
+
+        /// <summary>
+        /// Reused across frames so that an idle poll allocates nothing; grows only when the
+        /// registry gains ids, which its 128 slots bound.
+        /// </summary>
+        private uint[] _portIds;
+
+        /// <summary>
+        /// Latched when the DLL turns out not to export the incremental pair. Without the latch a
+        /// missing symbol would be thrown once per texture per frame - an exception is far more
+        /// expensive than the poll it replaces, so the first miss has to end the polling for good.
+        /// </summary>
+        private bool _portDirtyUnsupported;
+
+        /// <summary>
+        /// True once the legacy one-shot full read has run.
+        ///
+        /// Only the fallback reads this: the incremental path is stateless by design (see
+        /// <c>wp81_texture_dirty</c>), and a latch in it would recreate the exact bug this replaces
+        /// - a texture that is never read again after the first frame.
+        /// </summary>
         private bool _portTexturesReady;
 
         /// <summary>Set by <see cref="DrawPortFrame"/>; the next draw replays this instead of the chart.</summary>
@@ -767,12 +825,33 @@ namespace Phirura.Game
         /// <summary>
         /// Forgets the port's textures. Call when the game is destroyed: the next game allocates its
         /// own ids and reusing these would draw the previous chart's sprites.
+        ///
+        /// Also the point at which the fallback's latch comes off, because the ids the next game
+        /// hands out are new to the shell and the full read is what the first frame of a new game is
+        /// supposed to do. Clearing the dictionary alone would leave that half of the state behind.
         /// </summary>
         public void ResetPortTextures()
         {
-            _portTextures.Clear();
+            DisposePortTextures();
             _portTexturesReady = false;
             _portFrame = null;
+        }
+
+        /// <summary>
+        /// Releases the carriers.
+        ///
+        /// They are D3D resources, not managed byte arrays: dropping the dictionary reference alone
+        /// would leave 4 MiB render targets to a finalizer that may never run on a phone, and they
+        /// must not outlive the chart that produced them regardless.
+        /// </summary>
+        private void DisposePortTextures()
+        {
+            foreach (KeyValuePair<uint, PortTexture> kv in _portTextures)
+            {
+                kv.Value.Dispose();
+            }
+            _portTextures.Clear();
+            PortTexturesBound = 0;
         }
 
         /// <summary>
@@ -844,10 +923,10 @@ namespace Phirura.Game
 
         private void DrawPortTexture(CanvasDrawingSession ds, PrprPort.PortCmd c)
         {
-            CanvasBitmap bmp;
-            if (!_portTextures.TryGetValue(c.flags, out bmp) || bmp == null)
+            PortTexture tex;
+            if (!_portTextures.TryGetValue(c.flags, out tex) || tex == null || tex.Target == null)
             {
-                // No bitmap for this id - the shell never loaded it, or the registry dropped it.
+                // No carrier for this id - the shell never loaded it, or the registry dropped it.
                 // Skipping is right: an untextured quad is noise, not a missing-no warning.
                 return;
             }
@@ -862,10 +941,11 @@ namespace Phirura.Game
             bool flipX = (c.kind & (1u << 16)) != 0;
             bool flipY = (c.kind & (1u << 17)) != 0;
 
-            // Source rect in the bitmap's own pixel space. The flip flags are folded into the
+            // Source rect in the carrier's own pixel space. The flip flags are folded into the
             // destination rectangle instead of the source, because Win2D.win81's DrawImage takes the
             // source as an axis-aligned Rect and cannot mirror it.
             Rect source = new Rect(sx, sy, sw, sh);
+            ICanvasImage image = tex.Target;
 
             Matrix3x2 saved = ds.Transform;
             if (flipX || flipY)
@@ -874,12 +954,12 @@ namespace Phirura.Game
                 float cy = dy + dh / 2f;
                 ds.Transform = Matrix3x2.CreateScale(flipX ? -1f : 1f, flipY ? -1f : 1f)
                              * Matrix3x2.CreateTranslation(cx, cy);
-                ds.DrawImage(bmp, new Rect(-dw / 2f, -dh / 2f, dw, dh), source, 1f, CanvasImageInterpolation.Linear);
+                ds.DrawImage(image, new Rect(-dw / 2f, -dh / 2f, dw, dh), source, 1f, CanvasImageInterpolation.Linear);
                 ds.Transform = saved;
             }
             else
             {
-                ds.DrawImage(bmp, new Rect(dx, dy, dw, dh), source, 1f, CanvasImageInterpolation.Linear);
+                ds.DrawImage(image, new Rect(dx, dy, dw, dh), source, 1f, CanvasImageInterpolation.Linear);
             }
         }
 
@@ -932,15 +1012,22 @@ namespace Phirura.Game
         }
 
         /// <summary>
-        /// Fills one triangle. Textured when the batch names a bitmap the shell has, flat-coloured
+        /// Fills one triangle. Textured when the batch names a carrier the shell has, flat-coloured
         /// otherwise - which is what `prpr`'s untextured note bodies rely on.
+        ///
+        /// The image arrives as <see cref="ICanvasImage"/> rather than as either concrete type
+        /// because both <see cref="CanvasBitmap"/> and <see cref="CanvasRenderTarget"/> satisfy it
+        /// and the fill needs nothing beyond "draw this, from that source rectangle". The size does
+        /// *not* come from the image: uv is relative to the atlas, whose pixel size was fixed when
+        /// the carrier was built, and asking the image how big it is would silently re-derive that
+        /// from its metrics the moment the two ever disagreed.
         /// </summary>
         private void FillPortTriangle(CanvasDrawingSession ds, PrprPort.PortVertex a,
                                       PrprPort.PortVertex b, PrprPort.PortVertex c,
                                       uint texId, bool hasTex)
         {
-            CanvasBitmap bmp;
-            if (hasTex && _portTextures.TryGetValue(texId, out bmp) && bmp != null)
+            PortTexture tex;
+            if (hasTex && _portTextures.TryGetValue(texId, out tex) && tex != null && tex.Target != null)
             {
                 // Win2D.win81 has no arbitrary-triangle texture fill, so the batch is approximated by
                 // its bounding quad. `prpr`'s note sprites are axis-aligned quads in practice, which
@@ -957,10 +1044,11 @@ namespace Phirura.Game
                 float v0 = Math.Min(a.v, Math.Min(b.v, c.v));
                 float u1 = Math.Max(a.u, Math.Max(b.u, c.u));
                 float v1 = Math.Max(a.v, Math.Max(b.v, c.v));
-                ds.DrawImage(bmp,
+                ICanvasImage image = tex.Target;
+                ds.DrawImage(image,
                     new Rect(minX, minY, maxX - minX, maxY - minY),
-                    new Rect(u0 * bmp.SizeInPixels.Width, v0 * bmp.SizeInPixels.Height,
-                             (u1 - u0) * bmp.SizeInPixels.Width, (v1 - v0) * bmp.SizeInPixels.Height),
+                    new Rect(u0 * tex.PixelWidth, v0 * tex.PixelHeight,
+                             (u1 - u0) * tex.PixelWidth, (v1 - v0) * tex.PixelHeight),
                     1f, CanvasImageInterpolation.Linear);
                 return;
             }
@@ -984,12 +1072,379 @@ namespace Phirura.Game
         }
 
         /// <summary>
-        /// Resolves every id the Rust shim has registered into a <see cref="CanvasBitmap"/>.
+        /// Largest patch one sync step builds, in pixels.
         ///
-        /// Runs once per game. Ids are allocated where the shim sees pixels, so the only way to learn
-        /// them is to ask - see <see cref="PrprPort.ReadTextures"/>.
+        /// Not a speed optimisation - the work is the same either way - but a *peak* one. A whole
+        /// 1024x1024 atlas is 1,048,576 pixels, and building that as one Color[] (4 MiB) beside the
+        /// byte[] copy (4 MiB) and the intermediate patch bitmap (4 MiB) borrows 12 MiB all at once
+        /// on a phone whose budget is counted in tens. Banding keeps the very same upload path and
+        /// only asks for a slice of that; a delta smaller than the band never notices it is there.
+        /// </summary>
+        private const uint MaxSyncBandPixels = 262144;
+
+        /// <summary>
+        /// Brings the shell's copy of the Rust textures up to date. Called once per frame.
+        ///
+        /// It used to run once and latch. That is right for chart art - bytes uploaded once and
+        /// never touched again - and wrong for the glyph atlas, because `prpr` rasterises a
+        /// judgement word's glyph the first time that word is *shown*: the latch is exactly why the
+        /// text appearing during play never drew. Polling costs one `count`, one `id_at` and one
+        /// `dirty` per texture and copies nothing unless something moved, so a frame on which no new
+        /// glyph appeared pays a few dozen native calls and not one byte.
+        ///
+        /// First sight of an id = full initialisation; every later hit = a delta over the rectangle
+        /// Rust reports. Both go through the same <see cref="SyncPortTexture"/>, so a delta that
+        /// happens to cover the whole texture *is* the initialisation - there is no second
+        /// implementation to keep in step, and the one only the phone runs is never the one that
+        /// rots.
         /// </summary>
         private void EnsurePortTextures(CanvasDrawingSession ds)
+        {
+            if (_portDirtyUnsupported)
+            {
+                try
+                {
+                    LoadPortTexturesOnce(ds);
+                }
+                catch (Exception ex)
+                {
+                    // Reached only if the DLL itself is unusable - the fallback calls nothing but
+                    // exports that already existed - and `LoadPortTexturesOnce` latches before it
+                    // reads anything, so this reports the failure once instead of throwing on every
+                    // frame after it.
+                    AppLog.WriteSync("Win2D: port texture fallback failed", ex);
+                }
+                return;
+            }
+
+            try
+            {
+                int total = PrprPort.TextureCount();
+                if (total > 0)
+                {
+                    if (_portIds == null || _portIds.Length < total)
+                    {
+                        // Grows with the registry and never per frame.
+                        _portIds = new uint[total];
+                    }
+                    PrprPort.CopyTextureIds(_portIds, total);
+
+                    for (int i = 0; i < total; i++)
+                    {
+                        uint id = _portIds[i];
+                        if (id != 0)
+                        {
+                            PollPortTexture(ds, id);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!MissingExport(ex))
+                {
+                    AppLog.WriteSync("Win2D: port texture poll failed", ex);
+                    return;
+                }
+
+                // The two incremental exports are still being added to the DLL. Swallowing that once
+                // and switching to the full read keeps the app running with today's behaviour; not
+                // latching it would instead throw once per texture per frame, and an exception is
+                // far more expensive than the poll it replaces.
+                AppLog.WriteSync("Win2D: incremental texture sync is not exported yet ("
+                    + ex.GetType().Name + "); using the one-shot full read");
+                DisposePortTextures();
+                _portTexturesReady = false;
+                _portDirtyUnsupported = true;
+                return;
+            }
+
+            PortTexturesBound = _portTextures.Count;
+        }
+
+        /// <summary>
+        /// True for "the DLL does not export that symbol", which is a scheduling problem rather than
+        /// a bug: the Rust side is landing those two exports, and until it does the shell has to
+        /// degrade instead of failing. Everything else is a real failure and is logged as one.
+        ///
+        /// Matched on the type's *name* because `EntryPointNotFoundException` is not in the
+        /// WindowsPhoneApp 8.1 reference set - naming it does not compile, even though it is what
+        /// the CLR throws for a P/Invoke with no matching export. `DllNotFoundException` is in the
+        /// set but goes through the same loop so that one mechanism covers both, and the walk over
+        /// `InnerException` costs nothing on the only path where it runs.
+        /// </summary>
+        private static bool MissingExport(Exception ex)
+        {
+            for (Exception e = ex; e != null; e = e.InnerException)
+            {
+                string name = e.GetType().Name;
+                if (name == "EntryPointNotFoundException" || name == "DllNotFoundException")
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// One id's contribution to this frame: nothing at all, a delta, or a first full read.
+        /// </summary>
+        private void PollPortTexture(CanvasDrawingSession ds, uint id)
+        {
+            // Asked first, on every path, and for its side effect rather than its answer: an id the
+            // shell has never built must still consume its pending rectangle, because Rust reports a
+            // fresh registration as fully dirty and leaving the flag standing would ask for the same
+            // full read again on the very next frame.
+            PrprPort.TexRect rect;
+            bool changed = PrprPort.TextureDirty(id, out rect);
+
+            PortTexture pt;
+            if (!_portTextures.TryGetValue(id, out pt) || pt == null || pt.Target == null)
+            {
+                uint w, h;
+                if (!PrprPort.TextureSize(id, out w, out h))
+                {
+                    return;
+                }
+                pt = CreatePortTexture(ds, id, w, h);
+                if (pt == null)
+                {
+                    return;
+                }
+                _portTextures[id] = pt;
+
+                // The whole texture, whatever the dirty read said. For a fresh registration the two
+                // agree by contract; where they do not - the flag was drained somewhere else first -
+                // only a full read leaves a carrier that is not half blank, and either way this runs
+                // once per texture.
+                SyncPortTexture(ds, id, pt, 0, 0, w, h, null);
+                return;
+            }
+
+            if (!changed || rect.W == 0 || rect.H == 0)
+            {
+                return;
+            }
+
+            if ((ulong)rect.X + rect.W > pt.PixelWidth || (ulong)rect.Y + rect.H > pt.PixelHeight)
+            {
+                // The registry's extent for this id no longer fits the carrier. `prpr` rebuilds its
+                // glyph cache larger when glyph-brush runs out of room (`BrushError::TextureTooSmall`),
+                // so this is a real path rather than a defensive one. Patching is impossible when
+                // the geometry itself changed, so the carrier is replaced and re-read whole - the one
+                // case where a large rebuild during play cannot be avoided, and precisely the rebuild
+                // the dirty rectangle exists to prevent everywhere else. The log line below is what
+                // will say whether it ever happens.
+                uint w, h;
+                pt.Dispose();
+                _portTextures.Remove(id);
+                if (!PrprPort.TextureSize(id, out w, out h))
+                {
+                    return;
+                }
+                pt = CreatePortTexture(ds, id, w, h);
+                if (pt == null)
+                {
+                    return;
+                }
+                _portTextures[id] = pt;
+                SyncPortTexture(ds, id, pt, 0, 0, w, h, null);
+                return;
+            }
+
+            // The incremental case: a rectangle that is usually a few hundred pixels of glyph.
+            SyncPortTexture(ds, id, pt, rect.X, rect.Y, rect.W, rect.H, null);
+        }
+
+        /// <summary>
+        /// Builds the empty carrier a texture will be patched into.
+        ///
+        /// 96 dpi is pinned rather than inherited. The drain hands over *pixel* coordinates, and the
+        /// uv maths multiplies by <see cref="PortTexture.PixelWidth"/>; Win2D measures a source
+        /// rectangle in the image's dips, so the two readings only coincide when one dip is one
+        /// pixel. A carrier built at the device's dpi would scale every glyph quad by the dpi ratio
+        /// and nothing would fail loudly enough to say why.
+        /// </summary>
+        private PortTexture CreatePortTexture(CanvasDrawingSession ds, uint id, uint w, uint h)
+        {
+            if (w == 0 || h == 0)
+            {
+                return null;
+            }
+
+            try
+            {
+                CanvasRenderTarget target = new CanvasRenderTarget(ds.Device, w, h, 96f);
+                if (target.SizeInPixels.Width != w || target.SizeInPixels.Height != h)
+                {
+                    // Logged rather than assumed: there is no device to check this on while the code
+                    // is being written, and a carrier whose pixel size is not the atlas's is the one
+                    // mistake that shows up only as text that is subtly the wrong size.
+                    AppLog.WriteSync("Win2D: port texture " + id + " carrier is "
+                        + target.SizeInPixels.Width + "x" + target.SizeInPixels.Height
+                        + ", atlas is " + w + "x" + h);
+                }
+
+                PortTexture pt = new PortTexture();
+                pt.Target = target;
+                pt.PixelWidth = w;
+                pt.PixelHeight = h;
+                return pt;
+            }
+            catch (Exception ex)
+            {
+                AppLog.WriteSync("Win2D: port texture " + id + " carrier " + w + "x" + h + " failed", ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Copies one rectangle of a texture from the Rust registry into its carrier - in bands - and
+        /// records what that cost.
+        ///
+        /// This is the only upload path. An initial full read hands it the whole texture, a delta
+        /// hands it the rectangle Rust named, and banding simply means "one call covering the whole
+        /// texture" is implemented as "several calls that add up to it". One path is the point: two
+        /// would drift, and the drifting one is always the version only the phone runs.
+        ///
+        /// <paramref name="preload"/> passes in bytes the caller already holds (the legacy full read)
+        /// so that path never copies the same pixels twice.
+        ///
+        /// The log line is the entire evidence for whether the dirty-rectangle design earns its keep.
+        /// A delta that stays small is the design working; a delta that comes back full-size during
+        /// play means Rust is unioning more than one frame's uploads; a `ms` that climbs means the
+        /// band budget needs revisiting. Nothing else in the system can answer those questions.
+        /// </summary>
+        private void SyncPortTexture(CanvasDrawingSession ds, uint id, PortTexture pt,
+                                     uint x, uint y, uint w, uint h, byte[] preload)
+        {
+            if (w == 0 || h == 0 || pt.Target == null)
+            {
+                return;
+            }
+
+            bool full = x == 0 && y == 0 && w == pt.PixelWidth && h == pt.PixelHeight;
+            long bytes = 0;
+            System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                using (CanvasDrawingSession target = pt.Target.CreateDrawingSession())
+                {
+                    uint row = 0;
+                    while (row < h)
+                    {
+                        uint band = preload != null ? h : BandRows(w, h - row);
+                        byte[] rgba = preload;
+                        if (rgba == null)
+                        {
+                            PrprPort.TexRect bandRect;
+                            bandRect.X = x;
+                            bandRect.Y = y + row;
+                            bandRect.W = w;
+                            bandRect.H = band;
+                            rgba = PrprPort.ReadTextureRect(id, bandRect);
+                            if (rgba == null)
+                            {
+                                // Already logged by the reader. Returning rather than carrying on
+                                // leaves the rest of the rectangle stale but intact, which reads as
+                                // old glyphs instead of half a word.
+                                return;
+                            }
+                        }
+                        bytes += rgba.Length;
+                        PaintPortBand(ds.Device, target, x, y + row, w, band, rgba);
+                        row += band;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                if (MissingExport(ex))
+                {
+                    // Re-thrown so the poll above turns it into the legacy path *once*, instead of
+                    // here once per frame.
+                    throw;
+                }
+                AppLog.WriteSync("Win2D: port texture " + id + " sync failed", ex);
+            }
+            finally
+            {
+                clock.Stop();
+                AppLog.WriteSync("Win2D: port texture " + id
+                    + (full ? " init" : " delta")
+                    + " rect=(" + x + "," + y + "," + w + "," + h + ")"
+                    + " bytes=" + bytes
+                    + " ms=" + clock.ElapsedMilliseconds);
+            }
+        }
+
+        /// <summary>How many rows a band may hold so it stays inside <see cref="MaxSyncBandPixels"/>.</summary>
+        private static uint BandRows(uint width, uint rowsWanted)
+        {
+            uint rows = width == 0 ? rowsWanted : MaxSyncBandPixels / width;
+            if (rows == 0)
+            {
+                // A texture wider than the band budget still has to be read, one row at a time.
+                rows = 1;
+            }
+            return rows > rowsWanted ? rowsWanted : rows;
+        }
+
+        /// <summary>
+        /// Blends one band's pixels into the carrier at its atlas coordinates.
+        ///
+        /// The source rectangle is the patch's own <c>Bounds</c> rather than its pixel size: source
+        /// rectangles are measured in the *image's* dips, and the patch is an intermediate whose dpi
+        /// the caller does not control. The destination is measured in the carrier's dips, and the
+        /// carrier is pinned to 96 dpi - so the atlas pixel coordinates the drain and the uv maths
+        /// produce are dips there too, and the two halves agree without either side converting.
+        /// Nearest-neighbour rather than linear because this is a byte-for-byte copy at 1:1 and any
+        /// filtering would invent pixels the Rust side never wrote.
+        ///
+        /// CreateFromColors rather than CreateFromBytes: Win2D's WP8.1 fork only exposes
+        /// CreateFromBytes with a DirectXPixelFormat argument, and that enum lives in
+        /// Windows.Graphics.DirectX, which does not exist on WP8.1 (no winmd declares it).
+        /// </summary>
+        private static void PaintPortBand(ICanvasResourceCreator dev, CanvasDrawingSession target,
+                                          uint x, uint y, uint w, uint h, byte[] rgba)
+        {
+            int pixelCount = (int)((long)w * h);
+            Color[] pixels = new Color[pixelCount];
+            for (int p = 0; p < pixelCount; p++)
+            {
+                int o = p * 4;
+                if (o + 3 >= rgba.Length)
+                {
+                    break;
+                }
+                pixels[p] = Color.FromArgb(rgba[o + 3], rgba[o + 0], rgba[o + 1], rgba[o + 2]);
+            }
+
+            using (CanvasBitmap patch = CanvasBitmap.CreateFromColors(dev, pixels, (int)w, (int)h))
+            {
+                target.DrawImage(patch,
+                    new Rect(x, y, w, h),
+                    patch.Bounds,
+                    1f,
+                    CanvasImageInterpolation.NearestNeighbor);
+            }
+        }
+
+        /// <summary>
+        /// The one-shot full read, kept for the single case where the DLL does not export the
+        /// incremental pair yet.
+        ///
+        /// Every reason it is no longer the main path is in <see cref="EnsurePortTextures"/>: it
+        /// copies the whole registry into managed memory (24 MiB on the 190 chart) and it can never
+        /// see a byte that arrives afterwards, which is the whole of where text comes from. It is
+        /// still the right answer when there is nothing to poll with, and it runs at most once -
+        /// <see cref="_portTexturesReady"/> exists so that the fallback cannot degenerate into a
+        /// per-frame full copy, which would be far worse than the bug it replaces.
+        ///
+        /// It reuses the same carrier and the same <see cref="SyncPortTexture"/> as the polling path,
+        /// handing the bytes it already read in as <c>preload</c> so they are not copied a second time.
+        /// </summary>
+        private void LoadPortTexturesOnce(CanvasDrawingSession ds)
         {
             if (_portTexturesReady)
             {
@@ -1005,30 +1460,13 @@ namespace Phirura.Game
                 {
                     continue;
                 }
-                try
+                PortTexture pt = CreatePortTexture(ds, t.Id, t.Width, t.Height);
+                if (pt == null)
                 {
-                    // Win2D's WP8.1 fork only exposes CreateFromBytes with a DirectXPixelFormat
-                    // argument, and that enum lives in Windows.Graphics.DirectX, which does not
-                    // exist on WP8.1 (no winmd declares it). CreateFromColors takes plain
-                    // Windows.UI.Color values instead, so build the pixel array from RGBA bytes.
-                    int pixelCount = (int)(t.Width * t.Height);
-                    Color[] pixels = new Color[pixelCount];
-                    for (int p = 0; p < pixelCount; p++)
-                    {
-                        int o = p * 4;
-                        if (o + 3 >= t.Rgba.Length)
-                        {
-                            break;
-                        }
-                        pixels[p] = Color.FromArgb(t.Rgba[o + 3], t.Rgba[o + 0], t.Rgba[o + 1], t.Rgba[o + 2]);
-                    }
-                    _portTextures[t.Id] = CanvasBitmap.CreateFromColors(
-                        ds.Device, pixels, (int)t.Width, (int)t.Height);
+                    continue;
                 }
-                catch (Exception ex)
-                {
-                    AppLog.WriteSync("Win2D: port texture " + t.Id + " failed", ex);
-                }
+                _portTextures[t.Id] = pt;
+                SyncPortTexture(ds, t.Id, pt, 0, 0, t.Width, t.Height, t.Rgba);
             }
             PortTexturesBound = _portTextures.Count;
         }

@@ -74,6 +74,49 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern uint wp81_texture_overflow();
 
+        // The incremental half of that same registry.
+        //
+        // The four calls above answer "what does this texture look like", which is all chart art
+        // needs: those bytes are uploaded once and never change afterwards. The glyph atlas is the
+        // opposite. `prpr` fills it a rectangle at a time through `glTexSubImage2D`, and a word's
+        // glyph is rasterised the first time that word is *shown* - so the atlas keeps changing
+        // while the player is playing, and a reader that runs once can only ever see the glyphs
+        // that happened to exist at start-up.
+        //
+        // WHY A DIRTY RECTANGLE AND NOT A VERSION NUMBER. A version answers "something changed"
+        // and nothing else, and the only thing the shell can do with that is rebuild the whole
+        // carrier: a 1024x1024 atlas is a million `Color.FromArgb` plus one `CreateFromColors`,
+        // tens of milliseconds of hitch at the exact moment judgement text appears on screen. The
+        // rectangle *is* the change - unioned on the Rust side across every upload in a frame - so
+        // one sync per frame touches only the pixels that moved, and a new glyph costs a few
+        // hundred pixels instead of a million.
+        //
+        // WHY READING IT CLEARS IT. A "last synced" stamp kept here in C# would be a second ledger
+        // of the same fact, and two ledgers drift: the discrepancy never reproduces on the desktop
+        // and only ever shows up on the phone. Consuming the flag on read leaves all the state on
+        // the side that owns the pixels, so neither side has to remember what the other saw.
+
+        /// <summary>
+        /// The rectangle written to <c>id</c> since the previous call that passed a real buffer.
+        ///
+        /// Returns 1 and writes `(x, y, w, h)` as four `u32`s at <paramref name="outRect"/>, 0 when
+        /// nothing is pending, -1 when the id is not registered. A newly registered texture reports
+        /// its whole extent on its first call, which is what lets the caller treat "new" and
+        /// "changed" as one rule. The read consumes: the next call for the same id answers 0 unless
+        /// something was written in between.
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_texture_dirty(uint id, IntPtr outRect);
+
+        /// <summary>
+        /// Copies the RGBA bytes of one sub-rectangle of <c>id</c>.
+        ///
+        /// Returns the byte count, -1 for an unknown id, -2 when <paramref name="cap"/> is too small
+        /// (or <paramref name="outBytes"/> is null), -3 when the rectangle lies outside the texture.
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_texture_rect_data(uint id, uint x, uint y, uint w, uint h, IntPtr outBytes, uint cap);
+
         // --- the game host -------------------------------------------------
         //
         // This is the real thing: `wp81_game_create` builds a `prpr::scene::GameScene` from the
@@ -491,6 +534,13 @@ namespace Phirura
         ///
         /// Call after <c>wp81_game_create</c> (the chart's textures are registered during the scene
         /// build) and rebuild the bitmaps whenever the count grows.
+        ///
+        /// This is the *fallback*, not the main path: it copies every texture in the registry into
+        /// managed memory at once, and it can never see a byte that arrives afterwards - which is
+        /// where every glyph comes from. The renderer reaches for it only while the incremental
+        /// pair below is not exported yet, and only once. Kept rather than deleted because "read
+        /// the whole registry in one go" is still the right answer when there is nothing to poll
+        /// with, and a dead branch that still compiles is how that stays true.
         /// </summary>
         public static System.Collections.Generic.List<TextureData> ReadTextures()
         {
@@ -562,6 +612,147 @@ namespace Phirura
         public static string TextureSummary()
         {
             return wp81_texture_count() + " registered, " + wp81_texture_overflow() + " dropped";
+        }
+
+        // --- the registry's incremental surface ---------------------------
+        //
+        // The managed half of `wp81_texture_dirty` / `wp81_texture_rect_data`. Shaped for one job:
+        // being called from the draw loop every frame, where the honest cost of "nothing changed"
+        // has to be a couple of native calls and no allocation at all.
+
+        /// <summary>A rectangle in a texture's own pixel coordinates.</summary>
+        public struct TexRect
+        {
+            public uint X;
+            public uint Y;
+            public uint W;
+            public uint H;
+        }
+
+        /// <summary>How many textures the registry holds right now. One native call, nothing copied.</summary>
+        public static int TextureCount()
+        {
+            return (int)wp81_texture_count();
+        }
+
+        /// <summary>
+        /// Writes the first <paramref name="count"/> registered ids into <paramref name="ids"/>.
+        ///
+        /// The caller owns the buffer because this runs per frame: handing back a fresh array would
+        /// put one allocation in front of every draw for ids that did not change since the last
+        /// one. The buffer grows only when the registry does, and the registry is capped at 128
+        /// slots on the Rust side, so growth is bounded and happens once.
+        /// </summary>
+        public static void CopyTextureIds(uint[] ids, int count)
+        {
+            int n = Math.Min(count, ids.Length);
+            for (int i = 0; i < n; i++)
+            {
+                ids[i] = wp81_texture_id_at((uint)i);
+            }
+        }
+
+        private static IntPtr _rectBuffer;
+
+        /// <summary>
+        /// The rectangle to synchronise for <paramref name="id"/>, or false when it is unchanged.
+        ///
+        /// Consumes the pending rectangle - the reason is spelled out above
+        /// <c>wp81_texture_dirty</c>. Rust's -1 ("no such id") reads as "unchanged" rather than
+        /// being thrown: an id that vanished between enumeration and this call is one nothing can
+        /// draw any more, and taking the frame down over it would be a poor trade.
+        ///
+        /// The failure this cannot report is a *missing export* - the Rust side is still landing
+        /// these two functions - which arrives as a thrown exception instead; the renderer catches
+        /// that once and latches onto the full read rather than throwing once per texture per frame.
+        /// </summary>
+        public static bool TextureDirty(uint id, out TexRect rect)
+        {
+            rect = new TexRect();
+            if (_rectBuffer == IntPtr.Zero)
+            {
+                // One 16-byte block for the life of the process rather than one per poll: this call
+                // happens once per texture per frame, and an AllocHGlobal each time would spend its
+                // time feeding an allocator to hold a rectangle that is read and thrown away again
+                // in the same breath.
+                _rectBuffer = Marshal.AllocHGlobal(16);
+            }
+
+            if (wp81_texture_dirty(id, _rectBuffer) != 1)
+            {
+                return false;
+            }
+            rect.X = (uint)Marshal.ReadInt32(_rectBuffer, 0);
+            rect.Y = (uint)Marshal.ReadInt32(_rectBuffer, 4);
+            rect.W = (uint)Marshal.ReadInt32(_rectBuffer, 8);
+            rect.H = (uint)Marshal.ReadInt32(_rectBuffer, 12);
+            return true;
+        }
+
+        /// <summary>
+        /// A texture's dimensions without copying any of its pixels.
+        ///
+        /// Answers the one question the dirty rectangle cannot: a shell that has just dropped its
+        /// carriers (<c>ResetPortTextures</c>) comes back to ids whose pending rectangle was
+        /// already drained, so there is nothing to read - but the size is still known to Rust.
+        /// </summary>
+        public static bool TextureSize(uint id, out uint width, out uint height)
+        {
+            // A null destination returns the byte length, so the dimensions arrive without a copy
+            // and without a buffer to size first.
+            int len = wp81_texture_data(id, out width, out height, IntPtr.Zero, 0);
+            return len > 0 && width > 0 && height > 0;
+        }
+
+        /// <summary>
+        /// Copies one rectangle of a texture's RGBA pixels into a new managed array.
+        ///
+        /// Returns null when Rust refuses - unknown id, rectangle outside the texture, buffer too
+        /// small - and logs why. One unreadable patch leaves some glyphs stale for a frame; failing
+        /// the whole frame instead would cost a chart that is otherwise playing, which is the same
+        /// trade <see cref="ReadTextures"/> makes and for the same reason.
+        ///
+        /// The <c>AllocHGlobal</c>/<c>FreeHGlobal</c> pair and the <c>got != len</c> check are
+        /// copied from <see cref="ReadTextures"/> deliberately. A short copy is not recoverable here
+        /// either: the tail of the array would hold whatever the previous call left in the block,
+        /// and on WP8.1 an unmanaged block is never returned to the process - so it can only be
+        /// read, never guessed at.
+        /// </summary>
+        public static byte[] ReadTextureRect(uint id, TexRect rect)
+        {
+            if (rect.W == 0 || rect.H == 0)
+            {
+                return null;
+            }
+
+            long pixels = (long)rect.W * rect.H;
+            if (pixels > int.MaxValue / 4)
+            {
+                // Past anything this port can allocate, and int-sized because AllocHGlobal and
+                // Marshal.Copy both are.
+                return null;
+            }
+            int len = (int)pixels * 4;
+
+            byte[] rgba = new byte[len];
+            IntPtr buffer = Marshal.AllocHGlobal(len);
+            try
+            {
+                int got = wp81_texture_rect_data(id, rect.X, rect.Y, rect.W, rect.H, buffer, (uint)len);
+                if (got != len)
+                {
+                    AppLog.WriteSync("PrprPort: texture " + id + " rect ("
+                        + rect.X + "," + rect.Y + "," + rect.W + "," + rect.H
+                        + ") copy returned " + got + ", expected " + len);
+                    return null;
+                }
+                Marshal.Copy(buffer, rgba, 0, len);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+            return rgba;
         }
 
         private static PortCmd ReadCmd(IntPtr basePtr, int index)

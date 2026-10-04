@@ -471,13 +471,36 @@ pub fn frame(dt: f64) -> i32 {
             Some(g) => g,
             None => return GAME_ERR_NO_CHART,
         };
+        // A fresh frame starts with no complaint. Without this the shell would read last frame's -
+        // or, worse, the create's - against a frame that failed for a different reason.
+        clear_error();
 
         // Advance the injected clock first: everything `prpr` reads this frame goes through it.
         let now = CLOCK.with(|c| c.get()) + dt.max(0.0);
         CLOCK.with(|c| c.set(now));
 
+        // Publish the uptime the judge ages touches with. `prpr::judge::get_uptime` reads it back
+        // through `miniquad::native::windows::get_uptime`, and uses it in exactly one place:
+        // `t - (uptime - it.time) * spd`, which rewinds a touch to the chart time it happened at.
+        //
+        // It is this clock and not a second, independent one on purpose. `t` is `TimeManager::now`
+        // fed by `clock_now` above, so the two sides of that subtraction would otherwise come from
+        // oscillators that drift apart - a bug that shows up as judgement error growing over a
+        // play rather than as a visible failure. `std::time::Instant` is the obvious other choice
+        // and is rejected here for two reasons: it is what module doc problem 3 says this port
+        // avoids (it needs `QueryPerformanceFrequency`, the call that has historically taken the
+        // process down on the phone), and it would pull Win32 imports into the ARM DLL that the
+        // `check_imports.py` gate exists to catch.
+        //
+        // Whoever stamps a touch later must stamp it with `miniquad::uptime_secs()` - this value
+        // - because `prpr` uses only the difference between the two. Today nothing stamps one at
+        // all: no touch reaches `prpr::judge` on this platform yet, so `it.time` has no producer
+        // and this reads as dead code until the shell's touch pipeline lands.
+        macroquad::miniquad::set_uptime_secs(now);
+
         if let Err(e) = game.main.update() {
             tracing::error!("Main::update failed: {e:?}");
+            set_error(format!("Main::update failed: {e:#}"));
         }
 
         // Cleared here rather than by the shell so a frame that fails to render cannot leave stale
@@ -486,11 +509,42 @@ pub fn frame(dt: f64) -> i32 {
 
         if let Err(e) = game.main.render(&mut game.painter) {
             tracing::error!("Main::render failed: {e:?}");
+            // This one matters more than the rest put together. `render` returning `Err` before it
+            // has drawn anything makes `encode()` hand back zero commands, and zero commands looks
+            // exactly like "the renderer is not wired up yet" from the shell - a diagnosis that
+            // sends you off rewriting the wrong half of the system. `{e:#}` because this is
+            // `anyhow`, and the alternate form is what prints the whole `caused by` chain instead
+            // of only the outermost line.
+            set_error(format!("Main::render failed: {e:#}"));
         }
 
         game.frames += 1;
+        // The queue lives until here rather than being drained by its first reader: `Judge::update`
+        // takes the touch *state* from `touches()` while `repeat_all_miniquad_input` takes the
+        // *events*, and `Scene` reads `get_touches()` again while rendering. Clearing at any point
+        // before all three have run would hand one of them a frame older than the one it is drawing.
+        macroquad::input::clear_touches();
         macroquad::draw::encode() as i32
     })
+}
+
+/// Set the engine timeline to an absolute time.
+///
+/// The shell owns the music clock - it is the side with the audio position - so `CLOCK` is a
+/// mirror of it rather than a clock of its own. `frame` then reads `CLOCK` to publish the uptime
+/// `prpr` ages touches with, so this one write is what keeps three things on the same oscillator:
+/// the chart time the renderer draws, the judgement window, and the timestamp every touch carries.
+/// Three clocks that each advance would disagree by a gap that grows as the play goes on, and that
+/// is not a visible failure - it is a judgement that gets worse the longer you play.
+///
+/// Ignored for a non-finite value: a NaN entering here would reach every projection in the frame
+/// and come out as NaN command coordinates, and "a frame full of NaN" is far harder to diagnose
+/// than a time that did not move.
+pub fn set_time(t: f64) {
+    if !t.is_finite() {
+        return;
+    }
+    CLOCK.with(|c| c.set(t));
 }
 
 /// Tear the game down. Safe to call when nothing is running.
@@ -498,6 +552,10 @@ pub fn destroy() {
     GAME.with(|slot| *slot.borrow_mut() = None);
     INFO.with(|slot| *slot.borrow_mut() = None);
     CLOCK.with(|c| c.set(0.0));
+    // Reset the published uptime together with the clock it is sampled from. Without this a read
+    // between `destroy` and the next `frame` would answer with the previous game's value while
+    // `CLOCK` already said zero, and the two are only ever meaningful as a pair.
+    macroquad::miniquad::set_uptime_secs(0.0);
     macroquad::draw::drain_reset();
 }
 

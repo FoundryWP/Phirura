@@ -17,6 +17,8 @@
 
 #![allow(non_upper_case_globals, non_camel_case_types, unused_variables, dead_code)]
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 pub use macroquad_compat_types::*;
 
 /// Shared handle types.
@@ -748,6 +750,8 @@ pub struct Bindings {
 /// One exception: `glGetIntegerv` answers `GL_MAX_TEXTURE_SIZE`. A no-op there is not harmless,
 /// because the caller *reads back* what it passed in - see that function's note.
 pub mod gl {
+    use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
     pub type GLuint = u32;
     pub const GL_NO_ERROR: u32 = 0;
     pub const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
@@ -773,11 +777,92 @@ pub mod gl {
 
     pub unsafe fn glTexParameteri(_target: u32, _pname: u32, _param: i32) {}
 
-    pub unsafe fn glBindTexture(_target: u32, _texture: u32) {}
+    // ---------------------------------------------------------------------
+    // Render textures
+    //
+    // A *render* texture - allocated empty and filled a rectangle at a time, rather than uploaded
+    // whole - never reaches `register_texture`, so the registry would know nothing about it. The
+    // only one `prpr` has is the glyph atlas (`ui/text.rs:305`), and on this port that atlas is
+    // the sole source of text pixels: dropping these writes is what makes every piece of
+    // prpr/Phira text invisible.
+    //
+    // This crate cannot call up into `macroquad` - it is the dependency, not the dependent - so
+    // the registry passes one function pointer *down* instead. `macroquad` installs it the first
+    // time it is handed a `Texture` it did not create (`Texture2D::from_miniquad_texture`), which
+    // is ordered correctly without anyone having to remember an init sequence: `prpr` builds the
+    // atlas through that very call, so installation happens no later than the atlas's creation and
+    // therefore always before its first write.
+    // ---------------------------------------------------------------------
+
+    /// Receives one `GL_RGBA` / `GL_UNSIGNED_BYTE` sub-image as `(id, x, y, w, h, pixels)`.
+    ///
+    /// # Safety
+    /// `pixels` addresses `w * h * 4` bytes that are only valid for the duration of the call.
+    pub type TextureWriteSink = unsafe fn(u32, u32, u32, u32, u32, *const u8);
+
+    static TEXTURE_WRITE_SINK: AtomicUsize = AtomicUsize::new(0);
+
+    /// The texture `glBindTexture` last named.
+    ///
+    /// GL offers no way to ask which object is bound, and `glTexSubImage2D` does not carry the id
+    /// either - `prpr`'s only caller binds first (`ui/text.rs:331`) and then uploads (`:337`),
+    /// which is exactly the protocol this mirrors. Zero means "nothing bound", and zero is never
+    /// a real texture: `macroquad::draw::TEX_ID` starts at 1.
+    static BOUND_TEXTURE: AtomicU32 = AtomicU32::new(0);
+
+    pub fn set_texture_write_sink(sink: TextureWriteSink) {
+        TEXTURE_WRITE_SINK.store(sink as usize, Ordering::Release);
+    }
+
+    /// Whether a sink is installed - a one-line diagnostic for "why is text still invisible".
+    pub fn has_texture_write_sink() -> bool {
+        TEXTURE_WRITE_SINK.load(Ordering::Acquire) != 0
+    }
+
+    pub fn bound_texture() -> u32 {
+        BOUND_TEXTURE.load(Ordering::Acquire)
+    }
+
+    /// No-op as GL state - there is no GL state here - but not as bookkeeping; see `BOUND_TEXTURE`.
+    pub fn glBindTexture(_target: u32, texture: u32) {
+        BOUND_TEXTURE.store(texture, Ordering::Release);
+    }
+
+    /// Forwards an 8-bit RGBA sub-image to the registry.
+    ///
+    /// Everything else is dropped rather than guessed at. A different level, format or type would
+    /// mean a byte layout other than the one the registry stores and the shell decodes, and this
+    /// port has exactly one caller: `ui/text.rs:337`, which passes level 0 / `GL_RGBA` /
+    /// `GL_UNSIGNED_BYTE`. Rejecting the rest keeps a future caller from writing plausible-looking
+    /// garbage into a bitmap.
+    ///
+    /// # Safety
+    /// `pixels` must address `w * h * 4` readable bytes.
     pub unsafe fn glTexSubImage2D(
-        _target: u32, _level: i32, _x: i32, _y: i32, _w: i32, _h: i32,
-        _format: u32, _type_: u32, _pixels: *const u8,
+        target: u32, level: i32, x: i32, y: i32, w: i32, h: i32,
+        format: u32, type_: u32, pixels: *const u8,
     ) {
+        let sink = TEXTURE_WRITE_SINK.load(Ordering::Acquire);
+        if sink == 0
+            || level != 0
+            || pixels.is_null()
+            || w <= 0
+            || h <= 0
+            || format != GL_RGBA
+            || type_ != GL_UNSIGNED_BYTE
+        {
+            return;
+        }
+        // The one `transmute` in this path. A function pointer can be cast *to* an integer but not
+        // back from one or from a raw pointer, and the two crates cannot share a `static` of the
+        // real type because `macroquad` depends on this crate, not the other way round. The bits
+        // came from `set_texture_write_sink` storing a pointer of exactly this type, and an atomic
+        // load cannot hand back anything else.
+        let f: TextureWriteSink = core::mem::transmute(sink);
+        f(
+            BOUND_TEXTURE.load(Ordering::Acquire),
+            x as u32, y as u32, w as u32, h as u32, pixels,
+        );
     }
     /// Answers `GL_MAX_TEXTURE_SIZE` with the size this port is prepared to allocate; any other
     /// `pname` is left untouched, because inventing an answer for a query nobody has proven they
@@ -797,12 +882,20 @@ pub mod gl {
     /// forever. The first host run burned **30 minutes and 34334 lines of
     /// `creating cache texture: 0x0`** inside `wp81_game_frame` before it was killed.
     ///
-    /// 2048 is what `prpr` clamps this value to anyway (`.min(2048)`), so it is the answer a
-    /// truthful driver would give for this caller's purpose - and it is a size we can back, since
-    /// the texture is allocated from the shell's registry rather than by a driver.
+    /// 1024, not the 2048 `prpr` clamps to, and that is a budget decision rather than a capability
+    /// one. These writes now land in the shell's registry, which measured **24,943,416 of
+    /// 33,554,432 bytes in use** on the 190 chart - 8.2 MiB free. A 2048x2048 RGBA atlas is
+    /// 16 MiB and would be refused as `"budget"`, putting text back exactly where the no-op did.
+    /// 1024x1024 is 4 MiB and fits with room to spare.
+    ///
+    /// Growing past 1024 is still supported when 1024 genuinely is not enough: `process_queued`
+    /// returns `BrushError::TextureTooSmall { suggested }` and `ui/text.rs:362` rebuilds the cache
+    /// at that size. That path would overshoot the budget again, but it only runs if the smaller
+    /// atlas could not hold the glyphs - which is precisely the moment to revisit this number with
+    /// a measurement in hand instead of a guess.
     pub unsafe fn glGetIntegerv(pname: u32, params: *mut i32) {
         if pname == GL_MAX_TEXTURE_SIZE && !params.is_null() {
-            *params = 2048;
+            *params = 1024;
         }
     }
     pub unsafe fn glGenerateMipmap(_target: u32) {}
@@ -840,23 +933,39 @@ pub mod native {
     pub unsafe fn attach_jni_env() {}
 
     pub mod windows {
-        /// The desktop backend reads the OS uptime here. The shell owns the clock on this
-        /// platform, so this reads the same value `macroquad`'s shim exposes.
+        /// Desktop miniquad reads the OS uptime here (`QueryPerformanceCounter`). This platform
+        /// has no clock of its own to read - see [`crate::uptime_secs`] for who provides the
+        /// number - so it forwards to the same value.
         pub fn get_uptime() -> f64 {
             super::super::uptime_secs()
         }
     }
 }
 
-/// Filled in by the shell. `miniquad::native::windows::get_uptime` is the only consumer.
-static mut UPTIME_SECS: f64 = 0.0;
+/// Seconds of uptime, filled in by the shell: `prpr-port`'s `host::frame` writes it once per
+/// frame, before anything in `prpr` runs.
+///
+/// The shell owns the number because it owns the clock. `prpr` derives its whole timeline from
+/// that same clock (`TimeManager::manual` is handed the shell's frame counter), and the only
+/// consumer - `prpr::judge`'s `t - (uptime - it.time) * spd` - subtracts this from a touch's
+/// timestamp while `t` comes from the shell. Two clocks ticking at slightly different rates
+/// would age the touch against a chart time that did not move with it, which is the same defect
+/// as reading a constant `0.0`, only slower to notice.
+///
+/// So the contract for anything that stamps a touch: stamp it with [`uptime_secs`], sampled at
+/// the moment the event is delivered. `prpr` uses only the *difference* between this value and
+/// the touch's, so a stamp taken on any other clock is worse than no stamp at all.
+static UPTIME_SECS_BITS: AtomicU64 = AtomicU64::new(0);
 
 pub fn set_uptime_secs(v: f64) {
-    unsafe { UPTIME_SECS = v }
+    // `Relaxed` is enough: this is one thread handing a plain f64 to itself on the next line of
+    // the same frame, with nothing else to order against. An `AtomicU64` rather than the
+    // `static mut` this replaces because a float snapshot needs no `unsafe` at either end.
+    UPTIME_SECS_BITS.store(v.to_bits(), Ordering::Relaxed);
 }
 
 pub fn uptime_secs() -> f64 {
-    unsafe { UPTIME_SECS }
+    f64::from_bits(UPTIME_SECS_BITS.load(Ordering::Relaxed))
 }
 
 /// `miniquad`'s entry point. The shell drives the loop, so this is never called; it exists so

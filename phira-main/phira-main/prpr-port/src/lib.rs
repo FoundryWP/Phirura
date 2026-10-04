@@ -475,6 +475,65 @@ pub extern "C" fn wp81_texture_overflow() -> u32 {
     macroquad::draw::texture_overflow()
 }
 
+/// The rectangle written since the shell last asked about one texture.
+///
+/// Returns 1 with `out` filled and the pending area cleared, 0 when nothing changed, -1 for an
+/// unknown id. A null `out` probes without consuming.
+///
+/// A dirty rectangle rather than a version counter, and that choice is the whole point: the glyph
+/// atlas changes **during play**, because a judgement's glyph is rasterised the first time that
+/// judgement appears. A version can only say "something changed", which would leave the shell with
+/// one option - rebuild the whole 1024x1024 atlas, a million `Color` conversions and a
+/// `CreateFromColors`, right in the middle of a frame. The rectangle is the union of every
+/// `glTexSubImage2D` since the last read, so ten glyph uploads in one frame cost one small blit.
+///
+/// Clearing on read keeps the ledger in a single place. Two ledgers - one here, one in the shell -
+/// would drift, and that class of discrepancy only ever shows up on the device.
+///
+/// # Safety
+/// `out` must be valid for four `u32`s when non-null.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_texture_dirty(id: u32, out: *mut u32) -> i32 {
+    macroquad::draw::texture_dirty(id, out)
+}
+
+/// Copy a sub-rectangle of a texture's RGBA pixels out - the incremental counterpart to
+/// `wp81_texture_data`, which can only return a texture whole.
+///
+/// Returns the byte count, -1 for an unknown id, -2 when `cap` is too small or `out` is null, and
+/// -3 when the rectangle lies outside the texture.
+///
+/// # Safety
+/// `out` must have room for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_texture_rect_data(
+    id: u32, x: u32, y: u32, w: u32, h: u32, out: *mut u8, cap: usize,
+) -> i32 {
+    macroquad::draw::texture_rect_data(id, x, y, w, h, out, cap)
+}
+
+/// Sub-image writes the registry refused because it did not know the id.
+///
+/// Non-zero is always a bug: something is being drawn whose bytes never arrived, and unlike a
+/// missing glyph that leaves no trace on screen. Exposed rather than only logged because on the
+/// phone there is no console, and this is the pair that says whether the glyph path works at all -
+/// see `wp81_texture_write_count`, which is the liveness half. Zero refusals on its own is
+/// ambiguous: an engine that never wrote anything reports that too.
+#[no_mangle]
+pub extern "C" fn wp81_texture_write_misses() -> u32 {
+    macroquad::draw::texture_write_misses()
+}
+
+/// Sub-image writes accepted, and - in the high half - the id that received the last one.
+///
+/// Packed rather than split across two exports because the two numbers are only ever read together
+/// to answer one question: did glyph pixels reach the registry, and which texture is holding them.
+#[no_mangle]
+pub extern "C" fn wp81_texture_write_count() -> u64 {
+    let (writes, last) = macroquad::draw::texture_write_stats();
+    ((last as u64) << 32) | writes as u64
+}
+
 /// Record a test triangle so the drain can be verified end to end on the device.
 ///
 /// The real scene is not driven from the shell yet, so without this the drain has nothing to
@@ -614,6 +673,52 @@ pub extern "C" fn wp81_game_running() -> i32 {
 #[no_mangle]
 pub extern "C" fn wp81_game_set_screen(width: f32, height: f32) {
     host::set_screen(width, height);
+}
+
+/// Set the engine timeline to an absolute time, before the next `wp81_game_frame`.
+///
+/// The shell owns the music clock (it has the audio position), so the Rust side must not invent
+/// one. The shell sets this and then calls `wp81_game_frame(0.0)` - not `wp81_game_frame(dt)` -
+/// because `host::frame` advances `CLOCK` by `dt` itself, and passing both would advance the
+/// chart twice as fast as the music. Absolute rather than differential because a cumulative sum
+/// starts drifting the moment the shell misses a frame, and a rhythm game cannot be restarted
+/// after a seek without one anyway.
+///
+/// Ignored for a non-finite `t`: a NaN here would propagate through every projection and produce
+/// commands full of NaN, which the shell then has to notice and discard - a far more confusing
+/// failure than refusing the value at the door.
+#[no_mangle]
+pub extern "C" fn wp81_game_set_time(t: f64) {
+    host::set_time(t);
+}
+
+/// Queue one touch event for the frame about to be built. Call before `wp81_game_frame`.
+///
+/// `phase` is a plain number because the shell is C#: **0=Started, 1=Stationary, 2=Moved,
+/// 3=Ended, 4=Cancelled**, which is `miniquad::TouchPhase`'s declaration order - `Stationary`
+/// sits *before* `Moved`, unlike winit's, and swapping them would make a held note look like a
+/// moving one on every frame that did not move.
+///
+/// `x`/`y` are screen pixels in the same space as `wp81_game_set_screen`, because that is what
+/// `prpr::judge` divides by `screen_width()`/`screen_height()` to reach NDC.
+///
+/// `time` is uptime in the same units as `wp81_game_set_time` - effectively the chart time the
+/// finger was at. `prpr` ages the touch with `t - (uptime - time) * speed`, so stamping it with
+/// wall time instead would make every judgement error grow as the play went on.
+///
+/// Returns 0, -1 for an unknown `phase`, or -2 when this frame's queue is full.
+#[no_mangle]
+pub extern "C" fn wp81_game_touch(id: u32, phase: u32, x: f32, y: f32, time: f64) -> i32 {
+    use macroquad::input::TouchPhase;
+    let phase = match phase {
+        0 => TouchPhase::Started,
+        1 => TouchPhase::Stationary,
+        2 => TouchPhase::Moved,
+        3 => TouchPhase::Ended,
+        4 => TouchPhase::Cancelled,
+        _ => return -1,
+    };
+    macroquad::input::push_touch(id as u64, phase, x, y, time)
 }
 
 /// Decode a NUL-terminated UTF-16 string from the shell.

@@ -218,6 +218,10 @@ $exports = @(
     "wp81_texture_id_at",
     "wp81_texture_data",
     "wp81_texture_overflow",
+    "wp81_texture_dirty",
+    "wp81_texture_rect_data",
+    "wp81_texture_write_misses",
+    "wp81_texture_write_count",
     # the game host - see `wp81_game_*`, which runs the real prpr scene
     "wp81_game_create",
     "wp81_game_frame",
@@ -228,6 +232,8 @@ $exports = @(
     # Sampled from a timer while `wp81_game_create` runs - see the note on the export. Without it a
     # create that takes the process down leaves nothing to read afterwards.
     "wp81_game_progress",
+    "wp81_game_set_time",
+    "wp81_game_touch",
     # Read in the turn after a failed create. `tracing` has no subscriber on the phone, so this is
     # the only place the reason for `-1`/`-2`/`-100` survives at all.
     "wp81_game_last_error"

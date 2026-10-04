@@ -120,14 +120,29 @@ namespace Phirura
         /// what the first device run logged (`-> -3 (AlreadyRunning) in 167 ms`). A per-instance
         /// gate cannot protect a process-wide resource.
         ///
-        /// Read by the frame loop and written by <see cref="StartEngineAsync"/> through
-        /// <see cref="System.Threading.Interlocked"/>, so a torn read cannot have the frame loop
-        /// calling into a half-built engine - which is exactly the class of crash this page's
-        /// watchdogs exist to localise.
+        /// Every transition goes through <see cref="System.Threading.Interlocked"/>, because three
+        /// threads are now involved: <see cref="StartEngineAsync"/> claims it (0 -> 1) on the UI
+        /// thread, the engine thread publishes what `GameCreate` returned (1 -> 2 or 3), and
+        /// <see cref="TearDown"/> drops it back to 0 - which is how the tick loop is told to stop,
+        /// since only the engine thread may touch the engine itself. A plain read/write here would
+        /// let a teardown and a ticking engine coexist, which is exactly the class of bug this
+        /// page's watchdogs exist to localise.
         /// </summary>
         private static int _engineState;
 
-        /// <summary>Frames the engine has been ticked for, and the draw commands that produced.</summary>
+        /// <summary>
+        /// Frames the engine has been ticked for, and the draw commands that produced.
+        ///
+        /// Written only by the engine thread - it owns the whole create/tick/destroy lifetime - and
+        /// read from the UI thread by the fps line and the background watchdog, so both sides go
+        /// through <see cref="System.Threading.Interlocked"/>: a plain 64-bit store is not
+        /// guaranteed atomic on 32-bit ARM, and without the reads the UI thread could keep printing
+        /// the totals it saw before the engine thread moved on.
+        ///
+        /// Reset by the engine thread at the start of its own run, never by <see cref="TearDown"/>:
+        /// zeroing them there would race with a thread that is still ticking towards the very
+        /// totals its `GameDestroy` line is about to report.
+        /// </summary>
         private static int _engineFrames;
         private static long _engineCmds;
 
@@ -142,11 +157,48 @@ namespace Phirura
         private uint _vpW;
         private uint _vpH;
 
-        /// <summary>Timestamp source for the engine's <c>dt</c>, kept separate from the fps clocks.</summary>
-        private readonly Stopwatch _engineClock = new Stopwatch();
+        /// <summary>
+        /// Set by <see cref="TearDown"/> to mean "the page is gone, stop the engine", read by the
+        /// engine thread the moment `GameCreate` returns.
+        ///
+        /// A second flag is needed next to <see cref="_engineState"/> because of the one window in
+        /// which that state cannot be touched: while a create is in flight it must stay at 1 or
+        /// <see cref="SampleCreateProgress"/> stops sampling and TearDown's own "still in flight"
+        /// branch becomes a lie. So a teardown during a create leaves the state alone and sets this
+        /// instead, and the engine thread - which is the only thread allowed to call
+        /// `GameDestroy` - destroys as soon as the create has returned, never while it runs.
+        /// </summary>
+        private static int _engineStop;
 
-        /// <summary>True once the engine's first tick has been logged. Static for the same reason as
-        /// <see cref="_engineState"/>: it describes the process-wide engine, not this page.</summary>
+        /// <summary>
+        /// The task running the engine, so the next one can wait for it to leave.
+        ///
+        /// Read and written only by <see cref="StartEngineAsync"/> on the UI thread under its
+        /// 0 -> 1 gate, which is why this needs no <see cref="System.Threading.Interlocked"/>: one
+        /// engine starts at a time. The task itself never reads the field - it is handed its
+        /// predecessor as an argument - so there is nothing to publish.
+        ///
+        /// A <c>Task</c> rather than a <c>System.Threading.Thread</c>: this project targets the
+        /// Windows Phone 8.1 NETFX_CORE profile, which has no public `Thread` type at all (no
+        /// `ThreadStart`, no `IsBackground`, no `Name` anywhere in its reference assemblies), so
+        /// a `Thread` simply does not compile here. What the engine actually needs from one is
+        /// that create, every tick and the destroy all run on the *same* thread - see
+        /// <see cref="EngineThreadMain"/> for why that is the whole point - and a task whose body
+        /// never awaits gives exactly that.
+        /// </summary>
+        private static System.Threading.Tasks.Task _engineThread;
+
+        /// <summary>
+        /// True once the engine's first tick has been logged. That line is the only place the phone
+        /// log says whether the engine produced anything (and, if not, why not), so it must fire
+        /// exactly once per run - once every second would drown it, and never would leave the
+        /// experiment unanswerable.
+        ///
+        /// Only the engine thread reads or writes it now (the log moved out of <c>OnFrame</c> along
+        /// with the tick loop), so it needs no <see cref="System.Threading.Interlocked"/>; it stays
+        /// static because it describes the process-wide engine rather than this page - the same
+        /// reason <see cref="_engineState"/> has.
+        /// </summary>
         private static bool _engineTicked;
 
         /// <summary>
@@ -471,9 +523,10 @@ namespace Phirura
                 }
 
                 // Engine *after* the frame loop is attached, on purpose: Stage 1 is the proven half
-                // and has to keep drawing and reporting even if the engine never comes up. The loop
-                // below ticks it only when _engineState says GameCreate has returned, so a create
-                // still running on a pool thread is never entered concurrently with a frame.
+                // and has to keep drawing and reporting even if the engine never comes up. From
+                // here StartEngineAsync hands the create - and every tick after it - to one
+                // dedicated thread, gated on `_engineState`, so a create that is still running is
+                // never entered concurrently with a frame from anywhere else.
                 var engineIgnored = StartEngineAsync();
             }
             finally
@@ -548,12 +601,22 @@ namespace Phirura
         /// whether the shell's brokered file IO answers from inside a native frame, and whether the
         /// audio header parsers behave.
         ///
-        /// On a **pool thread**, for the same reason <c>StartSurfacePrepare</c> is: <c>GameCreate</c>
-        /// can fault anywhere, and a native fault on the UI thread blocks WinRT <c>FileIO</c>, which
-        /// stops <c>AppLog</c> flushing and ends the run with no log at all. It has the second
-        /// benefit that the asset reads' <c>.AsTask().Result</c> run where there is no
-        /// SynchronizationContext, so their continuations are free to complete rather than queue
-        /// behind the thread waiting on them.
+        /// On a **dedicated thread**, for the two reasons <c>StartSurfacePrepare</c> has (a native
+        /// fault on the UI thread blocks WinRT <c>FileIO</c>, which stops <c>AppLog</c> flushing and
+        /// ends the run with no log at all; and the asset reads' <c>.AsTask().Result</c> run where
+        /// there is no SynchronizationContext, so their continuations are free to complete rather
+        /// than queue behind the thread waiting on them) plus one that is specific to the engine
+        /// and is why this stopped being a <c>Task.Run</c>:
+        ///
+        /// `host::GAME`, `host::INFO` and the shell's `CLOCK` are all `thread_local!` in the Rust
+        /// port. Create on one thread and call `GameFrame` from another - which is what the UI
+        /// thread's `OnFrame` did - and the frame finds an empty slot, returns `-1`, and
+        /// <c>PrprPort.GameFrame</c> reports that as an empty frame without a word. The first
+        /// device run measured exactly that: `GameCreate -> 0 (Ok) in 9044 ms` on the creating
+        /// thread while the very same log line read `running=False` (that read came from the UI
+        /// thread), and `0cmds` on every frame after. `host_m1` cannot reproduce it because it is
+        /// single-threaded. So create, every tick and the destroy all happen on *this* thread, and
+        /// nothing else is allowed near them.
         ///
         /// Failure is logged and swallowed. Stage 1 is this page's primary verdict and must keep
         /// drawing; an engine that does not come up is a failed experiment, not a broken page.
@@ -564,23 +627,20 @@ namespace Phirura
             {
                 return;
             }
-            // Interlocked, because this runs on the UI thread while the frame loop reads it there
-            // too and a second navigation can re-enter. CompareExchange makes "who starts it" a
-            // single decision rather than a check-then-act.
+            // Interlocked, because this runs on the UI thread while the engine thread, the
+            // background watchdog and a second navigation all read it. CompareExchange makes "who
+            // starts it" a single decision rather than a check-then-act.
             if (System.Threading.Interlocked.CompareExchange(ref _engineState, 1, 0) != 0)
             {
-                AppLog.WriteSync("RustStage1: engine start skipped (state=" + _engineState + ")");
+                AppLog.WriteSync("RustStage1: engine start skipped (state="
+                    + System.Threading.Interlocked.CompareExchange(ref _engineState, 0, 0) + ")");
                 return;
             }
 
             string root = Windows.Storage.ApplicationData.Current.LocalFolder.Path + "\\charts";
             PrprPort.AssetRoot = root;
             AppLog.WriteSync("RustStage1: engine create \"" + EngineFolder + "/" + EngineChart
-                + "\" root=" + root + " screen=" + _vpW + "x" + _vpH + " (pool thread)");
-
-            PrprPort.GameResult result = PrprPort.GameResult.NoChart;
-            string threw = null;
-            Stopwatch create = Stopwatch.StartNew();
+                + "\" root=" + root + " screen=" + _vpW + "x" + _vpH + " (engine thread)");
 
             // Sampler first, so it is already looping before the first native call.
             //
@@ -592,57 +652,72 @@ namespace Phirura
             // knowing and guessing.
             var spin = System.Threading.Tasks.Task.Run(() => SampleCreateProgress());
 
-            await System.Threading.Tasks.Task.Run(delegate
-            {
-                try
-                {
-                    // Before create: prpr projects through statics that default to 0x0, and at 0x0
-                    // the aspect ratio is degenerate, so everything projects onto a point. The same
-                    // pixel size Stage 1 is drawing at - host_m1 passes 768 x 1229, this phone's
-                    // viewport - so that engine and renderer agree about where things are.
-                    PrprPort.GameSetScreen(_vpW, _vpH);
-                    // "Returned" is the point of this line. `set_screen` writes one static and
-                    // cannot fail, so a missing line means the death came *before* `game_create`,
-                    // and a present one means it came inside. Without it those two are the same
-                    // silence.
-                    AppLog.WriteSync("PrprPort: GameSetScreen " + _vpW + "x" + _vpH + " ok");
-                    // Read BEFORE the create, not after.
-                    //
-                    // `GameRunning` and `GameFrames` both go through `host::GAME`, which is a
-                    // `thread_local!` - and on the first device run `GameCreate` came back
-                    // `AlreadyRunning` on a brand-new process where nothing had created anything.
-                    // The only way that happens is if the thread-local reads as occupied when it is
-                    // not, i.e. if the TLS slot this CRT-free ARM DLL was linked with does not hold
-                    // the value Rust thinks it does. Checked here, before any code has had a chance
-                    // to populate `GAME`, so the answer is unambiguous: `running=False frames=-1`
-                    // means TLS is sound and the problem is elsewhere; anything else names it.
-                    AppLog.WriteSync("PrprPort: before create: running=" + PrprPort.GameRunning()
-                        + " frames=" + PrprPort.GameFrames());
-                    result = PrprPort.GameCreate(EngineFolder, EngineChart);
-                }
-                catch (Exception ex)
-                {
-                    threw = ex.GetType().Name + ": " + ex.Message;
-                }
-            });
-            create.Stop();
+            // Drop the stop request an earlier teardown left behind, while this method still holds
+            // the 0 -> 1 gate: the engine thread reads that flag the moment `GameCreate` returns,
+            // and a stale one would destroy the engine this call is about to build.
+            System.Threading.Interlocked.Exchange(ref _engineStop, 0);
 
-            // Status first and separately, because it is the part that can throw again: if the DLL
-            // failed to load, asking it for its state inside the *log line* would escape the method
-            // and take down the page the watchdogs were there to describe.
-            string status;
+            // The create - and every tick and the destroy after it - goes to one task that never
+            // awaits, because `host::GAME` is a `thread_local!` (see the summary above): a body
+            // with no yield point runs start to finish on a single OS thread, which is exactly
+            // what that thread-local needs. The numbers this method has to log are produced over
+            // there too: `GameRunning` reads the very slot the create just wrote, so reading it
+            // here, on the UI thread, is what turned the first device run's log line into "create
+            // succeeded | running=False". They come back through the completion source, which is
+            // also what lets this method keep printing them in the same order and wording it
+            // always has.
+            var created = new System.Threading.Tasks.TaskCompletionSource<EngineCreateOutcome>();
+            // The task this run replaces. TearDown drops `_engineState` to 0 to release its tick
+            // loop, so a restart can get here before that task has finished destroying; the new
+            // one waits for it instead of making the UI thread block - see EngineThreadMain.
+            System.Threading.Tasks.Task previous = _engineThread;
+            // LongRunning instead of plain StartNew: the body below never returns until the page
+            // tears the engine down, and a default-scheduled task would sit on a thread-pool
+            // worker for that whole time, holding a slot the pool cannot reclaim. LongRunning
+            // asks the scheduler for a thread of its own - the `System.Threading.Thread` this
+            // profile refuses to expose, reached through the only door it leaves open. Even were
+            // the scheduler to fall back to the pool, the engine would still be correct, since
+            // correctness here needs one *stable* thread rather than a private one - but the
+            // phone would then be one blocked worker lighter for the rest of the run.
+            var engineTask = System.Threading.Tasks.Task.Factory.StartNew(
+                () => EngineThreadMain(previous, created),
+                System.Threading.Tasks.TaskCreationOptions.LongRunning);
+            // No `IsBackground`/`Name` to set: the profile exposes neither on a task (or at all -
+            // see `_engineThread`). Background semantics are inherited from the scheduler's own
+            // thread, and the identity this line used to give a hang dump is instead carried by
+            // the log lines, which reach the device log either way.
+            //
+            // Assigned only after StartNew returned, so a later run never waits on a task that
+            // failed to be created at all.
+            _engineThread = engineTask;
+
+            // Resumes on the UI thread when the create has returned, which is what keeps the two
+            // log lines below arriving after it rather than racing it.
+            EngineCreateOutcome outcome;
             try
             {
-                status = "running=" + PrprPort.GameRunning()
-                    + " | " + PrprPort.TextureSummary();
+                outcome = await created.Task;
             }
             catch (Exception ex)
             {
-                status = "status unavailable: " + ex.GetType().Name;
+                // Only reachable if the thread ended without reporting - a native fault would have
+                // taken the process with it, so in practice this is a managed failure in the thread
+                // body. Say so, and move the state off 1: leaving it there would block every later
+                // attempt behind the 0 -> 1 gate forever.
+                AppLog.WriteSync("RustStage1: engine thread ended without a create result", ex);
+                System.Threading.Interlocked.CompareExchange(ref _engineState, 3, 1);
+                return;
             }
 
+            PrprPort.GameResult result = outcome.Result;
+            string threw = outcome.Threw;
+            // Computed on the engine thread, not here, for the same reason the create runs there -
+            // `GameRunning` is a thread-local read - and still separate from the line that carries
+            // it, because a throw inside a log statement must not be able to lose that line.
+            string status = outcome.Status;
+
             AppLog.WriteSync("RustStage1: GameCreate(" + EngineFolder + ", " + EngineChart + ") -> "
-                + (int)result + " (" + result + ") in " + create.ElapsedMilliseconds + " ms"
+                + (int)result + " (" + result + ") in " + outcome.ElapsedMs + " ms"
                 + (threw == null ? "" : " THREW " + threw)
                 + " | " + status);
 
@@ -667,11 +742,320 @@ namespace Phirura
                 }
             }
 
+            // `_engineState` is not written here: the engine thread publishes 2 or 3 itself, before
+            // it signals the completion source, so that whatever this line reports and whatever the
+            // watchdog reads next are the same decision rather than two writes racing each other.
             bool ready = result == PrprPort.GameResult.Ok && threw == null;
-            System.Threading.Interlocked.Exchange(ref _engineState, ready ? 2 : 3);
             AppLog.WriteSync(ready
                 ? "RustStage1: engine ready"
                 : "RustStage1: engine NOT running - Stage 1 continues alone");
+        }
+
+        // ===========================================================================================
+        // the engine thread
+        //
+        // One thread from `GameSetScreen` to `GameDestroy`. That is not a style preference: `host::GAME`,
+        // `host::INFO` and the shell's `CLOCK` are all `thread_local!` in the Rust port, so the engine
+        // exists only on the thread that created it and every call from anywhere else reads an empty
+        // slot, as if nothing were running. The first device run paid for this with a whole round -
+        // `GameCreate -> 0 (Ok) in 9044 ms` followed by `0cmds` on every frame the UI thread asked
+        // for, with no error printed anywhere, because `PrprPort.GameFrame` turns the `-1` an empty
+        // slot returns into an empty frame. `host_m1` cannot show any of that: it is single-threaded.
+        // ===========================================================================================
+
+        /// <summary>
+        /// What the engine thread reports back once <c>GameCreate</c> has returned.
+        ///
+        /// These were locals of <see cref="StartEngineAsync"/> and they must keep reaching the log
+        /// unchanged - but they can only be *measured* on the engine thread, because `GameRunning`
+        /// reads the thread-local slot the create just wrote to. Carrying them out here is the
+        /// difference between `... -> 0 (Ok) | running=True` and what the first device run printed:
+        /// a successful create with `running=False` beside it, read from the wrong thread.
+        /// </summary>
+        private sealed class EngineCreateOutcome
+        {
+            /// <summary>Rust's return code, already mapped to the enum.</summary>
+            public PrprPort.GameResult Result;
+            /// <summary>Name and message of a managed exception that escaped the create, else null.</summary>
+            public string Threw;
+            /// <summary>Milliseconds the create took, read before this thread moves on to ticking.</summary>
+            public long ElapsedMs;
+            /// <summary><c>running=...</c> plus the texture summary, read where it is true.</summary>
+            public string Status;
+        }
+
+        /// <summary>
+        /// The entry point the engine task runs: the body, plus the one failure mode a task has
+        /// that the thread this replaced did not.
+        ///
+        /// A thread that threw before signalling would take the process down, which is loud but
+        /// never hangs anything; a task that throws simply becomes faulted, and `StartEngineAsync`
+        /// would then be awaiting a completion source nobody will ever complete - a page that
+        /// spins on "creating" forever with no log line to say why. So the escape hatch is here:
+        /// fail the completion source, which the `try` around `await created.Task` already knows
+        /// how to report, and let the rest of the state machine do what it does for any other
+        /// failed create.
+        /// </summary>
+        private void EngineThreadMain(System.Threading.Tasks.Task previous,
+            System.Threading.Tasks.TaskCompletionSource<EngineCreateOutcome> created)
+        {
+            try
+            {
+                EngineThreadBody(previous, created);
+            }
+            catch (Exception ex)
+            {
+                AppLog.WriteSync("RustStage1: engine task threw before reporting", ex);
+                // Never overwrites a result: TrySet* is a no-op once the source has been
+                // completed, so this is only reached for the throws that would otherwise hang.
+                created.TrySetException(ex);
+            }
+        }
+
+        /// <summary>
+        /// The engine task's whole body: wait out the previous run, create, tick, destroy.
+        ///
+        /// Nothing else on this page may call into the engine - see the note above about the Rust
+        /// port's thread-locals. The one thing this task waits for is its predecessor, because
+        /// <see cref="TearDown"/> releases an engine by dropping <c>_engineState</c> and a
+        /// restarted page can start this one before that task's engine has finished leaving.
+        /// </summary>
+        private void EngineThreadBody(System.Threading.Tasks.Task previous,
+            System.Threading.Tasks.TaskCompletionSource<EngineCreateOutcome> created)
+        {
+            // Wait out the engine this run replaces. Both would otherwise share the DLL's *non*
+            // thread-local state - the command arenas `Drain` empties, `PROGRESS`, the uptime the
+            // judge ages touches - and one run's destroy landing in the middle of the next run's
+            // create would put two runs' worth of state into a log that exists to be read line by
+            // line. Bounded, because a task wedged in native code must cost five seconds and a
+            // log line, not a page that never starts.
+            if (previous != null && !previous.IsCompleted)
+            {
+                try
+                {
+                    AppLog.WriteSync("RustStage1: waiting for the previous engine task to exit");
+                    if (!previous.Wait(5000))
+                    {
+                        AppLog.WriteSync("RustStage1: previous engine task still unfinished after 5 s; continuing");
+                    }
+                }
+                catch (Exception)
+                {
+                    // Nothing here is worth losing the create over: the worst case is two runs'
+                    // diagnostics interleaving, which is a confusing log, not a corrupt engine -
+                    // each run owns its own thread-local slots either way.
+                }
+            }
+
+            // The counters have exactly one writer from here on - this thread - so they are zeroed
+            // here rather than in `TearDown`, where it would race with a thread that is still
+            // ticking towards the very totals its `GameDestroy` line is about to report.
+            System.Threading.Interlocked.Exchange(ref _engineFrames, 0);
+            System.Threading.Interlocked.Exchange(ref _engineCmds, 0);
+            _engineTicked = false;
+
+            PrprPort.GameResult result = PrprPort.GameResult.NoChart;
+            string threw = null;
+            Stopwatch create = Stopwatch.StartNew();
+            string status;
+            try
+            {
+                // Before create: prpr projects through statics that default to 0x0, and at 0x0
+                // the aspect ratio is degenerate, so everything projects onto a point. The same
+                // pixel size Stage 1 is drawing at - host_m1 passes 768 x 1229, this phone's
+                // viewport - so that engine and renderer agree about where things are.
+                PrprPort.GameSetScreen(_vpW, _vpH);
+                // "Returned" is the point of this line. `set_screen` writes one static and
+                // cannot fail, so a missing line means the death came *before* `game_create`,
+                // and a present one means it came inside. Without it those two are the same
+                // silence.
+                AppLog.WriteSync("PrprPort: GameSetScreen " + _vpW + "x" + _vpH + " ok");
+                // Read BEFORE the create, not after.
+                //
+                // `GameRunning` and `GameFrames` both go through `host::GAME`, which is a
+                // `thread_local!` - and on the first device run `GameCreate` came back
+                // `AlreadyRunning` on a brand-new process where nothing had created anything.
+                // The only way that happens is if the thread-local reads as occupied when it is
+                // not, i.e. if the TLS slot this CRT-free ARM DLL was linked with does not hold
+                // the value Rust thinks it does. Checked here, before any code has had a chance
+                // to populate `GAME`, so the answer is unambiguous: `running=False frames=-1`
+                // means TLS is sound and the problem is elsewhere; anything else names it.
+                AppLog.WriteSync("PrprPort: before create: running=" + PrprPort.GameRunning()
+                    + " frames=" + PrprPort.GameFrames());
+                result = PrprPort.GameCreate(EngineFolder, EngineChart);
+            }
+            catch (Exception ex)
+            {
+                threw = ex.GetType().Name + ": " + ex.Message;
+            }
+            create.Stop();
+
+            // Status first and separately, because it is the part that can throw again: if the DLL
+            // failed to load, asking it for its state inside the *log line* would escape this method
+            // and take the thread down before it has reported anything at all. Read here rather than
+            // by `StartEngineAsync` because `GameRunning` is a thread-local read - from the UI
+            // thread it answers `False` for a game this thread has just built.
+            try
+            {
+                status = "running=" + PrprPort.GameRunning()
+                    + " | " + PrprPort.TextureSummary();
+            }
+            catch (Exception ex)
+            {
+                status = "status unavailable: " + ex.GetType().Name;
+            }
+
+            // Publish the verdict *before* signalling, so the "engine ready" line StartEngineAsync
+            // prints and the state every watchdog reads afterwards are one decision rather than two
+            // writes that can be seen in either order.
+            bool ready = result == PrprPort.GameResult.Ok && threw == null;
+            int published = ready ? 2 : 3;
+            System.Threading.Interlocked.Exchange(ref _engineState, published);
+            created.TrySetResult(new EngineCreateOutcome
+            {
+                Result = result,
+                Threw = threw,
+                ElapsedMs = create.ElapsedMilliseconds,
+                Status = status,
+            });
+
+            // A teardown that arrived *during* the create leaves `_engineState` at 1 (it must -
+            // see TearDown) and sets `_engineStop` instead; that flag, read here, is the earliest
+            // moment destroying is legal. Doing it in TearDown would be either a destroy racing a
+            // `GameCreate` that is still parsing or - from the UI thread - a call into an empty
+            // thread-local slot that frees nothing, which is what the old code did.
+            bool stopRequested = System.Threading.Interlocked.CompareExchange(ref _engineStop, 0, 0) != 0;
+            if (ready && !stopRequested)
+            {
+                try
+                {
+                    RunEngineTicks();
+                }
+                catch (Exception ex)
+                {
+                    // A throwing frame must not skip the destroy below: the game would be left in a
+                    // thread-local slot that nothing can reach any more, and the page would keep
+                    // reporting a ready state no thread is ticking. 3 is the closest thing the
+                    // state machine has to "this engine is finished", and TearDown still clears it.
+                    AppLog.WriteSync("RustStage1: engine tick loop threw", ex);
+                    System.Threading.Interlocked.Exchange(ref _engineState, 3);
+                }
+            }
+
+            // Destroy on the way out on every path, and log it here where the counts are real.
+            // `host::GAME` only ever holds something after a *successful* create, so the failure
+            // path costs nothing but the line - and it cannot swallow the reason StartEngineAsync
+            // is about to read, because `LAST_ERROR` is a global mutex that `host::destroy` does
+            // not touch (only the next `create` or the next `frame` does).
+            try
+            {
+                PrprPort.GameDestroy();
+                AppLog.WriteSync("RustStage1: GameDestroy after "
+                    + System.Threading.Interlocked.CompareExchange(ref _engineFrames, 0, 0)
+                    + " engine frames / "
+                    + System.Threading.Interlocked.CompareExchange(ref _engineCmds, 0, 0) + " commands");
+            }
+            catch (Exception ex)
+            {
+                AppLog.WriteSync("RustStage1: GameDestroy", ex);
+            }
+
+            // Hand the state back only when a teardown has already asked for it (`stopRequested`),
+            // and only if it still holds what *this* thread published. Without the first condition
+            // a create that failed on its own would go back to 0 instead of staying at 3 for
+            // TearDown to report and clear, and without the second this write could stomp the 1 a
+            // restarted page has already claimed for the *next* engine thread - leaving that run
+            // stuck at "creating" forever. The window where state is 1 is exactly the one TearDown
+            // cannot close itself: it must leave 1 alone while the create is in flight, so this
+            // thread is the one that releases it.
+            if (stopRequested)
+            {
+                System.Threading.Interlocked.CompareExchange(ref _engineState, 0, published);
+            }
+        }
+
+        /// <summary>
+        /// Tick the engine at about 60 Hz until the page drops <c>_engineState</c> below 2.
+        ///
+        /// This is the loop that used to live in <c>OnFrame</c>, where it could never produce
+        /// anything: it ran on the UI thread while the engine lived in the creating thread's
+        /// thread-local slot, so every call found no engine and came back as an empty frame.
+        /// </summary>
+        private void RunEngineTicks()
+        {
+            // A local rather than a field, deliberately: only this task reads or writes the
+            // engine's `dt` now, and a field would be one more thing the UI thread could reset
+            // behind the back of the task that owns the engine (there used to be an
+            // `_engineClock` field for exactly that, reset from `OnFrame` and `TearDown`).
+            Stopwatch frameClock = Stopwatch.StartNew();
+            bool firstTick = true;
+            while (System.Threading.Interlocked.CompareExchange(ref _engineState, 0, 0) == 2)
+            {
+                double dt;
+                if (firstTick)
+                {
+                    // No previous timestamp to subtract from on the first tick. One frame's worth,
+                    // because starting at 0 s would advance the engine by nothing at all and later
+                    // read as "the engine never moved".
+                    firstTick = false;
+                    dt = 1.0 / 60.0;
+                }
+                else
+                {
+                    // Wall time since the previous frame *started*, the sleep included, so the
+                    // engine advances by the real interval instead of only the part of it this
+                    // thread happened to be awake for.
+                    dt = frameClock.Elapsed.TotalSeconds;
+                }
+                frameClock.Restart();
+
+                // Zero capacities, and this is not an oversight: `Drain` allocates
+                // `new PortVertex[vertexCapacity]` and reads every element of it on *every* frame
+                // whether or not anything was recorded, and this round needs only `Count` - which
+                // comes back either way. The real capacities belong to Stage 3, when something
+                // actually draws them.
+                var frame = PrprPort.GameFrame(dt, 0, 0);
+                System.Threading.Interlocked.Increment(ref _engineFrames);
+                System.Threading.Interlocked.Add(ref _engineCmds, frame.Count);
+                if (!_engineTicked)
+                {
+                    _engineTicked = true;
+                    AppLog.WriteSync("RustStage1: engine frame#1 -> " + frame.Count
+                        + " commands (dt=" + dt.ToString("0.000") + ")");
+
+                    // Zero commands on the first frame is a diagnosis in itself, and there are two
+                    // opposite causes: `Main::render` failed before it drew (recorded by the Rust
+                    // side), or it returned Ok having drawn nothing (nothing recorded). The return
+                    // code cannot tell them apart, so the reason is read back here, once, on the
+                    // frame the verdict comes from.
+                    if (frame.Count == 0)
+                    {
+                        try
+                        {
+                            string why = PrprPort.GameLastError();
+                            AppLog.WriteSync("RustStage1: engine 0 commands: "
+                                + (why ?? "(render returned Ok and drew nothing)"));
+                        }
+                        catch (Exception ex)
+                        {
+                            AppLog.WriteSync("RustStage1: engine 0-commands reason unavailable: "
+                                + ex.Message);
+                        }
+                    }
+                }
+
+                // Pace to ~60 Hz without spinning: sleep out the remainder of a 16 ms budget, with a
+                // floor of 1 ms so a frame that already overran it still yields the processor rather
+                // than turning this loop into a busy wait on a phone core for the whole run.
+                //
+                // `Task.Delay(...).Wait()` rather than `Thread.Sleep`: this profile has no `Thread`
+                // type to sleep on (see `_engineThread`), and `Wait` here blocks the engine task's
+                // own thread - never a UI or pool thread - so it cannot deadlock the way this
+                // pattern would from a continuation.
+                long spentMs = frameClock.ElapsedMilliseconds;
+                int sleepMs = 16 - (int)spentMs;
+                System.Threading.Tasks.Task.Delay(sleepMs > 0 ? sleepMs : 1).Wait();
+            }
         }
 
         /// <summary>
@@ -724,6 +1108,10 @@ namespace Phirura
         /// <c>SurfaceImageSource</c> is a UI-thread object, so the <c>BeginDraw</c>/<c>EndDraw</c>
         /// pair Rust drives must happen on the thread that owns it. The work per frame is three
         /// native calls, so this is cheap.
+        ///
+        /// The engine is deliberately *not* part of this any more: it is ticked by
+        /// <see cref="EngineThreadMain"/>, because the Rust side keeps it in a thread-local slot
+        /// that only the thread which created it can see (see the note above that method).
         /// </summary>
         private void OnFrame(object sender, object e)
         {
@@ -738,40 +1126,12 @@ namespace Phirura
                 return;
             }
 
-            // M1: tick the engine, but only once GameCreate has returned. The create runs on a pool
-            // thread, so this gate is what keeps `game_frame` from ever entering a half-built engine.
-            if (_engineState == 2)
-            {
-                double dt;
-                if (_engineClock.IsRunning)
-                {
-                    dt = _engineClock.Elapsed.TotalSeconds;
-                    _engineClock.Restart();
-                }
-                else
-                {
-                    // No previous timestamp to subtract from on the first tick. One frame's worth,
-                    // because starting at 0 s would advance the engine by nothing at all and later
-                    // read as "the engine never moved".
-                    _engineClock.Restart();
-                    dt = 1.0 / 60.0;
-                }
-
-                // Zero capacities, and this is not an oversight: `Drain` allocates
-                // `new PortVertex[vertexCapacity]` and reads every element of it on *every* frame
-                // whether or not anything was recorded, and this round needs only `Count` - which
-                // comes back either way. The real capacities belong to Stage 3, when something
-                // actually draws them.
-                var frame = PrprPort.GameFrame(dt, 0, 0);
-                _engineFrames++;
-                _engineCmds += frame.Count;
-                if (!_engineTicked)
-                {
-                    _engineTicked = true;
-                    AppLog.WriteSync("RustStage1: engine frame#1 -> " + frame.Count
-                        + " commands (dt=" + dt.ToString("0.000") + ")");
-                }
-            }
+            // The engine is not ticked here any more. `host::GAME` is a `thread_local!`, so a
+            // `GameFrame` from the UI thread - the thread `GameCreate` never ran on - found an empty
+            // slot, returned `-1`, and `PrprPort.GameFrame` reported that as an empty frame: the
+            // first device run logged `0cmds` on every frame of an engine that had been created
+            // perfectly well. `EngineThreadMain` ticks it instead; this loop draws Stage 1's test
+            // quad, which is the half of the page that has always worked on this thread.
 
             // `draw_test_quad` is the whole frame on this route: BeginDraw, draw, EndDraw. There is
             // no blit afterwards because there is nothing to blit *to* - EndDraw is what publishes.
@@ -838,9 +1198,11 @@ namespace Phirura
                     // Engine half, on the same line so a single grep answers "was it ticking, and
                     // was it producing commands". A frame count alone would not: an engine that
                     // ticks and yields zero commands every time looks identical to a healthy one
-                    // that is simply between notes.
-                    + " | engine st=" + _engineState + " " + _engineFrames + "f "
-                    + _engineCmds + "cmds");
+                    // that is simply between notes. All three are read through Interlocked now:
+                    // the engine thread writes them from a thread of its own.
+                    + " | engine st=" + System.Threading.Interlocked.CompareExchange(ref _engineState, 0, 0)
+                    + " " + System.Threading.Interlocked.CompareExchange(ref _engineFrames, 0, 0) + "f "
+                    + System.Threading.Interlocked.CompareExchange(ref _engineCmds, 0, 0) + "cmds");
                 _clock5.Restart();
                 _frames5 = 0;
             }
@@ -975,38 +1337,31 @@ namespace Phirura
             catch (Exception) { }
             RustRenderer.Stop();
 
-            // Engine, last, and only when it is not mid-create: destroying while `GameCreate` is
-            // still running on a pool thread would free the engine out from under it. Leaving it
-            // running instead is recoverable - a later create reports AlreadyRunning, which the log
-            // names - while the race is not.
-            int engineState = _engineState;
+            // Engine, last - and only ever as a *request*. The engine lives in the thread that
+            // created it (`host::GAME` is a `thread_local!`), so a `GameDestroy` from this thread
+            // would touch an empty slot and free nothing: that is what this code did on the device,
+            // where the log showed `running=False` next to a create that had succeeded and `0cmds`
+            // on every frame after it. The engine thread destroys on its way out instead - see
+            // `EngineThreadMain` - and only once `GameCreate` has returned, which is the earliest
+            // point at which destroying is safe.
+            System.Threading.Interlocked.Exchange(ref _engineStop, 1);
+            int engineState = System.Threading.Interlocked.CompareExchange(ref _engineState, 0, 0);
             if (engineState == 1)
             {
+                // Mid-create: leave the state at 1. `SampleCreateProgress` spins on it and the
+                // engine thread still has to publish its own result through it. The flag set above
+                // is the whole signal in this case - the thread reads it the moment the create
+                // returns and destroys there, never while it is still parsing, which is the
+                // protection this branch existed to provide.
                 AppLog.WriteSync("RustStage1: engine create still in flight at teardown; not destroyed");
             }
-            else
+            else if (engineState != 0)
             {
-                if (engineState != 0)
-                {
-                    try
-                    {
-                        PrprPort.GameDestroy();
-                        AppLog.WriteSync("RustStage1: GameDestroy after " + _engineFrames
-                            + " engine frames / " + _engineCmds + " commands");
-                    }
-                    catch (Exception ex)
-                    {
-                        AppLog.WriteSync("RustStage1: GameDestroy", ex);
-                    }
-                }
-                _engineState = 0;
-                _engineFrames = 0;
-                _engineCmds = 0;
-                _engineTicked = false;
-                // Cleared, not just left: `IsRunning` would still be true from the run that just
-                // ended, so the next first tick would compute `dt` against a timestamp taken
-                // minutes ago and advance the engine by that whole gap in one step.
-                _engineClock.Reset();
+                // 2 (ticking) or 3 (a create that failed): dropping it to 0 is what ends the tick
+                // loop - the engine thread then calls `GameDestroy` and writes its own totals line.
+                // The counters are deliberately left alone here: zeroing them would race with that
+                // thread logging the very totals being cleared.
+                System.Threading.Interlocked.Exchange(ref _engineState, 0);
             }
         }
     }

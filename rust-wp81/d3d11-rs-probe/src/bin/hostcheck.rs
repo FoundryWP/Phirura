@@ -28,6 +28,8 @@
 mod direct;
 #[path = "../renderer.rs"]
 mod renderer;
+#[path = "../scene.rs"]
+mod scene;
 
 use core::ffi::c_void;
 use direct::*;
@@ -156,6 +158,122 @@ fn fail(code: i32, msg: &str) -> ! {
     std::process::exit(code);
 }
 
+// ---------------------------------------------------------------------------
+// Stage 3 helper: decode + structurally validate + build one fixture
+// ---------------------------------------------------------------------------
+//
+// Lives outside `main` because the sequence is identical for both fixtures, and because the
+// *order is a contract*: `scene::decode` fills fixed shared arenas (no per-frame allocation is
+// the whole design - see scene.rs), so loading a second fixture invalidates the first one's
+// `Frame`. Hence: finish everything with fixture A before calling this for B, and replay only
+// the last one built (the arenas hold a single frame at a time - the same single-threaded,
+// one-frame-drain rule the shim's own PORT_* buffers follow).
+//
+// What is asserted here is *structural only*: the stream must decode without panicking, the
+// counts must agree with the header (decode's exact-size check), no NaN anywhere, every index
+// must address its own batch, and the build must account for every command exactly once.
+// "Coordinate is on screen" is deliberately absent - see scene.rs's module doc: the fixture on
+// disk predates the pixel-space projection, so a range assertion would fail for reasons that
+// have nothing to do with the renderer.
+//
+// Returns the build plus the frame's recorded screen size (the replay sets its viewport from
+// those numbers, not from the harness's idea of the window).
+fn stage3_load(bytes: &[u8], tag: &str) -> (scene::Build, f32, f32) {
+    let f = match scene::decode(bytes) {
+        Ok(f) => f,
+        Err(e) => fail(
+            10,
+            &format!("[hostcheck] fixture {}: {}", tag, e.name()),
+        ),
+    };
+    let r = scene::validate(&f);
+    // The four counts printed next to `ok` are the whole "file length == header counts" proof:
+    // decode only fills those slices after checking `HEADER + cmds*56 + verts*32 + idx*2 +
+    // texs*16 == bytes.len()`, so a header/record disagreement surfaces as `Fail::SizeMismatch`
+    // above rather than as a silent truncation.
+    println!(
+        "[hostcheck] 9 {} frame={} screen={}x{} cmds={} verts={} idx={} texs={} \
+kinds[tex,rect,line,circle,geo]={:?} flipped={} stray_bits={} unknown_kind={} \
+nan={} verts_nan={} vtx_oob={} idx_oob={} local_idx_oob={} mode_bad={} no_cmds={}",
+        tag,
+        f.frame_id,
+        f.screen_w,
+        f.screen_h,
+        r.cmds,
+        r.verts,
+        r.idx,
+        r.texs,
+        r.kinds,
+        r.flipped,
+        r.stray_bits,
+        r.unknown_kind,
+        r.nan,
+        r.verts_nan,
+        r.vtx_oob,
+        r.idx_oob,
+        r.local_idx_oob,
+        r.mode_bad,
+        r.empty
+    );
+    if !r.ok() {
+        fail(
+            10,
+            &format!("[hostcheck] fixture {}: structural validation failed", tag),
+        );
+    }
+
+    let b = scene::build(&f);
+    println!(
+        "[hostcheck] 9 {} build: draws={} empty={} skipped={} verts={} idx={}",
+        tag, b.draws, b.empty, b.skipped, b.nverts, b.nidx
+    );
+    // `skipped` is the one that must be zero: it counts every command the builder refused to
+    // turn into a draw (unknown tag, bad DrawMode, out-of-range arena slice, no room left).
+    // A valid frame never trips any of those, and a non-zero value here means the replay would
+    // silently draw *less* than the recording contains.
+    if b.skipped != 0 {
+        fail(
+            10,
+            &format!(
+                "[hostcheck] fixture {}: build skipped {} of {} commands",
+                tag, b.skipped, r.cmds
+            ),
+        );
+    }
+    // Every command lands in exactly one bucket - drawn, geometry-with-no-indices, or refused -
+    // so the three counters must add back up to the decoded command count. This is what catches
+    // a command that vanished between decode and build (the identity cannot drift, because
+    // `build` walks `f.cmds` one match arm per command).
+    if b.draws + b.empty + b.skipped != r.cmds {
+        fail(
+            10,
+            &format!(
+                "[hostcheck] fixture {}: build accounted for {} of {} commands \
+(draws={} empty={} skipped={})",
+                tag,
+                b.draws + b.empty + b.skipped,
+                r.cmds,
+                b.draws,
+                b.empty,
+                b.skipped
+            ),
+        );
+    }
+    (b, f.screen_w, f.screen_h)
+}
+
+// --------------------------------------------------------------------------
+// Stage 3 fixtures: two frames recorded by `host_m1::dump_fixture`
+// --------------------------------------------------------------------------
+//
+// Embedded with `include_bytes!` rather than read at runtime: this crate does no file I/O
+// anywhere (`std::fs` is off the table for the port), the paths are compile-time and relative
+// to *this* file so `cargo run` works from any directory, and the harness stays a single
+// artifact that cannot fail because a fixture moved. `.last` is the recording's final frame -
+// same stream shape hours apart is what `dump_fixture`'s two-fixture design exists to prove.
+static FIXTURE: &[u8] = include_bytes!("../../../fixtures/190.bin");
+static FIXTURE_LAST: &[u8] = include_bytes!("../../../fixtures/190.bin.last");
+
 fn main() {
     unsafe {
         println!("[hostcheck] --- Stage 1 desktop verification ---");
@@ -173,7 +291,11 @@ fn main() {
         );
 
         // ---- 2. swapchain ----
-        let (w, h) = (1280u32, 720u32);
+        // Stage 3 replays a recorded frame whose screen is 768x1229 (Lumia 925 portrait),
+        // so the backbuffer must match: the replay draws in screen pixels into the current
+        // viewport, and viewport == backbuffer here. Every Stage 1/2 check below is written
+        // in terms of w/h, so resizing costs those checks nothing.
+        let (w, h) = (768u32, 1229u32);
         let hwnd = make_window(w, h);
         if hwnd.is_null() {
             fail(2, "CreateWindowExW");
@@ -729,12 +851,12 @@ fn main() {
         // ---- 7b. read the pixels back: the only check that says the quad *rasterized* --------
         //
         // Every check above answers an HRESULT, and `Draw` returns `void`, so this harness could
-        // print "ALL STAGE 1 CHECKS PASSED" over a frame that produced no fragments at all — which
+        // print "ALL STAGE 1 CHECKS PASSED" over a frame that produced no fragments at all 鈥?which
         // is how the Lumia spent several rounds showing a perfect clear colour and no quad while
         // every gate stayed green. Reading the backbuffer turns the acceptance test into a pixel:
         // the centre must be the quad (white test texture x vertex colour) and a corner must still
-        // be the clear colour. The draw path here is the same code the phone runs — same shaders,
-        // same vertices, same projection, same bind order — so a failure is reproducible without a
+        // be the clear colour. The draw path here is the same code the phone runs 鈥?same shaders,
+        // same vertices, same projection, same bind order 鈥?so a failure is reproducible without a
         // deploy, and a pass moves the suspicion to what route 3 does differently.
         let get_buffer2: extern "system" fn(
             *mut c_void,
@@ -800,7 +922,7 @@ fn main() {
             RowPitch: 0,
             DepthPitch: 0,
         };
-        // `D3D11_MAP_READ` is 1, not 3 — 3 is `READ_WRITE`, which a read-only staging texture
+        // `D3D11_MAP_READ` is 1, not 3 鈥?3 is `READ_WRITE`, which a read-only staging texture
         // refuses with `E_INVALIDARG`. That single digit cost a deploy to find on the phone.
         if map(
             context.vtbl as *mut c_void,
@@ -891,7 +1013,7 @@ fn main() {
         }
 
         // The quad is white texture x (1.0, 0.4, 0.2, 1.0) alpha-blended over a clear of
-        // (0.05, 0.05, 0.1) — opaque, so 0xFFFF6633 exactly.
+        // (0.05, 0.05, 0.1) 鈥?opaque, so 0xFFFF6633 exactly.
         println!(
             "[hostcheck] 7b readback center=0x{:08X} corner=0x{:08X} (want center=0xFFFF6633)",
             center, corner
@@ -914,7 +1036,242 @@ fn main() {
         }
         println!("[hostcheck] 8 present ok hr=0x{:08x}", phr);
 
+        // ==================================================================
+        // Stage 3: decode + structurally validate + GPU-replay recorded frames
+        // ==================================================================
+        println!("[hostcheck] --- Stage 3 recorded-frame replay ---");
+
+        // ---- 9. decode / validate / build both fixtures ----
+        // Order matters and is documented on `stage3_load`: each `decode` refills the one shared
+        // arena set, so frame 0's `Frame` is dead the moment `.last` is decoded. Nothing below
+        // uses `b0`'s arenas - it is loaded first purely so *both* recordings are validated, and
+        // `b0` itself survives as an ordinary value (counts only) because `Build` copies out.
+        let (b0, sw0, sh0) = stage3_load(FIXTURE, "190");
+        println!(
+            "[hostcheck] 9a frame 0: {} draws / {} verts / {} idx, screen {}x{}",
+            b0.draws, b0.nverts, b0.nidx, sw0, sh0
+        );
+        let (b1, sw1, sh1) = stage3_load(FIXTURE_LAST, "190.last");
+        println!(
+            "[hostcheck] 9b frame last: {} draws / {} verts / {} idx, screen {}x{}",
+            b1.draws, b1.nverts, b1.nidx, sw1, sh1
+        );
+        // The replay below draws into the harness's backbuffer, which was sized in step 2 to
+        // match the recording (768x1229). A mismatch is not a scene.rs bug - the projection and
+        // viewport are built from the *frame's* screen size, so they stay self-consistent - but
+        // it would mean step 2 drifted from the fixture and every pixel check below measures
+        // two different screens at once, so it fails loudly instead of being quietly clipped.
+        if sw1 != w as f32 || sh1 != h as f32 {
+            fail(
+                10,
+                &format!(
+                    "[hostcheck] fixture screen {}x{} != swapchain {}x{} (step 2 drifted)",
+                    sw1, sh1, w, h
+                ),
+            );
+        }
+
+        // ---- 10. replay the last frame through the real pipeline ----
+        // Clear to a colour no recorded command can produce, so the readback below can say what
+        // the *replay* drew rather than what Stage 1 left behind. The frame's own coordinates
+        // decide what lands where; because the on-disk fixture predates the pixel-space
+        // projection (scene.rs module doc) the *count* is checked, never the position - and the
+        // count is only reported, not asserted, until a re-recorded fixture exists.
+        clear(
+            context.vtbl as *mut c_void,
+            rtv.vtbl as *mut c_void,
+            [0.0, 0.0, 0.0, 1.0].as_ptr(),
+        );
+
+        // The GPU's own account of the replay. `DrawIndexed` returns void like every other draw
+        // call, so "the draws were issued" and "geometry reached the input assembler" are only
+        // distinguishable through these counters - and that distinction is exactly what a
+        // mis-decoded command stream (bad index range, zero-count item, wrong topology) would
+        // break, which is why Stage 3 needs its own query rather than reusing Stage 1's.
+        let mut q3 = ComPtr::NULL;
+        let qhr3 = create_query(
+            device.vtbl as *mut c_void,
+            &QueryDesc {
+                query: D3D11_QUERY_PIPELINE_STATISTICS,
+                misc_flags: 0,
+            },
+            &mut q3.vtbl as *mut _ as *mut *mut c_void,
+        );
+        let have_q3 = qhr3 >= 0 && !q3.is_null();
+        if !have_q3 {
+            println!(
+                "[hostcheck] 10 CreateQuery hr=0x{:08X} - no pipeline stats for the replay",
+                qhr3 as u32
+            );
+        }
+        if have_q3 {
+            begin(context.vtbl as *mut c_void, q3.vtbl as *mut c_void);
+        }
+
+        // Bind set is entirely inside scene::draw; `srv` is the 1x1 white stand-in every texture
+        // id resolves to (fixture pixels are omitted by design - see scene.rs's module doc).
+        let dr = scene::draw(&p, rtv, srv, sw1, sh1, &b1);
+        if dr != 0 {
+            fail(
+                11,
+                &format!(
+                    "[hostcheck] scene::draw step {} failed, LAST_HR=0x{:08X}",
+                    dr,
+                    scene::LAST_HR as u32
+                ),
+            );
+        }
+        println!(
+            "[hostcheck] 10 scene::draw ok ({} DrawIndexed calls issued)",
+            b1.draws
+        );
+        if have_q3 {
+            end(context.vtbl as *mut c_void, q3.vtbl as *mut c_void);
+        }
+
+        // ---- 10b. wait for the GPU, then read the replay's pixels back ----
+        // Same two-step as Stage 1's 7b/7c: the staging `Map` blocks until the GPU is done (and
+        // is therefore also what makes the query result trustworthy), *then* `GetData` runs. The
+        // backbuffer desc/format (`d`, `rgba`) come from step 7b and still describe this target.
+        let mut bb3 = ComPtr::NULL;
+        if get_buffer2(
+            swapchain.vtbl as *mut c_void,
+            0,
+            &IID_ID3D11TEXTURE2D as *const Guid,
+            &mut bb3.vtbl as *mut _ as *mut *mut c_void,
+        ) < 0
+            || bb3.is_null()
+        {
+            fail(11, "GetBuffer (replay readback)");
+        }
+        let mut st3 = ComPtr::NULL;
+        if create_tex(
+            device.vtbl as *mut c_void,
+            &sd,
+            core::ptr::null(),
+            &mut st3.vtbl as *mut _ as *mut *mut c_void,
+        ) < 0
+            || st3.is_null()
+        {
+            fail(11, "CreateTexture2D staging (replay readback)");
+        }
+        copy(
+            context.vtbl as *mut c_void,
+            st3.vtbl as *mut c_void,
+            bb3.vtbl as *mut c_void,
+        );
+        let mut m3 = D3D11_MAPPED_SUBRESOURCE {
+            pData: core::ptr::null_mut(),
+            RowPitch: 0,
+            DepthPitch: 0,
+        };
+        if map(
+            context.vtbl as *mut c_void,
+            st3.vtbl as *mut c_void,
+            0,
+            D3D11_MAP_READ,
+            0,
+            &mut m3,
+        ) < 0
+        {
+            fail(11, "Map staging (replay readback)");
+        }
+        // Fresh closure over `m3`: the Stage 1 `read` closure points at `m2`'s unmapped region,
+        // and dereferencing that would be use-after-unmap, not a stale value.
+        let read3 = |x: u32, y: u32| -> u32 {
+            let base = m3.pData as *const u8;
+            let p = base.add(y as usize * m3.RowPitch as usize + x as usize * 4);
+            let (r, g, b, a) = if rgba {
+                (*p, *p.add(1), *p.add(2), *p.add(3))
+            } else {
+                (*p.add(2), *p.add(1), *p, *p.add(3))
+            };
+            ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+        };
+        let (mut hits3, mut minx, mut maxx, mut miny, mut maxy) =
+            (0u64, u32::MAX, 0u32, u32::MAX, 0u32);
+        let mut y3 = 0u32;
+        while y3 < h {
+            let mut x3 = 0u32;
+            while x3 < w {
+                if read3(x3, y3) != 0 {
+                    hits3 += 1;
+                    if x3 < minx { minx = x3; }
+                    if x3 > maxx { maxx = x3; }
+                    if y3 < miny { miny = y3; }
+                    if y3 > maxy { maxy = y3; }
+                }
+                x3 += 2;
+            }
+            y3 += 2;
+        }
+        unmap(context.vtbl as *mut c_void, st3.vtbl as *mut c_void, 0);
+        if hits3 > 0 {
+            println!(
+                "[hostcheck] 10b non-black pixels={} bbox x=[{}..{}] y=[{}..{}] (info only: \
+fixture coords predate the pixel-space projection)",
+                hits3, minx, maxx, miny, maxy
+            );
+        } else {
+            println!(
+                "[hostcheck] 10b no non-black pixel anywhere in {}x{} (info only - the stale \
+fixture carries world-space coordinates, so where it lands is exactly what a re-record will \
+settle)",
+                w, h
+            );
+        }
+        st3.release();
+        bb3.release();
+
+        // ---- 10c. the GPU's account of the replay ----
+        // Now that the staging `Map` above has blocked, `GetData` reads real counters.
+        if have_q3 {
+            let get_data: extern "system" fn(*mut c_void, *mut c_void, *mut c_void, usize, UINT) ->
+                HRESULT = context.method(D3D11CONTEXT_GETDATA);
+            let mut stq = PipeStats::default();
+            let mut tries = 0u32;
+            let mut ghr = -1i32;
+            while tries < 200 {
+                ghr = get_data(
+                    context.vtbl as *mut c_void,
+                    q3.vtbl as *mut c_void,
+                    &mut stq as *mut PipeStats as *mut c_void,
+                    core::mem::size_of::<PipeStats>(),
+                    0,
+                );
+                if ghr == 0 {
+                    break;
+                }
+                tries += 1;
+            }
+            println!(
+                "[hostcheck] 10c stats IAverts={} IAtris={} VSinv={} PSinv={} (want IAverts={} \
+== nidx of the build, hr=0x{:08X} tries={})",
+                stq.ia_vertices, stq.ia_primitives, stq.vs_invocations, stq.ps_invocations,
+                b1.nidx, ghr as u32, tries
+            );
+            // The one hard GPU assertion of Stage 3. Every draw item is DrawIndexed over u16
+            // indices, so the input assembler must have consumed exactly `b1.nidx` vertices -
+            // > 0 proves geometry reached the IA at all, and == proves the index ranges the
+            // builder emitted are the ranges the draw side issued (a rebasing or range bug
+            // shows up here as a mismatch rather than as a silently mangled frame).
+            if stq.ia_vertices == 0 {
+                fail(11, "replay drew nothing: IA consumed 0 vertices (draw items not issued?)");
+            }
+            if stq.ia_vertices != b1.nidx as u64 {
+                fail(
+                    11,
+                    &format!(
+                        "[hostcheck] IA vertices {} != build idx count {}",
+                        stq.ia_vertices, b1.nidx
+                    ),
+                );
+            }
+            q3.release();
+        }
+
         // ---- teardown ----
+        scene::release();
         srv.release();
         tex.release();
         rtv.release();
@@ -933,5 +1290,8 @@ fn main() {
         DestroyWindow(hwnd);
 
         println!("[hostcheck] === ALL STAGE 1 CHECKS PASSED ===");
+        println!("[hostcheck] === ALL STAGE 3 REPLAY CHECKS PASSED ===");
     }
 }
+
+

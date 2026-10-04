@@ -366,8 +366,31 @@ impl Texture2D {
     pub fn set_filter(&self, _f: FilterMode) {}
 
     pub fn delete(&self) {}
-    pub fn from_miniquad_texture(_t: crate::miniquad_compat::Texture) -> Self {
-        Texture2D { id: 0, width: 0, height: 0 }
+    /// Adopts a handle `prpr` created itself - a *render* texture, allocated empty.
+    ///
+    /// Returning `0` here was not a harmless placeholder; it is why every piece of prpr and Phira
+    /// text is invisible. `prpr` builds its glyph atlas exactly this way (`ui/text.rs:305`), so a
+    /// dropped id broke three things at once: `glBindTexture` bound 0, `gl.texture(Some(..))` named
+    /// texture 0 - which the shell reads as "no texture", so the text geometry went untextured -
+    /// and the atlas never entered the registry at all, because the one path that registers pixels
+    /// (`from_rgba8`) is not on this route.
+    ///
+    /// Installing `miniquad`'s write sink here rather than in some init routine is deliberate. The
+    /// atlas is created *through this call*, so the sink is in place before its first
+    /// `glTexSubImage2D` by construction - an ordering that cannot be got wrong, which matters
+    /// because getting it wrong would look exactly like the bug this fixes.
+    pub fn from_miniquad_texture(t: crate::miniquad_compat::Texture) -> Self {
+        crate::miniquad::gl::set_texture_write_sink(draw::texture_write_sink);
+        // A zero-sized handle is a placeholder - `Texture::from_raw_id` cannot know the dimensions
+        // - and there is nothing to allocate for one.
+        if t.width > 0 && t.height > 0 {
+            draw::register_render_texture(t.id, t.width, t.height);
+        }
+        Texture2D {
+            id: t.id,
+            width: t.width,
+            height: t.height,
+        }
     }
     /// `prpr` calls this only to key its draw batches, and batching belongs to the renderer on
     /// this platform - so the id is returned unchanged rather than pretending to be a GL handle.
@@ -528,9 +551,21 @@ impl QuadGl {
         // prpr uses the recorded geometry is already correct, so this is a no-op on WP8.1.
     }
 
-    pub fn push_model_matrix(&self, _mat: Mat4) {}
+    /// The model matrix `prpr` brackets each draw with.
+    ///
+    /// `Resource::apply_model_of` (`core/resource.rs:646`) is how a judge line, and every note on
+    /// it, gets from chart space to screen space - with this a no-op, all of them drew at their
+    /// local origin. Applied when a draw is recorded instead of when it is flushed: upstream
+    /// snapshots the model per draw call (`prpr-macroquad/src/quad_gl.rs:851`) and the shader
+    /// reads `Projection * Model * position` (`quad_gl.rs:988`), so the two are the same
+    /// arithmetic. See `crate::transform`.
+    pub fn push_model_matrix(&self, mat: Mat4) {
+        crate::transform::push_model(&mat)
+    }
 
-    pub fn pop_model_matrix(&self) {}
+    pub fn pop_model_matrix(&self) {
+        crate::transform::pop_model()
+    }
 
     /// Builds a pipeline.
     ///
@@ -709,15 +744,26 @@ pub mod window {
         }
     }
 
-    /// The camera stack `prpr::scene::game` brackets its HUD passes with.
+    /// The camera stack `prpr::scene::game` brackets its HUD passes with, and the camera every
+    /// draw is projected through on its way into `PortCmd`.
     ///
-    /// Nothing is pushed: the shell renders through Win2D and applies its own transforms, so there
-    /// is no GL state to save. Kept as a no-op pair so the bracketing calls stay balanced.
-    pub fn push_camera_state() {}
-    pub fn pop_camera_state() {}
+    /// These used to be no-ops on the grounds that "the shell renders through Win2D and applies
+    /// its own transforms". That got the shell's transforms, not `prpr`'s - and `prpr`'s are the
+    /// ones that decide where a chart's judge line and notes actually are. See `crate::transform`
+    /// for why projecting at record time is equivalent to projecting at flush time.
+    pub fn push_camera_state() {
+        crate::transform::push_camera()
+    }
+    pub fn pop_camera_state() {
+        crate::transform::pop_camera()
+    }
 
-    pub fn set_camera(_c: &Camera2D) {}
-    pub fn set_default_camera() {}
+    pub fn set_camera(c: &Camera2D) {
+        crate::transform::set_camera(c)
+    }
+    pub fn set_default_camera() {
+        crate::transform::set_default_camera()
+    }
     pub fn request_new_screen_size(_w: f32, _h: f32) {}
     pub fn next_frame() -> impl core::future::Future<Output = ()> {
         core::future::ready(())
@@ -822,13 +868,74 @@ pub mod input {
     pub fn mouse_wheel() -> (f32, f32) {
         (0.0, 0.0)
     }
+    /// Touch events the shell pushed for the frame now being drawn.
+    ///
+    /// One queue serves two readers that upstream feeds from two different places. Macroquad's
+    /// `touches()` reports the *state* of what is currently down, which `Judge::update` needs in
+    /// order to keep positioning a held note; `repeat_all_miniquad_input` replays the *events*,
+    /// which is the only way `prpr::judge`'s `TOUCHES` store gets filled - and `TOUCHES` is what
+    /// `get_touches()` reads, which is every button in the scene and the whole `Ui`. Supplying
+    /// only one of the two gives the characteristic half-working input: notes judge but nothing
+    /// on screen can be pressed, or the reverse.
+    thread_local! {
+        static PENDING: std::cell::RefCell<Vec<Touch>> = std::cell::RefCell::new(Vec::new());
+    }
+
+    /// How many touch events one frame may carry.
+    ///
+    /// The shell sends one event per finger per frame, so a real device never comes near this.
+    /// The cap exists so a runaway caller cannot grow the queue without bound, and returning a
+    /// code for it lets the caller count the loss instead of watching input quietly vanish - the
+    /// failure mode that would otherwise be indistinguishable from prpr ignoring the touch.
+    const TOUCH_CAP: usize = 128;
+
+    /// Queue one touch event for the frame now being built.
+    ///
+    /// Returns 0, or -2 when this frame's queue is full. The event is **not** consumed here: it
+    /// stays until the host clears the queue after the frame has been fully drawn, because
+    /// `Judge::update` and `Scene` read it at different points within that one frame.
+    ///
+    /// `time` is uptime, not wall time - see `wp81_game_touch`.
+    pub fn push_touch(id: u64, phase: TouchPhase, x: f32, y: f32, time: f64) -> i32 {
+        PENDING.with(|q| {
+            let mut q = q.borrow_mut();
+            if q.len() >= TOUCH_CAP {
+                return -2;
+            }
+            q.push(Touch {
+                id,
+                phase,
+                position: Vec2::new(x, y),
+                time,
+            });
+            0
+        })
+    }
+
+    /// Runs `f` over this frame's events without consuming them.
+    pub(crate) fn for_each_pending(mut f: impl FnMut(&Touch)) {
+        PENDING.with(|q| {
+            let q = q.borrow();
+            for t in q.iter() {
+                f(t);
+            }
+        })
+    }
+
+    /// Drop the frame's queue. Called by the host once the frame has been judged *and* drawn,
+    /// never earlier: an event consumed before render would leave `Scene` reading a frame older
+    /// than the one it is drawing, which on screen looks like a button that answers one frame late.
+    pub fn clear_touches() {
+        PENDING.with(|q| q.borrow_mut().clear());
+    }
+
     pub fn get_touches() -> Vec<Touch> {
-        Vec::new()
+        PENDING.with(|q| q.borrow().clone())
     }
 
     /// macroquad's name for the same list.
     pub fn touches() -> Vec<Touch> {
-        Vec::new()
+        get_touches()
     }
 
     /// `prpr::judge` treats the left mouse button as a pointer, so this is the same input path as
@@ -847,6 +954,333 @@ pub mod input {
 
     pub fn is_mouse_button_released(_button: crate::miniquad::MouseButton) -> bool {
         false
+    }
+}
+
+// ===========================================================================
+// transform
+//
+// Two pieces of state `prpr` treats as real and the shell used to throw away: the camera set
+// before each pass, and the model matrix bracketing every draw.
+//
+// The vertex shader is `gl_Position = Projection * Model * vec4(position, 1)`
+// (`prpr-macroquad/src/quad_gl.rs:988`), so a point travels
+//
+//     local --Model--> world --Projection--> NDC --viewport--> pixels
+//
+// and the shell has to have collapsed all three into the pixel coordinates `PortCmd` carries by
+// the time the record is written. Doing it at record time rather than at flush time is sound
+// because macroquad flushes *before* it changes camera (`camera.rs:231` for `set_camera`,
+// `camera.rs:272` for `pop_camera_state`), so the camera in force when a draw is issued is
+// provably the camera it gets flushed with; `Model` is snapshotted per draw call the same way
+// (`quad_gl.rs:851`).
+//
+// Losing either was not cosmetic. `Resource::apply_model_of` is *the* call that puts a judge line
+// where the chart says it is (`core/resource.rs:646`), and with `push_model_matrix` a no-op every
+// line drew at `core/line.rs:252`'s local coordinates - `draw_line(-len, 0., len, 0., ...)`, all
+// 104 of them lying along one centre line. That is what the captured fixture showed.
+//
+// Thread-local because these are read and written only inside `wp81_game_frame`, and because it
+// costs no `unsafe`. The command arenas cannot be thread-local - the shell drains them from
+// another thread - so they stay `static mut`; these do not have that excuse.
+// ===========================================================================
+
+pub mod transform {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    /// One camera, reduced to the fields that decide where a point lands.
+    ///
+    /// `active: false` does not mean "a camera that does nothing". It is macroquad's *no camera*
+    /// state, which `Context::projection_matrix` (`prpr-macroquad/src/lib.rs:386`) resolves to
+    /// `pixel_perfect_projection_matrix` - `orthographic_rh_gl(0., w, h, 0.)`: pixels, origin
+    /// top-left, y down. Against a shell that already works in pixels that is the identity, so an
+    /// inactive camera reads as "these coordinates are already pixels".
+    #[derive(Copy, Clone)]
+    struct Cam {
+        active: bool,
+        zoom: (f32, f32),
+        target: (f32, f32),
+        offset: (f32, f32),
+        /// Radians. `prpr` never sets one; `Camera2D::matrix` has the term regardless.
+        rotation: f32,
+        /// GL convention: origin bottom-left, in screen pixels. `None` = the whole screen.
+        viewport: Option<(f32, f32, f32, f32)>,
+    }
+
+    const CAM_OFF: Cam = Cam {
+        active: false,
+        zoom: (1.0, 1.0),
+        target: (0.0, 0.0),
+        offset: (0.0, 0.0),
+        rotation: 0.0,
+        viewport: None,
+    };
+
+    /// `prpr` brackets a pass with exactly one push/pop - `scene.rs:522` and four sites in
+    /// `game.rs` - so eight is a ceiling never approached. A ceiling is the point: a `render`
+    /// that returns `Err` between its `push` and its `pop` would deepen the stack on every frame
+    /// forever, and a stack that grows silently is worse than one that refuses to.
+    const CAM_STACK_CAP: usize = 8;
+
+    thread_local! {
+        static CAM: Cell<Cam> = const { Cell::new(CAM_OFF) };
+        static CAM_STACK: RefCell<([Cam; CAM_STACK_CAP], usize)> =
+            const { RefCell::new(([CAM_OFF; CAM_STACK_CAP], 0)) };
+        static MODEL: Cell<Mat4> = const { Cell::new(Mat4::IDENTITY) };
+        static MODEL_STACK: RefCell<Vec<Mat4>> = const { RefCell::new(Vec::new()) };
+    }
+
+    // ---------------------------------------------------------------- camera
+
+    pub fn set_camera(c: &Camera2D) {
+        CAM.with(|cur| {
+            cur.set(Cam {
+                active: true,
+                zoom: (c.zoom.x, c.zoom.y),
+                target: (c.target.x, c.target.y),
+                offset: (c.offset.x, c.offset.y),
+                rotation: c.rotation.to_radians(),
+                viewport: c
+                    .viewport
+                    .map(|(x, y, w, h)| (x as f32, y as f32, w as f32, h as f32)),
+            })
+        });
+    }
+
+    pub fn set_default_camera() {
+        CAM.with(|cur| cur.set(CAM_OFF));
+    }
+
+    /// Saves the camera without touching it. Upstream does not flush here either
+    /// (`camera.rs:257`): whatever is buffered was already issued under the camera that is
+    /// current, and the bracket that follows always opens with its own `set_camera`.
+    pub fn push_camera() {
+        let saved = CAM.with(|cur| cur.get());
+        CAM_STACK.with(|s| {
+            let mut s = s.borrow_mut();
+            let (stack, len) = &mut *s;
+            if *len < CAM_STACK_CAP {
+                stack[*len] = saved;
+                *len += 1;
+            }
+        });
+    }
+
+    /// Restores what `push_camera` saved - which is the whole reason a stack exists. `game.rs`
+    /// sets the chart camera, draws, pops, and then keeps drawing under whatever was current
+    /// before it (`game.rs:1175` onwards). With a no-op pop those later draws would inherit the
+    /// chart's camera and land in the wrong space entirely.
+    pub fn pop_camera() {
+        let prev = CAM_STACK.with(|s| {
+            let mut s = s.borrow_mut();
+            let (stack, len) = &mut *s;
+            if *len == 0 {
+                None
+            } else {
+                *len -= 1;
+                Some(stack[*len])
+            }
+        });
+        if let Some(cam) = prev {
+            CAM.with(|cur| cur.set(cam));
+        }
+    }
+
+    // ----------------------------------------------------------------- model
+
+    /// `QuadGl::push_model_matrix` (`prpr-macroquad/src/quad_gl.rs:808`): the new matrix composes
+    /// on top of what is current, so a nested push multiplies rather than replaces.
+    pub fn push_model(m: &Mat4) {
+        let cur = MODEL.with(|c| c.get());
+        MODEL_STACK.with(|s| s.borrow_mut().push(cur));
+        MODEL.with(|c| c.set(cur * *m));
+    }
+
+    /// Upstream guards this with `model_stack.len() > 1` (`quad_gl.rs:813`): popping past the
+    /// base would leave the model undefined rather than merely wrong, so the same guard is kept.
+    pub fn pop_model() {
+        let prev = MODEL_STACK.with(|s| s.borrow_mut().pop());
+        if let Some(m) = prev {
+            MODEL.with(|c| c.set(m));
+        }
+    }
+
+    /// Start of every frame.
+    ///
+    /// macroquad begins with no camera (`lib.rs:299`) and `Resource` with an identity model
+    /// (`resource.rs:569`), so both return to their initial state here. That also caps a bracket
+    /// left open by a `render` that bailed out mid-pass: without it, one failing frame would
+    /// indent every frame after it.
+    pub fn reset_frame() {
+        CAM.with(|cur| cur.set(CAM_OFF));
+        CAM_STACK.with(|s| s.borrow_mut().1 = 0);
+        MODEL.with(|c| c.set(Mat4::IDENTITY));
+        MODEL_STACK.with(|s| s.borrow_mut().clear());
+    }
+
+    // -------------------------------------------------------------- projecting
+
+    fn viewport_px(cam: Cam) -> (f32, f32, f32, f32) {
+        cam.viewport.unwrap_or((
+            0.0,
+            0.0,
+            crate::window::screen_width(),
+            crate::window::screen_height(),
+        ))
+    }
+
+    /// `Camera2D::matrix` (`prpr-macroquad/src/camera.rs:75`), in the order GL applies it:
+    /// `T(offset) * (S(zoom) * R(rotation)) * T(-target)`. With `rotation`, `offset` and `target`
+    /// all zero - which is every camera `prpr` builds - this collapses to `world * zoom`.
+    fn cam_point(cam: Cam, p: Vec2) -> Vec2 {
+        let mut v = p - Vec2::new(cam.target.0, cam.target.1);
+        if cam.rotation != 0.0 {
+            let (s, c) = cam.rotation.sin_cos();
+            v = Vec2::new(v.x * c - v.y * s, v.x * s + v.y * c);
+        }
+        Vec2::new(
+            v.x * cam.zoom.0 + cam.offset.0,
+            v.y * cam.zoom.1 + cam.offset.1,
+        )
+    }
+
+    /// GL's viewport transform, plus the flip that turns GL's bottom-left origin into the
+    /// top-left one the shell draws in. `y` in a viewport tuple is GL's, so it is subtracted
+    /// from the screen height rather than added.
+    fn ndc_to_pixels(cam: Cam, ndc: Vec2) -> Vec2 {
+        let (x, y, w, h) = viewport_px(cam);
+        let sh = crate::window::screen_height();
+        Vec2::new(
+            x + (ndc.x + 1.0) * 0.5 * w,
+            sh - y - (ndc.y + 1.0) * 0.5 * h,
+        )
+    }
+
+    /// The whole shader path, done eagerly: `local -> world -> NDC -> pixels`.
+    ///
+    /// Every coordinate the shell ever sees goes through here, which is why `PortCmd` can stay a
+    /// plain list of pixel-space numbers with no camera or matrix attached to it.
+    pub fn project(x: f32, y: f32) -> (f32, f32) {
+        let q = MODEL.with(|c| c.get()) * Vec4::new(x, y, 0.0, 1.0);
+        let world = Vec2::new(q.x, q.y);
+
+        let cam = CAM.with(|c| c.get());
+        if !cam.active {
+            // Already pixels - `pixel_perfect_projection_matrix`, see `Cam`.
+            return (world.x, world.y);
+        }
+        let p = ndc_to_pixels(cam, cam_point(cam, world));
+        (p.x, p.y)
+    }
+
+    pub fn project_point(v: Vec2) -> Vec2 {
+        let (x, y) = project(v.x, v.y);
+        Vec2::new(x, y)
+    }
+
+    /// Maps a world-space direction, dropping every translation. Needed because a line's
+    /// thickness is a *length* perpendicular to it, and the cameras `prpr` builds are
+    /// deliberately non-uniform (`zoom: (1., -aspect)`), so the pixel-space perpendicular is not
+    /// in general the image of the world-space one.
+    pub fn project_delta(from: Vec2, to: Vec2) -> Vec2 {
+        let m = MODEL.with(|c| c.get());
+        let a = m * Vec4::new(from.x, from.y, 0.0, 1.0);
+        let b = m * Vec4::new(to.x, to.y, 0.0, 1.0);
+        let d = Vec2::new(b.x - a.x, b.y - a.y);
+
+        let cam = CAM.with(|c| c.get());
+        if !cam.active {
+            return d;
+        }
+        // Rotation and the per-axis zoom only: `cam_point` without `target`/`offset`, and
+        // `ndc_to_pixels` without the half-screen shift.
+        let mut r = d;
+        if cam.rotation != 0.0 {
+            let (s, c) = cam.rotation.sin_cos();
+            r = Vec2::new(r.x * c - r.y * s, r.x * s + r.y * c);
+        }
+        let (_, _, w, h) = viewport_px(cam);
+        Vec2::new(r.x * cam.zoom.0 * 0.5 * w, -r.y * cam.zoom.1 * 0.5 * h)
+    }
+
+    /// True when `local -> pixels` sends axis-aligned rectangles to axis-aligned rectangles - in
+    /// other words when nothing in the chain rotates.
+    ///
+    /// This decides which command a draw can be recorded as. `Cmd::Rect` and `Cmd::Texture` carry
+    /// `x/y/w/h` and nothing else, so the moment a `Model` rotates them there is nowhere to put
+    /// the fourth corner; such a draw has to go through the vertex arena, which has room for four
+    /// independent corners. `prpr` rotates its judge lines continuously, and a line carrying a
+    /// custom texture draws through `draw_texture_ex` under exactly that transform.
+    pub fn axis_aligned() -> bool {
+        let m = MODEL.with(|c| c.get());
+        if m.x_axis.y.abs() > 1e-6 || m.y_axis.x.abs() > 1e-6 {
+            return false;
+        }
+        CAM.with(|c| c.get()).rotation == 0.0
+    }
+
+    /// Projects the two opposite corners of a rectangle into one.
+    ///
+    /// Width and height keep their sign. The cameras `prpr` builds all have a negative `zoom.y`,
+    /// which mirrors the rectangle rather than inverting it, and preserving the sign is what lets
+    /// the reader flip its texture coordinates back the same way macroquad's own vertex builder
+    /// would have. Only meaningful when `axis_aligned()` holds.
+    pub fn project_rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        let (x0, y0) = project(x, y);
+        let (x1, y1) = project(x + w, y + h);
+        Rect::new(x0, y0, x1 - x0, y1 - y0)
+    }
+
+    /// The axis-aligned box enclosing all four projected corners - the degraded form a
+    /// *textured* draw falls back to once `axis_aligned()` stops holding.
+    ///
+    /// Degrading rather than turning to geometry is deliberate: `Cmd::Texture`'s eight payload
+    /// slots are already full (dest 4 + source 4) so there is nowhere to put an angle, and the
+    /// shell cannot texture-fill a tilted quad either - `Win2DChartRenderer.FillPortTriangle`
+    /// bounds a triangle for exactly that reason. Keeping the box preserves the picture's
+    /// position and extent, which is worth more than a solid silhouette. Rotating it properly
+    /// needs `PortCmd` to grow a transform, and is tracked as such.
+    ///
+    /// Only `prpr`'s custom-textured judge lines reach here: notes never go through
+    /// `draw_texture_ex` at all (`core/note.rs:82` batchifies them itself) and the HUD draws
+    /// under an identity model.
+    pub fn project_aabb(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        let (x0, y0) = project(x, y);
+        let (x1, y1) = project(x + w, y);
+        let (x2, y2) = project(x + w, y + h);
+        let (x3, y3) = project(x, y + h);
+        let min_x = x0.min(x1).min(x2).min(x3);
+        let max_x = x0.max(x1).max(x2).max(x3);
+        let min_y = y0.min(y1).min(y2).min(y3);
+        let max_y = y0.max(y1).max(y2).max(y3);
+        Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)
+    }
+
+    /// Turns a signed projected rectangle into the positive-extent form the shell reads.
+    ///
+    /// A mirroring transform produces negative extents on its own - every camera `prpr` builds
+    /// has a negative `zoom.y` - and the two readers disagree about what to do with them:
+    /// `Win2DChartRenderer.DrawPortTexture` drops `dw/dh <= 0` outright (`if (dw <= 0f || dh <=
+    /// 0f ...) return;`), so a texture that used to draw would silently stop. Folding the sign
+    /// back into `flip_x`/`flip_y` keeps the mirroring the transform asked for while handing the
+    /// reader the rectangle it expects - the renderer already implements flipping as a scale
+    /// about the rectangle's centre, so there is somewhere for it to go.
+    ///
+    /// `flip_*` are the caller's own; pass them straight through when it has none.
+    pub fn normalize_rect(r: Rect, mut flip_x: bool, mut flip_y: bool) -> (Rect, bool, bool) {
+        let (mut x, mut y, mut w, mut h) = (r.x, r.y, r.w, r.h);
+        if w < 0.0 {
+            x += w;
+            w = -w;
+            flip_x = !flip_x;
+        }
+        if h < 0.0 {
+            y += h;
+            h = -h;
+            flip_y = !flip_y;
+        }
+        (Rect::new(x, y, w, h), flip_x, flip_y)
     }
 }
 
@@ -974,6 +1408,15 @@ pub mod draw {
         height: u32,
         offset: usize,
         len: usize,
+        /// The rectangle written since the shell last drained it: `(x, y, w, h)`.
+        ///
+        /// Kept on the entry rather than in a side table because the shell discovers ids by
+        /// enumeration - a texture it has never seen must report its full extent, and the ones it
+        /// saw earlier must report only what moved. Encoding "new" as "fully dirty" makes both
+        /// cases one rule, and one rule cannot be half-implemented.
+        dirty: [u32; 4],
+        /// Whether `dirty` holds something the shell has not read yet.
+        dirty_pending: bool,
     }
 
     static mut TEX_ENTRIES: [TexEntry; TEX_SLOTS] = [TexEntry {
@@ -982,6 +1425,8 @@ pub mod draw {
         height: 0,
         offset: 0,
         len: 0,
+        dirty: [0; 4],
+        dirty_pending: false,
     }; TEX_SLOTS];
     static mut TEX_COUNT: usize = 0;
     static mut TEX_BYTES: Vec<u8> = Vec::new();
@@ -1042,6 +1487,8 @@ pub mod draw {
                         height,
                         offset: e.offset,
                         len: e.len,
+                        dirty: [0, 0, width, height],
+                        dirty_pending: true,
                     };
                     TEX_COUNT = count + 1;
                     TEX_ALIAS = TEX_ALIAS.wrapping_add(1);
@@ -1064,9 +1511,260 @@ pub mod draw {
                 height,
                 offset,
                 len: bytes.len(),
+                // Starts fully dirty: the shell learns ids by enumeration and has never seen this
+                // one, so "new" has to mean "read all of it" or its first read is incomplete.
+                dirty: [0, 0, width, height],
+                dirty_pending: true,
             };
             TEX_COUNT = count + 1;
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Render textures: registration, sub-image writes, and the shell's dirty-rectangle view
+    //
+    // `register_texture` is only ever reached from `from_rgba8`, i.e. from a texture uploaded
+    // whole. A render texture is the opposite - allocated empty, filled a rectangle at a time by
+    // `glTexSubImage2D` - and on this port the only one is the glyph atlas, which is the whole of
+    // where prpr/Phira text comes from.
+    // ---------------------------------------------------------------------
+
+    /// Writes that arrived for an id the registry does not know.
+    ///
+    /// Always a bug when non-zero: it means something is being drawn whose bytes never arrived,
+    /// which no amount of looking at the screen reveals. Paired with `texture_write_stats` because
+    /// refusals alone are ambiguous - zero refusals is also what an engine that never wrote anything
+    /// would report.
+    static mut TEX_WRITE_MISSES: u32 = 0;
+    /// Accepted sub-image writes, and the id of the most recent one.
+    static mut TEX_WRITES: u32 = 0;
+    static mut TEX_LAST_WRITE: u32 = 0;
+
+    /// Writes that arrived for an id the registry does not know.
+    ///
+    /// Non-zero means a texture is being drawn whose bytes never landed. Surfaced rather than
+    /// dropped because the bug this replaces left no trace at all.
+    pub fn texture_write_misses() -> u32 {
+        unsafe { TEX_WRITE_MISSES }
+    }
+
+    /// Accepted sub-image writes, and the id that received the last one.
+    ///
+    /// The count is the liveness signal - `0` means the mechanism never ran, which is a different
+    /// failure from running and being refused - and the id is how a caller finds the texture to
+    /// inspect without hard-coding a dimension it would then have to keep in sync.
+    pub fn texture_write_stats() -> (u32, u32) {
+        unsafe { (TEX_WRITES, TEX_LAST_WRITE) }
+    }
+
+    /// Registers a texture that arrives empty, so the shell can see it and receive its pixels.
+    ///
+    /// The extent starts fully dirty because the shell discovers ids by enumeration and has never
+    /// seen this one: "new" has to mean "read all of it", otherwise its first read builds an
+    /// incomplete image. Sharing that flag with later writes is what keeps new and changed down to
+    /// a single rule.
+    ///
+    /// Bytes are zeroed rather than left undefined so a re-created atlas of the same size cannot
+    /// show a previous life's glyphs. The id is a function of the dimensions
+    /// (`miniquad::Texture::new_render_texture`), so a *different* size yields a different id and
+    /// gets its own entry; this branch then only runs when one id is rebuilt in place.
+    pub fn register_render_texture(id: u32, width: u32, height: u32) {
+        unsafe {
+            if width == 0 || height == 0 {
+                return;
+            }
+            let count = TEX_COUNT;
+            let len = (width as usize).saturating_mul(height as usize).saturating_mul(4);
+
+            for i in 0..count {
+                if TEX_ENTRIES[i].id == id {
+                    let e = TEX_ENTRIES[i];
+                    core::ptr::write_bytes(TEX_BYTES.as_mut_ptr().add(e.offset), 0, e.len);
+                    // The *stored* extent, not the one just passed in. The dirty rectangle is a
+                    // promise the reader has to be able to keep, and `texture_rect_data` accepts
+                    // only what fits inside `e.width`/`e.height` - announcing a larger area would
+                    // get that read refused with -3, i.e. an atlas the shell can see but not fill.
+                    //
+                    // Normally the two agree, because the id is a function of the dimensions and
+                    // a different size therefore takes this branch only for the same size. Writing
+                    // the stored numbers makes the pair self-consistent even if that ever stops
+                    // being true: the content would be a subset, but never an unreadable one.
+                    TEX_ENTRIES[i].dirty = [0, 0, e.width, e.height];
+                    TEX_ENTRIES[i].dirty_pending = true;
+                    return;
+                }
+            }
+
+            if count >= TEX_SLOTS {
+                note_drop(id, width, height, len, 1);
+                return;
+            }
+            // Counted against the same budget as chart art on purpose: the phone's memory does not
+            // care which subsystem asked for it, and 8.2 MiB of headroom is the number this design
+            // was sized from (see `glGetIntegerv`).
+            if TEX_BYTES.len().saturating_add(len) > TEX_MAX_BYTES {
+                note_drop(id, width, height, len, 3);
+                return;
+            }
+
+            let offset = TEX_BYTES.len();
+            TEX_DEMAND = TEX_DEMAND.saturating_add(len);
+            TEX_BYTES.resize(offset + len, 0);
+            TEX_ENTRIES[count] = TexEntry {
+                id,
+                width,
+                height,
+                offset,
+                len,
+                dirty: [0, 0, width, height],
+                dirty_pending: true,
+            };
+            TEX_COUNT = count + 1;
+        }
+    }
+
+    /// The sink `miniquad` calls for every accepted `glTexSubImage2D`.
+    ///
+    /// # Safety
+    /// `pixels` must address `w * h * 4` readable bytes.
+    pub unsafe fn texture_write_sink(id: u32, x: u32, y: u32, w: u32, h: u32, pixels: *const u8) {
+        if texture_write(id, x, y, w, h, pixels) {
+            TEX_WRITES = TEX_WRITES.wrapping_add(1);
+            TEX_LAST_WRITE = id;
+        } else {
+            TEX_WRITE_MISSES = TEX_WRITE_MISSES.wrapping_add(1);
+        }
+    }
+
+    /// Copies one sub-image into the registry and unions its rectangle into the pending dirty area.
+    ///
+    /// Refused rather than clipped when the rectangle falls outside the stored extent: a write that
+    /// overhangs means the registry's idea of the size and the caller's disagree, and half a glyph
+    /// drawn over a neighbour is worse than no glyph.
+    ///
+    /// Returns false when the id is unknown or the rectangle does not fit.
+    ///
+    /// # Safety
+    /// `pixels` must address `w * h * 4` readable bytes.
+    pub unsafe fn texture_write(id: u32, x: u32, y: u32, w: u32, h: u32, pixels: *const u8) -> bool {
+        if w == 0 || h == 0 {
+            return false;
+        }
+        let count = TEX_COUNT;
+        for i in 0..count {
+            let e = TEX_ENTRIES[i];
+            if e.id != id {
+                continue;
+            }
+            let stride = (e.width as usize).saturating_mul(4);
+            if e.len < stride.saturating_mul(e.height as usize) {
+                return false;
+            }
+            if (x as usize).saturating_add(w as usize) > e.width as usize
+                || (y as usize).saturating_add(h as usize) > e.height as usize
+            {
+                return false;
+            }
+            let row_bytes = (w as usize) * 4;
+            for row in 0..h as usize {
+                let dst = TEX_BYTES
+                    .as_mut_ptr()
+                    .add(e.offset + (y as usize + row) * stride + (x as usize) * 4);
+                core::ptr::copy_nonoverlapping(pixels.add(row * row_bytes), dst, row_bytes);
+            }
+
+            let rect = [x, y, w, h];
+            if TEX_ENTRIES[i].dirty_pending {
+                // Union, not replace: the shell has not read what is there yet, so narrowing it to
+                // the newest rectangle would drop everything written in between.
+                let d = TEX_ENTRIES[i].dirty;
+                let x0 = d[0].min(rect[0]);
+                let y0 = d[1].min(rect[1]);
+                let x1 = d[0].saturating_add(d[2]).max(rect[0].saturating_add(rect[2]));
+                let y1 = d[1].saturating_add(d[3]).max(rect[1].saturating_add(rect[3]));
+                TEX_ENTRIES[i].dirty = [x0, y0, x1 - x0, y1 - y0];
+            } else {
+                TEX_ENTRIES[i].dirty = rect;
+                TEX_ENTRIES[i].dirty_pending = true;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Hands out the rectangle written since the last call, then clears it.
+    ///
+    /// Returns 1 with `out` filled, 0 when nothing changed, -1 for an unknown id. Clearing on the
+    /// read keeps the ledger in one place: the shell must not have to remember what it saw last
+    /// time, because two ledgers drift and the discrepancy only ever shows up on the device.
+    ///
+    /// A null `out` probes without consuming, so a caller can ask "is there anything?" without
+    /// throwing the data away.
+    ///
+    /// # Safety
+    /// `out` must be valid for four `u32`s when non-null.
+    pub unsafe fn texture_dirty(id: u32, out: *mut u32) -> i32 {
+        let count = TEX_COUNT;
+        for i in 0..count {
+            if TEX_ENTRIES[i].id != id {
+                continue;
+            }
+            if !TEX_ENTRIES[i].dirty_pending {
+                return 0;
+            }
+            if out.is_null() {
+                return 1;
+            }
+            let d = TEX_ENTRIES[i].dirty;
+            for k in 0..4 {
+                *out.add(k) = d[k];
+            }
+            TEX_ENTRIES[i].dirty = [0; 4];
+            TEX_ENTRIES[i].dirty_pending = false;
+            return 1;
+        }
+        -1
+    }
+
+    /// Copies a sub-rectangle's RGBA bytes out.
+    ///
+    /// Returns the byte count, -1 for an unknown id, -2 when `cap` is too small (or `out` is
+    /// null), -3 when the rectangle lies outside the texture.
+    ///
+    /// # Safety
+    /// `out` must be valid for `cap` bytes.
+    pub unsafe fn texture_rect_data(
+        id: u32, x: u32, y: u32, w: u32, h: u32, out: *mut u8, cap: usize,
+    ) -> i32 {
+        let count = TEX_COUNT;
+        for i in 0..count {
+            let e = TEX_ENTRIES[i];
+            if e.id != id {
+                continue;
+            }
+            if (x as usize).saturating_add(w as usize) > e.width as usize
+                || (y as usize).saturating_add(h as usize) > e.height as usize
+            {
+                return -3;
+            }
+            let stride = (e.width as usize).saturating_mul(4);
+            let row_bytes = (w as usize).saturating_mul(4);
+            let total = row_bytes.saturating_mul(h as usize);
+            if out.is_null() {
+                return -2;
+            }
+            if total > cap {
+                return -2;
+            }
+            for row in 0..h as usize {
+                let src = TEX_BYTES
+                    .as_ptr()
+                    .add(e.offset + (y as usize + row) * stride + (x as usize) * 4);
+                core::ptr::copy_nonoverlapping(src, out.add(row * row_bytes), row_bytes);
+            }
+            return total as i32;
+        }
+        -1
     }
 
     /// Count, then the most recent refusal as `(id, width, height, bytes)`.
@@ -1168,13 +1866,18 @@ pub mod draw {
         unsafe { TEX_OVERFLOW }
     }
 
-    /// Called by the shell after it has replayed a frame.
+    /// Called by the shell after it has replayed a frame, and by `host::frame` before it renders.
     pub fn drain_reset() {
         LEN.store(0, Ordering::Relaxed);
         // The arenas must be cleared too, or they would fill up and the batcher would silently
         // stop drawing after a few seconds of play.
         VLEN.store(0, Ordering::Relaxed);
         ILEN.store(0, Ordering::Relaxed);
+        // Camera and model go back to their start-of-frame state for the same reason. macroquad
+        // opens a frame with no camera and an identity model; just as important, `Main::render`
+        // can propagate an error from between a `push_camera_state` and its `pop_camera_state`
+        // (`scene.rs:520`), and a stack that kept that indent would misplace every frame after.
+        crate::transform::reset_frame();
     }
 
     // --- batcher state, mirroring macroquad's QuadGl ---
@@ -1217,7 +1920,21 @@ pub mod draw {
         }
         unsafe {
             for (i, v) in vertices.iter().enumerate() {
+                // Fold `Projection * Model` in here rather than at flush time. macroquad would
+                // have sent these through `Model` as a uniform and the camera as the other one
+                // (`quad_gl.rs:744`), both of which are frozen for the duration of a draw call
+                // (`quad_gl.rs:851`), so by the time a draw is issued there is only one answer
+                // to "which matrices" - and having one answer is exactly what lets `PortCmd`
+                // carry plain pixels with no camera attached.
+                //
+                // The space `v` arrives in is prpr's business, not ours: judge-line shapes come
+                // in their own local frame, note sprites have already been moved to world space
+                // by `Resource::world_to_screen` (`core/resource.rs:623`), and whichever
+                // `apply_model_of` bracket is open is the one that decides the difference.
+                let (x, y) = crate::transform::project(v.position.x, v.position.y);
                 VERTS[vs + i] = *v;
+                VERTS[vs + i].position.x = x;
+                VERTS[vs + i].position.y = y;
             }
             for (i, ix) in indices.iter().enumerate() {
                 INDICES[is + i] = *ix;
@@ -1236,6 +1953,43 @@ pub mod draw {
             vcount: vertices.len() as u32,
             istart: is as u32,
             icount: indices.len() as u32,
+        });
+    }
+
+    /// Records an untextured quad from four already-projected corners.
+    ///
+    /// Exists for the one shape `Cmd::Rect` cannot express: a rectangle the current `Model` has
+    /// tilted. `Cmd::Rect` is `x/y/w/h`, and `f[]`'s eight slots are spoken for, so there is
+    /// nowhere to put an angle - but four corners are four corners in the vertex arena. Going
+    /// through geometry rather than degrading to a bounding box matters here precisely because
+    /// the quad names no bitmap: `Win2DChartRenderer.FillPortTriangle` only bounds a triangle
+    /// when it has a texture to map, and fills an untextured one exactly.
+    ///
+    /// Texture id 0 is safe as "none" because ids start at 1 (`TEX_ID`, below).
+    pub fn push_solid_quad(corners: &[Vec2; 4], color: Color) {
+        let vs = VLEN.load(Ordering::Relaxed) as usize;
+        let is = ILEN.load(Ordering::Relaxed) as usize;
+        if vs + 4 > VCAP || is + 6 > ICAP {
+            return;
+        }
+        let uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        unsafe {
+            for (i, c) in corners.iter().enumerate() {
+                VERTS[vs + i] = Vertex::new(c.x, c.y, 0.0, uv[i][0], uv[i][1], color);
+            }
+            for (i, ix) in [0u16, 1, 2, 0, 2, 3].iter().enumerate() {
+                INDICES[is + i] = *ix;
+            }
+        }
+        VLEN.store((vs + 4) as u32, Ordering::Relaxed);
+        ILEN.store((is + 6) as u32, Ordering::Relaxed);
+        push(Cmd::Geometry {
+            tex: 0,
+            mode: DrawMode::Triangles,
+            vstart: vs as u32,
+            vcount: 4,
+            istart: is as u32,
+            icount: 6,
         });
     }
 
@@ -1489,14 +2243,27 @@ pub fn draw_texture_ex(tex: Texture2D, x: f32, y: f32, color: Color, params: Dra
     let source = params
         .source
         .unwrap_or_else(|| Rect::new(0.0, 0.0, tex.width(), tex.height()));
+    // `Cmd::Texture` is a rectangle and nothing more, so a draw the transform left
+    // axis-aligned is recorded exactly and one it tilted is recorded as its bounding box - see
+    // `transform::project_aabb` for why the box is the right degradation rather than geometry.
+    let raw = if crate::transform::axis_aligned() && params.rotation == 0.0 {
+        crate::transform::project_rect(x, y, size.x, size.y)
+    } else {
+        crate::transform::project_aabb(x, y, size.x, size.y)
+    };
+    // `project_aabb` is non-negative by construction and `project_rect` is not: prpr's cameras
+    // all mirror in y, which hands back a negative height the shell would then throw away. See
+    // `transform::normalize_rect`.
+    let (dest, flip_x, flip_y) =
+        crate::transform::normalize_rect(raw, params.flip_x, params.flip_y);
     draw::push(draw::Cmd::Texture {
         tex: tex.id,
-        dest: Rect::new(x, y, size.x, size.y),
+        dest,
         source,
         color,
         rotation: params.rotation,
-        flip_x: params.flip_x,
-        flip_y: params.flip_y,
+        flip_x,
+        flip_y,
     });
 }
 
@@ -1505,23 +2272,95 @@ pub fn draw_texture(tex: &Texture2D, x: f32, y: f32, color: Color) {
 }
 
 pub fn draw_rectangle(x: f32, y: f32, w: f32, h: f32, color: Color) {
-    draw::push(draw::Cmd::Rect { dest: Rect::new(x, y, w, h), color });
+    if crate::transform::axis_aligned() {
+        // A mirrored solid rectangle looks the same as its unmirrored self, so the sign is
+        // simply folded away rather than handed to a reader that has no flip to apply it to.
+        let (dest, _, _) = crate::transform::normalize_rect(
+            crate::transform::project_rect(x, y, w, h),
+            false,
+            false,
+        );
+        draw::push(draw::Cmd::Rect { dest, color });
+    } else {
+        // A tilting `Model` has four independent corners now, and `Cmd::Rect` carries two
+        // numbers too few to say so - whereas the vertex arena carries any quad, and untextured
+        // quads are the one thing the shell fills exactly.
+        draw::push_solid_quad(
+            &[
+                Vec2::new(x, y),
+                Vec2::new(x + w, y),
+                Vec2::new(x + w, y + h),
+                Vec2::new(x, y + h),
+            ],
+            color,
+        );
+    }
 }
 
 pub fn draw_line(x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32, color: Color) {
+    // macroquad does not record a line at all: it offsets both ends along the segment's local
+    // normal to make a four-corner strip (`prpr-macroquad/src/shapes.rs:223-232`) and lets `Model`
+    // carry those corners into place. `Cmd::Line` has room for two points and a width, so the
+    // offset corners are run through the transform first and the width read back off the result.
+    // Exact whenever the transform is a rotation plus a uniform scale - what prpr's judge-line
+    // models actually are - and within a hair of it otherwise, since a two-point record cannot
+    // express the skew a non-uniform scale would introduce.
+    let d = Vec2::new(x2 - x1, y2 - y1);
+    // The same guard shapes.rs:226-229 performs, over the same quantity: `nx`/`ny` there are
+    // `-dy`/`dx`, so `|n| == |d|` and `tlen` reduces to this. A zero segment drops out, a
+    // negative thickness drops out, and a zero thickness yields a zero-width strip - which is
+    // what upstream's degenerate quad draws too.
+    let tlen = d.length() / (thickness * 0.5);
+    if tlen < f32::EPSILON {
+        return;
+    }
+
+    let a = crate::transform::project_point(Vec2::new(x1, y1));
+    let b = crate::transform::project_point(Vec2::new(x2, y2));
+    let normal = Vec2::new(-d.y, d.x) / tlen; // shapes.rs:230-231, `tx`/`ty`
+    let p1 = crate::transform::project_point(Vec2::new(x1 + normal.x, y1 + normal.y));
+    let p2 = crate::transform::project_point(Vec2::new(x1 - normal.x, y1 - normal.y));
+
+    let offset = p1 - p2;
+    let seg = b - a;
+    let seg_len = seg.length();
+    let thickness_px = if seg_len <= f32::EPSILON {
+        offset.length()
+    } else {
+        // Only the component across the drawn segment is width; the component along it is skew
+        // that this record has no field for. prpr's cameras are built to keep both axes equal
+        // (`camera.zoom = (1., -aspect)`, `core/resource.rs:617`), so the difference is second
+        // order even where it is not zero.
+        let u = seg / seg_len;
+        (offset - offset.dot(u) * u).length()
+    };
+
     draw::push(draw::Cmd::Line {
-        a: Vec2::new(x1, y1),
-        b: Vec2::new(x2, y2),
-        thickness,
+        a,
+        b,
+        thickness: thickness_px,
         color,
     });
 }
 
 pub fn draw_circle(x: f32, y: f32, r: f32, color: Color) {
-    draw::push(draw::Cmd::Circle { center: Vec2::new(x, y), r, color });
+    // Radius measured along x. `Cmd::Circle` carries one number, so a transform that scaled the
+    // two axes apart - an ellipse - has nowhere to put the difference; see `Cmd::Circle` for the
+    // rest of that trade. prpr never calls this in the first place.
+    let center = crate::transform::project_point(Vec2::new(x, y));
+    let radius = crate::transform::project_delta(Vec2::new(x, y), Vec2::new(x + r, y)).length();
+    draw::push(draw::Cmd::Circle {
+        center,
+        r: radius,
+        color,
+    });
 }
 
 pub fn draw_text(text: &str, x: f32, y: f32, _size: f32, color: Color) {
+    // Never leaves the record: `encode` drops `Cmd::Text` outright, because prpr lays text out
+    // itself through `TextPainter` and has no use for macroquad's text API. Projected regardless
+    // so that the one field it does have would still mean what every other command means.
+    let (x, y) = crate::transform::project(x, y);
     draw::push(draw::Cmd::Text {
         x,
         y,
@@ -1673,11 +2512,29 @@ pub mod utils {
         0
     }
 
-    /// Replays queued miniquad events into a handler.
+    /// Replays this frame's queued touches into a handler.
     ///
-    /// A no-op: nothing is queued, because the shell owns the event loop and calls the handler's
-    /// methods directly. `prpr::judge` calls this once per frame, so it has to exist.
-    pub fn repeat_all_miniquad_input<H: EventHandler>(_handler: &mut H, _subscriber: usize) {}
+    /// This is the *only* way `prpr::judge`'s `TOUCHES` store gets filled. `Judge::on_new_frame`
+    /// runs a `Handler` through here and then replaces `TOUCHES` wholesale with the result, and
+    /// `TOUCHES` is what `get_touches()` reads - every button in the scene, and the whole `Ui`.
+    /// Left as a no-op the chart would still judge its notes (those come from `touches()`), while
+    /// nothing on screen could be pressed: input that looks 90% broken.
+    ///
+    /// The queue is deliberately **not** drained. `Judge::update` calls `touches()` later in the
+    /// same frame for the state of what is still down, and `Scene` may read `get_touches()`
+    /// during render; taking the events here would leave those two reading a frame older than the
+    /// one they are drawing. The host clears the queue once the frame has been fully drawn.
+    ///
+    /// `_subscriber` stays ignored: upstream replays only what that particular subscriber missed,
+    /// and here there is exactly one consumer that wants every event every frame.
+    pub fn repeat_all_miniquad_input<H: EventHandler>(handler: &mut H, _subscriber: usize) {
+        // `prpr`'s `Handler::touch_event` ignores its context and the shell owns the real one, so
+        // a local unit value is the honest stand-in - not a null pointer nothing dereferences.
+        let mut ctx = crate::miniquad::Context;
+        crate::input::for_each_pending(|t| {
+            handler.touch_event(&mut ctx, t.phase, t.id, t.position.x, t.position.y, t.time);
+        });
+    }
 }
 
 pub mod color {

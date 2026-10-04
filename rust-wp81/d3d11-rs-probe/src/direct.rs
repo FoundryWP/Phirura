@@ -409,6 +409,11 @@ pub const D3D11_MAP_WRITE_DISCARD: D3D11_MAP = 4;
 
 // D3D11.h - D3D11_PRIMITIVE_TOPOLOGY (D3Dcommon.h)
 pub const D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST: UINT = 4;
+// Added for the Stage 3 replay: `DrawMode::Lines`/`LineStrip` in the shim's `encode()` map to
+// these, and D3D11 has no thick-line state - `scene.rs` fattens lines into triangle quads, but
+// geometry batches the engine recorded with `DrawMode::Lines` must still enter the IA as lines.
+pub const D3D11_PRIMITIVE_TOPOLOGY_LINELIST: UINT = 2;
+pub const D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP: UINT = 3;
 
 // D3D11.h - D3D11_FILTER
 pub const D3D11_FILTER_MIN_MAG_MIP_POINT: UINT = 0;
@@ -443,6 +448,10 @@ pub const D3D11_INPUT_PER_VERTEX_DATA: UINT = 0;
 
 // dxgi.h - DXGI_FORMAT
 pub const DXGI_FORMAT_UNKNOWN: UINT = 0;
+// Stage 3 replay: the fixture's index arena is `u16` (the shim's `INDICES` is `[u16; ICAP]`), so
+// `IASetIndexBuffer` needs R16_UINT. Value 57 read from dxgiformat.h, same as the other formats
+// above - a wrong format here makes every indexed draw read garbage indices without an error.
+pub const DXGI_FORMAT_R16_UINT: UINT = 57;
 pub const DXGI_FORMAT_R32G32B32A32_FLOAT: UINT = 2;
 pub const DXGI_FORMAT_R32G32B32_FLOAT: UINT = 6;
 pub const DXGI_FORMAT_R32G32_FLOAT: UINT = 16;

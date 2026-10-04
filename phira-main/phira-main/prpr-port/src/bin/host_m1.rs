@@ -272,6 +272,18 @@ fn dump_textures() {
     let n = prpr_port::wp81_texture_count();
     let dropped = prpr_port::wp81_texture_overflow();
     eprintln!("[m1] {n} textures registered, {dropped} dropped for room");
+    // Always printed, not only on a drop: how much headroom the budget has left is the question
+    // every future change to the registry gets judged against, and by the time something is
+    // dropped the number that mattered has already been spent.
+    eprintln!(
+        "       registry holds {} bytes of {}",
+        macroquad::draw::texture_used_bytes(),
+        macroquad::draw::texture_capacity()
+    );
+    let (demand, aliased) = macroquad::draw::texture_demand();
+    eprintln!(
+        "       unique demand = {demand} bytes; {aliased} registrations aliased instead of copied"
+    );
     if dropped > 0 {
         // A count on its own cannot say whether the budget, the slot count or the chart is at
         // fault - the refused texture's size is what separates those.
@@ -280,16 +292,17 @@ fn dump_textures() {
             "       last drop: id={id} {w}x{h} {bytes} bytes, reason={}",
             macroquad::draw::texture_drop_reason()
         );
-        eprintln!(
-            "       registry holds {} bytes of {}",
-            macroquad::draw::texture_used_bytes(),
-            macroquad::draw::texture_capacity()
-        );
-        let (demand, aliased) = macroquad::draw::texture_demand();
-        eprintln!(
-            "       unique demand = {demand} bytes; {aliased} registrations aliased instead of copied"
-        );
     }
+    // Sub-image writes are the only writes that happen *after* registration, and on this port they
+    // belong to the glyph atlas alone. Both numbers are needed: a refusal count of zero is also
+    // what an engine that never wrote anything would report, so the accepted count is the liveness
+    // signal and the refusal count says whether what did run was refused.
+    let (writes, last_write) = macroquad::draw::texture_write_stats();
+    eprintln!(
+        "       sub-image writes = {writes} (last id={last_write}), refused = {}",
+        prpr_port::wp81_texture_write_misses()
+    );
+
     for i in 0..n {
         let id = prpr_port::wp81_texture_id_at(i);
         let (mut w, mut h) = (0u32, 0u32);
@@ -297,6 +310,30 @@ fn dump_textures() {
             prpr_port::wp81_texture_data(id, &mut w, &mut h, core::ptr::null_mut(), 0)
         };
         eprintln!("       id={id} {w}x{h} {bytes} bytes");
+    }
+
+    // The texture that last received a sub-image write is the glyph atlas - nothing else in this
+    // port is filled after it is registered - and counting its non-zero bytes is the measurement
+    // that separates "an entry exists" from "glyphs were rasterised into it". An empty atlas
+    // registers perfectly well and renders nothing, so registration alone proves nothing.
+    if last_write != 0 {
+        let (mut w, mut h) = (0u32, 0u32);
+        let len = unsafe {
+            prpr_port::wp81_texture_data(last_write, &mut w, &mut h, core::ptr::null_mut(), 0)
+        };
+        if len > 0 {
+            let mut buf = vec![0u8; len as usize];
+            let got = unsafe {
+                prpr_port::wp81_texture_data(last_write, &mut w, &mut h, buf.as_mut_ptr(), buf.len())
+            };
+            if got == len {
+                let filled = buf.iter().filter(|b| **b != 0).count();
+                eprintln!(
+                    "       last-written: id={last_write} {w}x{h}, {filled} of {} bytes non-zero",
+                    buf.len()
+                );
+            }
+        }
     }
 }
 
