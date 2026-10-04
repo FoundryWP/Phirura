@@ -344,6 +344,9 @@ pub const D3D11_CREATE_DEVICE_BGRA_SUPPORT: UINT = 0x20;
 pub const D3D11_USAGE_DEFAULT: UINT = 0;
 pub const D3D11_USAGE_IMMUTABLE: UINT = 1;
 pub const D3D11_USAGE_DYNAMIC: UINT = 2;
+// Staging is the only usage a CPU read is allowed from, which is the whole reason it exists here:
+// nothing else can tell the phone log what the driver actually rasterized.
+pub const D3D11_USAGE_STAGING: UINT = 3;
 
 // D3D11.h - D3D11_BIND_FLAG
 pub const D3D11_BIND_VERTEX_BUFFER: UINT = 0x1;
@@ -353,14 +356,26 @@ pub const D3D11_BIND_SHADER_RESOURCE: UINT = 0x8;
 pub const D3D11_BIND_RENDER_TARGET: UINT = 0x20;
 
 // D3D11.h - D3D11_CPU_ACCESS_FLAG
+//
+// `WRITE` is 0x10000 and `READ` is 0x20000 — not the other way round, and not 0x10000 for both.
+// Getting these swapped makes a staging texture look writable-but-unreadable, and `Map(READ)` on
+// it fails with `E_INVALIDARG` for a reason that reads like a usage bug instead of a flag typo.
 pub const D3D11_CPU_ACCESS_WRITE: UINT = 0x10000;
+pub const D3D11_CPU_ACCESS_READ: UINT = 0x20000;
 
 // D3D11.h - D3D11_MAP
 //
 // `ID3D11DeviceContext::Map` takes BOTH a `D3D11_MAP MapType` and a `UINT MapFlags`, in that
 // order, after the subresource index. Dropping the `MapFlags` argument silently shifts the
 // out-parameter into it and the call fails with `E_INVALIDARG`.
+//
+// The values are 1/2/3/4/5 with **READ = 1 and READ_WRITE = 3**, not READ = 3: asking a staging
+// texture created with `D3D11_CPU_ACCESS_READ` for READ_WRITE is refused with `E_INVALIDARG`,
+// which reads exactly like a wrong usage flag or a wrong subresource index. That mistake cost a
+// whole deploy to find, so the numbers come from the header and are written down here with the
+// confusion attached.
 pub type D3D11_MAP = UINT;
+pub const D3D11_MAP_READ: D3D11_MAP = 1;
 pub const D3D11_MAP_WRITE_DISCARD: D3D11_MAP = 4;
 
 // D3D11.h - D3D11_PRIMITIVE_TOPOLOGY (D3Dcommon.h)

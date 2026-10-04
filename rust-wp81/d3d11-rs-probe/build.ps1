@@ -173,7 +173,13 @@ $linkArgs = @(
     "/EXPORT:wp81_rs_sis_diag",
     "/EXPORT:wp81_rs_sis_step",
     "/EXPORT:wp81_rs_sis_step_name",
-    "/EXPORT:wp81_rs_sis_hr"
+    "/EXPORT:wp81_rs_sis_hr",
+    # The frame reading itself back: four pixels plus the viewport that produced them. Without
+    # these the phone log can only say the screen is the clear colour, which is consistent with a
+    # clear that landed and with a draw that rasterized nothing.
+    "/EXPORT:wp81_rs_sis_pixel",
+    "/EXPORT:wp81_rs_sis_pxseq",
+    "/EXPORT:wp81_rs_sis_vdbg"
 )
 $savedEap2 = $ErrorActionPreference
 $ErrorActionPreference = "Continue"

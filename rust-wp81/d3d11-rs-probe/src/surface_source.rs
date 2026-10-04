@@ -124,9 +124,10 @@ fn typed_view_format(fmt: i32) -> u32 {
 ///
 /// `[10]` (which device made the texture) and `[15]` (whether the two interface pointers are the
 /// same address) start at `-1` rather than `0`: each has a `0` meaning that reads as a *finding*,
-/// and a finding nobody measured is worse than no finding at all.
+/// and a finding nobody measured is worse than no finding at all. `[11]` starts at `-99` for the
+/// same reason — `0` there means "drew directly into XAML's surface", which no frame has done yet.
 const DIAG_LEN: usize = 16;
-const DIAG_INIT: [i32; DIAG_LEN] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1];
+const DIAG_INIT: [i32; DIAG_LEN] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -99, 0, 0, 0, -1];
 
 /// The live `SurfaceImageSource` chain.
 ///
@@ -193,6 +194,32 @@ pub struct SurfaceChain {
     /// surface is XAML's, so nothing about its shape can be inspected off-device - this array is
     /// the only way the phone log can say *why* a view of it was refused.
     pub diag: [i32; DIAG_LEN],
+    /// A CPU-readable copy of the frame, made only by [`Self::probe_pixels`] and kept across them.
+    ///
+    /// `CopyResource` allows no mismatch, so this is keyed like `own_texture`: a surface that
+    /// changes size rebuilds it instead of copying into a stale one.
+    pub stage_tex: ComPtr,
+    /// `stage_tex`'s `[width, height, format]`.
+    pub stage_key: [i32; 3],
+    /// Four pixels read back out of the frame, packed `0xAARRGGBB`.
+    ///
+    /// Nothing in a `draw` call reports whether anything rasterized — `Draw` returns `void`, and
+    /// `ClearRenderTargetView` succeeding says nothing about the fragments after it. These values
+    /// are the only evidence the phone log can carry about what the driver actually painted.
+    pub pixels: [u32; 4],
+    /// The probe's sequence number from 0, or `-1` while nothing has ever been measured — which
+    /// is what separates "measured a zero" from "measured nothing", the two a default value
+    /// would merge.
+    pub pixel_seq: i32,
+    /// The viewport in force when those pixels were read, plus the probe's own status.
+    ///
+    /// `[0..2]` `TopLeftX`/`TopLeftY` in hundredths of a pixel, `[2..4]` `Width`/`Height` the
+    /// same, `[4]`/`[5]` `MinDepth`/`MaxDepth` in thousandths, `[6]` how many probes ran,
+    /// `[7]` the status (0 = read, negative = the HRESULT of the call that could not run).
+    ///
+    /// Recorded because a viewport of `(0, 0, 0, 0)` or a depth range of `(1, 1)` clears perfectly
+    /// and clips every fragment, and no other field of the log would show it.
+    pub vdbg: [i32; 8],
 }
 
 impl SurfaceChain {
@@ -212,6 +239,11 @@ impl SurfaceChain {
         // `[10]`/`[15]` start *unknown*, not "0 = another device" / "0 = different address": a
         // default that means something specific would be believed before anything had asked.
         diag: DIAG_INIT,
+        stage_tex: ComPtr::NULL,
+        stage_key: [0; 3],
+        pixels: [0; 4],
+        pixel_seq: -1,
+        vdbg: [0; 8],
     };
 
     /// Create a `SurfaceImageSource` of `width` x `height` pixels and QI its native interface.
@@ -314,6 +346,11 @@ impl SurfaceChain {
             own_texture: ComPtr::NULL,
             own_key: [0; 3],
             need_copy: false,
+            stage_tex: ComPtr::NULL,
+            stage_key: [0; 3],
+            pixels: [0; 4],
+            pixel_seq: -1,
+            vdbg: [0; 8],
         })
     }
 
@@ -720,6 +757,184 @@ impl SurfaceChain {
         0
     }
 
+    /// Copy the finished frame into a CPU-readable texture and read four pixels out of it.
+    ///
+    /// Nothing above this call can fail *visibly*: `Draw` returns `void`, and a clear that lands
+    /// proves only that the view is bound — not that a single fragment was rasterized. Two rounds
+    /// of static analysis have not found why the Lumia paints the clear colour and no quad, and
+    /// each further guess costs the user another look at the device, so the frame is measured
+    /// instead of reasoned about.
+    ///
+    /// The four points separate the explanations that are still open:
+    ///
+    ///   * `(2, 0)` — the top row, *outside* the viewport. `ClearRenderTargetView` ignores the
+    ///     viewport, so this says whether the clear reached the surface the compositor shows.
+    ///   * `(w/2, h/2)` — the centre of the viewport, where the quad is: did the draw rasterize?
+    ///   * `(w/2, h/4)`, `(w/2, h-8)` — inside the viewport, away from the quad: the clear colour
+    ///     itself, so a centre pixel matching them means something rather than merely being blue.
+    ///
+    /// `pixels` is packed `0xAARRGGBB`; `pixel_seq` numbers the completed probes from 0 (and stays
+    /// at `-1` until one succeeds, which is what separates "measured a zero" from "measured
+    /// nothing"); `vdbg[7]` carries the status (0 = read, negative = the HRESULT that stopped it).
+    pub unsafe fn probe_pixels(&mut self, ctx: ComPtr) -> i32 {
+        self.vdbg[6] = 0;
+        self.vdbg[7] = -1;
+        if self.frame_tex.is_null() {
+            return -1;
+        }
+
+        // ---- what is being copied out of --------------------------------------------------
+        let get_desc: extern "system" fn(*mut c_void, *mut D3D11_TEXTURE2D_DESC) =
+            self.frame_tex.method(ID3D11TEXTURE2D_GETDESC);
+        let mut d = D3D11_TEXTURE2D_DESC::default();
+        get_desc(self.frame_tex.vtbl as *mut c_void, &mut d);
+        if d.Width == 0 || d.Height == 0 {
+            self.vdbg[7] = E_INVALIDARG;
+            return E_INVALIDARG;
+        }
+        // A multisampled resource cannot be a staging one and cannot be mapped, so there is no
+        // readback at all rather than a readback that returns the wrong pixels.
+        if d.SampleDesc.Count > 1 {
+            self.vdbg[7] = -3;
+            return -3;
+        }
+
+        // ---- the device that has to allocate the staging texture --------------------------
+        // `GetDevice` returns `void` and AddRefs, so the reference is dropped right here.
+        let get_dev: extern "system" fn(*mut c_void, *mut *mut c_void) =
+            self.frame_tex.method(ID3D11DEVICECHILD_GETDEVICE);
+        let mut dev = ComPtr::NULL;
+        get_dev(
+            self.frame_tex.vtbl as *mut c_void,
+            &mut dev.vtbl as *mut _ as *mut *mut c_void,
+        );
+        if dev.is_null() {
+            self.vdbg[7] = -2;
+            return -2;
+        }
+
+        // ---- the staging texture, rebuilt whenever the surface changes ---------------------
+        let key = [d.Width as i32, d.Height as i32, d.Format as i32];
+        if self.stage_tex.is_null() || self.stage_key != key {
+            if !self.stage_tex.is_null() {
+                self.stage_tex.release();
+                self.stage_tex = ComPtr::NULL;
+            }
+            // Same size and format as the source, because `CopyResource` allows no mismatch —
+            // everything else stripped: a staging resource binds nothing and is CPU-readable.
+            let sd = D3D11_TEXTURE2D_DESC {
+                Width: d.Width,
+                Height: d.Height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: d.Format,
+                SampleDesc: d.SampleDesc,
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ,
+                MiscFlags: 0,
+            };
+            let create: extern "system" fn(
+                *mut c_void,
+                *const D3D11_TEXTURE2D_DESC,
+                *const c_void,
+                *mut *mut c_void,
+            ) -> HRESULT = dev.method(D3D11DEVICE_CREATETEXTURE2D);
+            let mut st = ComPtr::NULL;
+            let hr = create(
+                dev.vtbl as *mut c_void,
+                &sd,
+                core::ptr::null(),
+                &mut st.vtbl as *mut _ as *mut *mut c_void,
+            );
+            dev.release();
+            if hr < 0 || st.is_null() {
+                if !st.is_null() {
+                    st.release();
+                }
+                self.vdbg[7] = if hr < 0 { hr } else { E_NOINTERFACE };
+                return self.vdbg[7];
+            }
+            self.stage_tex = st;
+            self.stage_key = key;
+        } else {
+            dev.release();
+        }
+
+        // ---- copy, then map for reading ---------------------------------------------------
+        let copy: extern "system" fn(*mut c_void, *mut c_void, *mut c_void) =
+            ctx.method(D3D11CONTEXT_COPYRESOURCE);
+        copy(
+            ctx.vtbl as *mut c_void,
+            self.stage_tex.vtbl as *mut c_void,
+            self.frame_tex.vtbl as *mut c_void,
+        );
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE {
+            pData: core::ptr::null_mut(),
+            RowPitch: 0,
+            DepthPitch: 0,
+        };
+        let map: extern "system" fn(
+            *mut c_void,
+            *mut c_void,
+            UINT,
+            D3D11_MAP,
+            UINT,
+            *mut D3D11_MAPPED_SUBRESOURCE,
+        ) -> HRESULT = ctx.method(D3D11CONTEXT_MAP);
+        let hr = map(
+            ctx.vtbl as *mut c_void,
+            self.stage_tex.vtbl as *mut c_void,
+            0,
+            D3D11_MAP_READ,
+            0,
+            &mut mapped,
+        );
+        if hr < 0 || mapped.pData.is_null() {
+            self.vdbg[7] = if hr < 0 { hr } else { E_NOINTERFACE };
+            return self.vdbg[7];
+        }
+
+        // ---- the four points ---------------------------------------------------------------
+        let w = d.Width as i32;
+        let h = d.Height as i32;
+        let pts: [(i32, i32); 4] = [
+            (2, 0),         // above the viewport: the clear, unconstrained by the viewport
+            (w / 2, h / 2), // viewport centre: the quad
+            (w / 2, h / 4), // viewport, away from the quad: the clear colour
+            (w / 2, h - 8), // viewport bottom
+        ];
+        let base = mapped.pData as *const u8;
+        let pitch = mapped.RowPitch as usize;
+        // `DXGI_FORMAT_R8G8B8A8_UNORM` (28) is R,G,B,A; BGRA8 is the other way round, and reading
+        // a BGRA surface as RGBA reports the clear colour's blue in the red channel — a wrong
+        // answer with every field populated, which is worse than no answer.
+        let rgba = d.Format == 28;
+        for (i, &(x, y)) in pts.iter().enumerate() {
+            let x = x.max(0).min(w - 1);
+            let y = y.max(0).min(h - 1);
+            let p = base.add(y as usize * pitch + x as usize * 4);
+            let (r, g, b, a) = if rgba {
+                (*p, *p.add(1), *p.add(2), *p.add(3))
+            } else {
+                (*p.add(2), *p.add(1), *p, *p.add(3))
+            };
+            self.pixels[i] =
+                ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
+        }
+
+        let unmap: extern "system" fn(*mut c_void, *mut c_void, UINT) = ctx.method(D3D11CONTEXT_UNMAP);
+        unmap(ctx.vtbl as *mut c_void, self.stage_tex.vtbl as *mut c_void, 0);
+        self.pixel_seq = if self.pixel_seq < 0 {
+            0
+        } else {
+            self.pixel_seq + 1
+        };
+        self.vdbg[6] = 4;
+        self.vdbg[7] = 0;
+        0
+    }
+
     /// `ISurfaceImageSourceNative::EndDraw()`. Must be called once per `BeginDraw`.
     pub unsafe fn end_draw(&mut self) -> HRESULT {
         if !self.in_frame {
@@ -749,6 +964,14 @@ impl SurfaceChain {
         self.own_texture = ComPtr::NULL;
         self.own_key = [0; 3];
         self.need_copy = false;
+        // The readback texture is the only other long-lived allocation; its pixels go with it, so
+        // a later run cannot present this one's measurements as its own.
+        self.stage_tex.release();
+        self.stage_tex = ComPtr::NULL;
+        self.stage_key = [0; 3];
+        self.pixels = [0; 4];
+        self.pixel_seq = -1;
+        self.vdbg = [0, 0, 0, 0, 0, 0, 0, -1];
         self.native.release();
         self.native = ComPtr::NULL;
         // The `SurfaceImageSource` is intentionally released last: the compositor may still hold a

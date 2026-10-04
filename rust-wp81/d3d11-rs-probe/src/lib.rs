@@ -723,6 +723,42 @@ pub unsafe extern "C" fn wp81_rs_sis_diag(index: i32) -> i32 {
     s.surface.diag[index as usize]
 }
 
+/// One pixel read back out of the frame the driver actually rasterized, packed `0xAARRGGBB`.
+///
+/// Index 0..3 selects a probe point (see `SurfaceChain::probe_pixels`); anything else returns
+/// `0xFF00FFFF`. Check [`wp81_rs_sis_pxseq`] first — it is `-1` until a probe has run, and that is
+/// the difference between "the readback reported black" and "no readback ran", which the pixel
+/// value alone cannot show.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_sis_pixel(index: i32) -> u32 {
+    let s = st();
+    if index < 0 || index as usize >= s.surface.pixels.len() {
+        return 0xFF00FFFF;
+    }
+    s.surface.pixels[index as usize]
+}
+
+/// How many pixel readbacks have completed (counted from 0), or `-1` if none ever has.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_sis_pxseq() -> i32 {
+    st().surface.pixel_seq
+}
+
+/// One entry of the viewport and status recorded alongside those pixels.
+///
+/// 0 `TopLeftX`, 1 `TopLeftY`, 2 `Width`, 3 `Height` (hundredths of a pixel), 4 `MinDepth`,
+/// 5 `MaxDepth` (thousandths), 6 how many probes ran, 7 status (0 = read, otherwise the HRESULT or
+/// negative reason that stopped it). Out of range returns `i32::MIN`, so it cannot be mistaken for
+/// one of the statuses — `-1` and `-2` are real answers here.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_sis_vdbg(index: i32) -> i32 {
+    let s = st();
+    if index < 0 || index as usize >= s.surface.vdbg.len() {
+        return i32::MIN;
+    }
+    s.surface.vdbg[index as usize]
+}
+
 /// English name of the `wp81_rs_sis_step()` code, for the phone log.
 #[no_mangle]
 pub unsafe extern "C" fn wp81_rs_sis_step_name() -> *const u8 {
@@ -1335,7 +1371,23 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
     // `BeginDraw` hands back an `IDXGISurface` that lives inside the compositor's own render
     // target, and drawing into it *is* presenting. Everything after this block is identical.
     let mut rt = s.rtv.vtbl as *mut c_void;
-    let mut viewport = [0.0f32, 0.0f32, s.width as f32, s.height as f32];
+    // Six floats, not four.
+    //
+    // `RSSetViewports` reads a `D3D11_VIEWPORT` — TopLeftX/Y, Width, Height, **MinDepth,
+    // MaxDepth** — so an array of four leaves the depth range pointing at two floats of whatever
+    // the stack happened to hold. Read as (768, 1229) that clamps to (1, 1), which clips every
+    // fragment, while `ClearRenderTargetView` ignores the viewport entirely: the screen fills with
+    // the clear colour and the draw lands *nothing*. That is precisely the "blue, no quad" the
+    // Lumia showed, and `hostcheck` could not catch it because the desktop path builds this struct
+    // properly. `MinDepth`/`MaxDepth` are written out below rather than left to be forgotten.
+    let mut viewport = D3D11_VIEWPORT {
+        TopLeftX: 0.0,
+        TopLeftY: 0.0,
+        Width: s.width as f32,
+        Height: s.height as f32,
+        MinDepth: 0.0,
+        MaxDepth: 1.0,
+    };
     if s.route == 3 {
         if s.surface.native.is_null() {
             s.frame_err = -1;
@@ -1375,7 +1427,10 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
         // The offset is where the compositor parked this frame inside the source's own atlas. A
         // renderer that ignores it draws into the wrong place as soon as XAML returns a sub-rect.
         let off = s.surface.frame_offset;
-        viewport = [off.x as f32, off.y as f32, s.width as f32, s.height as f32];
+        viewport.TopLeftX = off.x as f32;
+        viewport.TopLeftY = off.y as f32;
+        viewport.Width = s.width as f32;
+        viewport.Height = s.height as f32;
     } else if s.rtv.is_null() {
         s.frame_err = -1;
         return -1;
@@ -1451,9 +1506,9 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
 
     // XAML may hand back a sub-rectangle of the source, so the viewport has to move with it.
     if s.route == 3 {
-        let set_vp: extern "system" fn(*mut c_void, UINT, *const f32) =
+        let set_vp: extern "system" fn(*mut c_void, UINT, *const D3D11_VIEWPORT) =
             ctx.method(D3D11CONTEXT_RSSETVIEWPORTS);
-        set_vp(ctx.vtbl as *mut c_void, 1, viewport.as_ptr());
+        set_vp(ctx.vtbl as *mut c_void, 1, &viewport);
 
         // Honour the clear `wp81_rs_clear` was asked for earlier in the frame - it could not run
         // then, because this view did not exist yet (see `State::clear_color`). Without it the quad
@@ -1536,6 +1591,24 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
             s.surface.own_texture.vtbl as *mut c_void,
         );
         set_tick(76); // CopyResource issued
+    }
+    // ---- measure what was actually rasterized -----------------------------------------------
+    //
+    // Everything above can succeed and still leave an empty screen: `Draw` returns `void`, and a
+    // clear that lands proves only that the view is bound. Static analysis has not found why the
+    // Lumia paints the clear colour and no quad, so the frame reads itself back instead — four
+    // pixels and the viewport that produced them turn "the screen is blue" into a log line that
+    // says *where* the drawing stopped. Gated on `pixel_seq` so the copy and the map run for the
+    // first few frames and then stop costing ~4 MB of traffic every frame.
+    if s.route == 3 && s.surface.pixel_seq < 4 {
+        s.surface.vdbg[0] = (viewport.TopLeftX * 100.0) as i32;
+        s.surface.vdbg[1] = (viewport.TopLeftY * 100.0) as i32;
+        s.surface.vdbg[2] = (viewport.Width * 100.0) as i32;
+        s.surface.vdbg[3] = (viewport.Height * 100.0) as i32;
+        s.surface.vdbg[4] = (viewport.MinDepth * 1000.0) as i32;
+        s.surface.vdbg[5] = (viewport.MaxDepth * 1000.0) as i32;
+        s.surface.probe_pixels(ctx);
+        set_tick(77); // frame read back into `surface.pixels`
     }
     if s.route == 3 {
         set_tick(71); // handing the finished frame to the compositor
@@ -1785,6 +1858,9 @@ pub unsafe extern "C" fn wp81_rs_tick_name() -> *const u8 {
         // texture instead: 75 then no 76 says the copy into the surface never returned.
         75 => b"frame: CopyResource into XAML's surface entered\0",
         76 => b"frame: CopyResource issued\0",
+        // The readback: reaching it says every call between the Draw and here returned, and the
+        // four pixels it leaves behind say what any of them actually produced.
+        77 => b"frame: read back into pixels\0",
         70 => b"IDXGISwapChain::Present\0",
         98 => b"surface probe: BeginDraw/GetDesc/EndDraw done\0",
         99 => b"fully up\0",

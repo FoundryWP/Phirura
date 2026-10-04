@@ -35,6 +35,15 @@ namespace Phirura
         /// never would leave the acceptance test unanswerable.
         /// </summary>
         private bool _firstFrameLogged;
+        /// <summary>
+        /// The last pixel-readback line written to the log, so each distinct answer is written once.
+        ///
+        /// Deduplicating on the *text* rather than on a success counter is deliberate: a readback
+        /// that fails returns the same status every frame, and a counter would never advance, so the
+        /// failure would never be logged at all. That is exactly how the first attempt produced a
+        /// log with no pixel line in it and no way to tell a refused probe from an unexported one.
+        /// </summary>
+        private string _lastPxText;
         private Windows.UI.Xaml.DispatcherTimer _watchdog;
 
         /// <summary>
@@ -299,6 +308,7 @@ namespace Phirura
                 _clock.Start();
                 _frames = 0;
                 _firstFrameLogged = false;
+                _lastPxText = null;
                 if (!_hookAttached)
                 {
                     CompositionTarget.Rendering += OnFrame;
@@ -402,6 +412,18 @@ namespace Phirura
                     + " sis-step=" + RustRenderer.SisStep
                     + " sis-hr=0x" + RustRenderer.SisHr.ToString("X8")
                     + " | " + RustRenderer.SisDiagText);
+            }
+
+            // What the driver painted, read back out of the surface by the frame itself.
+            //
+            // `frame#1` reports that the calls returned; this reports what they *produced*, which is
+            // the only distinction the acceptance test turns on. Logged whenever the answer changes
+            // — including a refusal, which is a stable string and so still written exactly once.
+            string px = RustRenderer.PxText;
+            if (px != _lastPxText)
+            {
+                _lastPxText = px;
+                AppLog.WriteSync("RustStage1: " + px);
             }
 
             if (!drew)

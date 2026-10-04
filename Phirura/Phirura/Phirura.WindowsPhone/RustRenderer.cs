@@ -221,6 +221,27 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_rs_sis_diag(int index);
 
+        /// <summary>
+        /// One pixel read back out of the finished frame, packed AARRGGBB (see
+        /// <c>wp81_rs_sis_pixel</c>). Index 0..3 selects the probe point.
+        ///
+        /// Read it only after <c>wp81_rs_sis_pxseq</c> says a readback completed: a returned zero
+        /// is a measured black, and is otherwise indistinguishable from "no measurement ran".
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint wp81_rs_sis_pixel(int index);
+
+        /// <summary>How many pixel readbacks completed (from 0), or -1 if none ever has.</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_sis_pxseq();
+
+        /// <summary>
+        /// The viewport that produced those pixels: 0..3 X/Y/W/H in hundredths of a pixel,
+        /// 4/5 MinDepth/MaxDepth in thousandths, 6 probes run, 7 status.
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_sis_vdbg(int index);
+
         private static bool _started;
 
         /// <summary>
@@ -426,6 +447,63 @@ namespace Phirura
             }
         }
 
+        /// <summary>How many pixel readbacks have completed, or -1 if none ever has.</summary>
+        public static int PxSeq
+        {
+            get
+            {
+                try { return wp81_rs_sis_pxseq(); }
+                catch (Exception) { return -1; }
+            }
+        }
+
+        /// <summary>
+        /// What the driver actually rasterized: four pixels plus the viewport that produced them.
+        ///
+        /// The screen showing the clear colour says nothing about the draw — <c>Draw</c> returns
+        /// <c>void</c>, and <c>ClearRenderTargetView</c> ignores the viewport — so two rounds of
+        /// reading the source could not tell a clipped draw from a present that never happened.
+        /// This line can: <c>mid</c> equal to <c>top</c> means the clear landed and the quad
+        /// produced no pixels, while <c>mid=FFFF6633</c> (the white test texture times the vertex
+        /// colour) means the quad is in the surface and the fault lies beyond it, in presenting.
+        /// </summary>
+        public static string PxText
+        {
+            get
+            {
+                try
+                {
+                    return "px seq=" + PxSeq
+                        + " st=" + Vd(7)
+                        + " | top=" + PxHex(0) + " mid=" + PxHex(1)
+                        + " mid2=" + PxHex(2) + " bot=" + PxHex(3)
+                        + " | vp=(" + (Vd(0) / 100.0) + "," + (Vd(1) / 100.0) + ") "
+                        + (Vd(2) / 100.0) + "x" + (Vd(3) / 100.0)
+                        + " depth=(" + (Vd(4) / 1000.0) + "," + (Vd(5) / 1000.0) + ")"
+                        + " probes=" + Vd(6);
+                }
+                catch (Exception ex)
+                {
+                    return "px unavailable: " + ex.Message;
+                }
+            }
+        }
+
+        /// <summary>One probe pixel as <c>0xAARRGGBB</c> — the clear colour is <c>FF4D8CE6</c>,
+        /// the test quad's centre should be <c>FFFF6633</c>.</summary>
+        private static string PxHex(int index)
+        {
+            return wp81_rs_sis_pixel(index).ToString("X8");
+        }
+
+        /// <summary>One viewport/status entry; <c>int.MinValue</c> means the import itself failed,
+        /// which is a value none of the real statuses can take.</summary>
+        private static int Vd(int index)
+        {
+            try { return wp81_rs_sis_vdbg(index); }
+            catch (Exception) { return int.MinValue; }
+        }
+
         /// <summary>
         /// The second <c>CreateRenderTargetView</c> attempt as one log fragment.
         ///
@@ -488,15 +566,17 @@ namespace Phirura
             get
             {
                 int path = SisDiag(11);
+                if (path == -99) { return "not attempted yet"; } // no frame has run
                 if (path == 1) { return "own+copy"; }
                 if (path < 0)
                 {
                     return (path == -1 ? "own-texture refused " : "own-view refused ")
                         + "0x" + unchecked((uint)SisDiag(12)).ToString("X8");
                 }
-                // 0 means "direct" only once something tried to make that view; before the first
-                // frame it means nothing has happened yet.
-                return SisDiag(7) == 0 && SisDiag(8) == 0 ? "not attempted yet" : "direct";
+                // `direct` = a view of XAML's own surface, which is what `CreateRenderTargetView`
+                // answering S_OK means. (Distinguishing it from "nothing ran" by looking at
+                // `diag[7]` cannot work: success *is* 0, so it has always read as "not attempted".)
+                return "direct";
             }
         }
 
