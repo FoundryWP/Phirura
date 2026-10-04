@@ -744,6 +744,9 @@ pub struct Bindings {
 /// **These are stubs and cannot be made real.** They exist so `core/render.rs` compiles; that file
 /// has to be rewritten for Win2D. Every function is a no-op and `glGetError` reports success, so
 /// nothing here will silently produce wrong pixels - it will simply do nothing.
+///
+/// One exception: `glGetIntegerv` answers `GL_MAX_TEXTURE_SIZE`. A no-op there is not harmless,
+/// because the caller *reads back* what it passed in - see that function's note.
 pub mod gl {
     pub type GLuint = u32;
     pub const GL_NO_ERROR: u32 = 0;
@@ -776,7 +779,32 @@ pub mod gl {
         _format: u32, _type_: u32, _pixels: *const u8,
     ) {
     }
-    pub unsafe fn glGetIntegerv(_pname: u32, _params: *mut i32) {}
+    /// Answers `GL_MAX_TEXTURE_SIZE` with the size this port is prepared to allocate; any other
+    /// `pname` is left untouched, because inventing an answer for a query nobody has proven they
+    /// need is how a stub turns into a lie.
+    ///
+    /// This is the one stub in the module that cannot be a no-op. `prpr::ui::text` does
+    ///
+    /// ```ignore
+    /// let mut size = 0;
+    /// glGetIntegerv(GL_MAX_TEXTURE_SIZE, &mut size);
+    /// (size as u32).min(2048)
+    /// ```
+    ///
+    /// and feeds the result to `GlyphBrushBuilder::resize_texture`. A no-op leaves `size` at 0, so
+    /// the glyph cache is 0x0, and `GlyphBrush::process_queued` then fails `TextureTooSmall` on
+    /// *every* call: the handler asks for a bigger texture, gets another 0x0, and `submit` loops
+    /// forever. The first host run burned **30 minutes and 34334 lines of
+    /// `creating cache texture: 0x0`** inside `wp81_game_frame` before it was killed.
+    ///
+    /// 2048 is what `prpr` clamps this value to anyway (`.min(2048)`), so it is the answer a
+    /// truthful driver would give for this caller's purpose - and it is a size we can back, since
+    /// the texture is allocated from the shell's registry rather than by a driver.
+    pub unsafe fn glGetIntegerv(pname: u32, params: *mut i32) {
+        if pname == GL_MAX_TEXTURE_SIZE && !params.is_null() {
+            *params = 2048;
+        }
+    }
     pub unsafe fn glGenerateMipmap(_target: u32) {}
     pub unsafe fn glDeleteRenderbuffers(_n: i32, _ids: *const u32) {}
     pub unsafe fn glDeleteFramebuffers(_n: i32, _ids: *const u32) {}
