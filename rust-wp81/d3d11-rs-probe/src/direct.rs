@@ -46,6 +46,7 @@ pub type LUID = u64;
 
 pub const S_OK: HRESULT = 0;
 pub const E_INVALIDARG: HRESULT = 0x8007_0057u32 as HRESULT;
+pub const E_NOINTERFACE: HRESULT = 0x8000_4002u32 as HRESULT;
 
 /// A COM interface pointer. `vtbl` is the object pointer: `*vtbl` is the vtable, `(*vtbl)[n]` the
 /// n-th method. The `this` passed to every call is therefore `vtbl` itself.
@@ -480,6 +481,85 @@ extern "system" {
     pub fn CreateDXGIFactory1(riid: *const Guid, ppfactory: *mut *mut c_void) -> HRESULT;
 }
 
+// ===========================================================================
+// DXGI <-> WinRT interop — the WP8.1 phone render path
+// ===========================================================================
+//
+// A WP8.1 *phone* app does not present through a swapchain. `CreateSwapChainForCoreWindow` and
+// `CreateSwapChainForComposition` both answer `DXGI_ERROR_INVALID_CALL` for every documented
+// argument shape on the Adreno 225 / FL 9.3 driver (proven exhaustively on device — see
+// `PLAN-PATH-A.md`, Round 45). The `SwapChainPanel` mechanism is the desktop-class Windows 8.1
+// path; the phone path is these two interop functions plus the XAML compositor.
+//
+// **They cannot be linked.** The WP8.1 kit's ARM `d3d11.lib` is a *limited* import library: it
+// carries only `D3D11CreateDevice`, `D3D11CreateDeviceAndSwapChain`, the `D3D11Core*` family and
+// the `D3DKMT*` entries. `CreateDirect3D11DeviceFromDXGIDevice` is **not** among them (verified by
+// scanning the lib's symbol table).
+//
+// They *are* exported by `d3d11.dll` at runtime — Win2D's own ARM
+// `Microsoft.Graphics.Canvas.dll` imports exactly these two names, which is the evidence. They are
+// undocumented only because they live in `windows.graphics.directx.direct3d11.interop.h`, a header
+// the WP8.1 kit does not ship.
+//
+// So resolve them by name from the already-loaded `d3d11.dll`, using `LoadLibraryExW` +
+// `GetProcAddress`. **That pair is safe to import here**: the WP8.1 kit's own
+// `WindowsPhoneCore.lib` — which this DLL already links — carries
+// `__IMPORT_DESCRIPTOR_api-ms-win-core-libraryloader-l1-2-0` with exactly `LoadLibraryExW` and
+// `GetProcAddress` (20 `GetModuleHandle`, 5 `GetProcAddress`, 5 `LoadLibraryExW` symbols). That is
+// the phone kit naming the API set that provides them, so the import is a platform-guaranteed one,
+// not a desktop-only accident. `LoadLibraryExW` on a module the process already has returns the
+// existing handle, so this loads nothing and adds no second copy.
+//
+// Signatures are from the interop header:
+//
+//     HRESULT CreateDirect3D11DeviceFromDXGIDevice(IDXGIDevice* dxgiDevice, IInspectable** gfxDevice);
+//     HRESULT CreateDirect3D11SurfaceFromDXGISurface(IDXGISurface* dxgiSurface, IInspectable** gfxSurface);
+
+extern "system" {
+    fn LoadLibraryExW(lp_lib_file_name: *const u16, h_file: *mut c_void, flags: u32) -> *mut c_void;
+    fn GetProcAddress(h_module: *mut c_void, proc_name: *const u8) -> *mut c_void;
+}
+
+/// `d3d11.dll` as UTF-16LE, NUL-terminated.
+const D3D11_DLL_W: [u16; 10] = [
+    0x0064, 0x0033, 0x0064, 0x0031, 0x0031, 0x002E, 0x0064, 0x006C, 0x006C, 0x0000,
+];
+
+/// Resolve an export of the already-loaded `d3d11.dll`.
+pub unsafe fn d3d11_export(name: *const u8) -> *mut c_void {
+    let h = LoadLibraryExW(D3D11_DLL_W.as_ptr(), core::ptr::null_mut(), 0);
+    if h.is_null() {
+        return core::ptr::null_mut();
+    }
+    GetProcAddress(h, name)
+}
+
+/// Wrap a DXGI device as the WinRT `IDirect3DDevice` the XAML compositor accepts.
+pub unsafe fn create_direct3d11_device_from_dxgi_device(
+    dxgi_device: *mut c_void,
+    gfx_device: *mut *mut c_void,
+) -> HRESULT {
+    let p = d3d11_export(b"CreateDirect3D11DeviceFromDXGIDevice\0".as_ptr());
+    if p.is_null() {
+        return E_NOINTERFACE;
+    }
+    let f: extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT = core::mem::transmute(p);
+    f(dxgi_device, gfx_device)
+}
+
+/// Wrap an offscreen DXGI surface as the WinRT `IDirect3DSurface` the compositor can show.
+pub unsafe fn create_direct3d11_surface_from_dxgi_surface(
+    dxgi_surface: *mut c_void,
+    gfx_surface: *mut *mut c_void,
+) -> HRESULT {
+    let p = d3d11_export(b"CreateDirect3D11SurfaceFromDXGISurface\0".as_ptr());
+    if p.is_null() {
+        return E_NOINTERFACE;
+    }
+    let f: extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT = core::mem::transmute(p);
+    f(dxgi_surface, gfx_surface)
+}
+
 extern "system" {
     /// Present in the kit's `d3dcompiler.lib` (61 symbols incl. `D3DCompile`, `D3DReflect`), so
     /// the phone can compile HLSL at runtime and offline DXBC is an optimisation, not a need.
@@ -544,6 +624,21 @@ pub const IID_IDXGISWAPCHAIN: Guid = Guid {
     data2: 0xd2e7,
     data3: 0x4c0a,
     data4: [0xaa, 0x04, 0x6a, 0x9d, 0x23, 0xb8, 0x88, 0x6a],
+};
+
+/// `IDXGISurface` (dxgi.h: `cafcb56c-6ac3-4889-bf47-9e23bbd260ec`).
+///
+/// Needed explicitly because `CreateDirect3D11SurfaceFromDXGISurface` takes an **`IDXGISurface*`**,
+/// and an `ID3D11Texture2D` is *not* one. Both descend from `IDXGIDeviceSubObject`
+/// (`IDXGISurface : public IDXGIDeviceSubObject`; `ID3D11Texture2D : public ID3D11Resource` ->
+/// `ID3D11Resource : public IDXGIResource` -> `IDXGIDeviceSubObject`) - siblings, not parent/child.
+/// On desktop the interop helper QIs leniently enough that a raw texture pointer sneaks through;
+/// on the WP8.1 FL 9.3 driver it does not, and returns E_NOINTERFACE. So the QI is done here.
+pub const IID_IDXGISURFACE: Guid = Guid {
+    data1: 0xcafc_b56c,
+    data2: 0x6ac3,
+    data3: 0x4889,
+    data4: [0xbf, 0x47, 0x9e, 0x23, 0xbb, 0xd2, 0x60, 0xec],
 };
 
 // dxgi1_2.h

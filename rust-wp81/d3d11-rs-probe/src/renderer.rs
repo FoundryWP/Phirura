@@ -257,6 +257,178 @@ pub unsafe fn create_device_default_adapter() -> Option<(ComPtr, ComPtr, u32, [u
     Some((device, context, level, [0u16; 128]))
 }
 
+/// Create an offscreen render-target texture and the WinRT surface that lets the XAML compositor
+/// display it. **This is the WP8.1 phone render path.**
+///
+/// The swapchain routes are both dead on this platform for a FL 9.3 app (see `PLAN-PATH-A.md`,
+/// Round 45), and Win2D's own import table shows why: the phone does not present through a
+/// swapchain at all. It renders into a plain texture and hands the compositor a WinRT
+/// `IDirect3DSurface` wrapping it.
+///
+/// Returns `(texture, rtv, gfx_surface)`. The texture is `B8G8R8A8_UNORM` + `RENDER_TARGET` +
+/// `SHADER_RESOURCE` so it can both be drawn into and (later) sampled from, matching the
+/// `ALPHA_MODE_IGNORE`/BGRA shape the compositor expects. `BindFlags` deliberately includes
+/// `SHADER_RESOURCE`: Stage 3's sprite batcher will need to sample intermediate targets.
+///
+/// `trace` receives a (step, hresult) pair at each failure point, so the phone's log can name the
+/// failing call. On device there is no other debugger.
+pub unsafe fn create_offscreen_target(
+    device: ComPtr,
+    width: u32,
+    height: u32,
+    trace: *mut i32,
+) -> Option<(ComPtr, ComPtr, ComPtr)> {
+    unsafe fn note(trace: *mut i32, step: i32, hr: i32) {
+        if !trace.is_null() {
+            *trace = step;
+            *trace.add(1) = hr;
+        }
+    }
+
+    if width == 0 || height == 0 {
+        note(trace, OT_BAD_SIZE, 0);
+        return None;
+    }
+
+    crate::set_tick(280); // offscreen: CreateTexture2D
+    let td = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let create_texture2d: extern "system" fn(
+        *mut c_void,
+        *const D3D11_TEXTURE2D_DESC,
+        *const c_void,
+        *mut *mut c_void,
+    ) -> HRESULT = device.method(D3D11DEVICE_CREATETEXTURE2D);
+    let mut texture = ComPtr::NULL;
+    let hr = create_texture2d(
+        device.vtbl as *mut c_void,
+        &td,
+        core::ptr::null(),
+        &mut texture.vtbl as *mut _ as *mut *mut c_void,
+    );
+    if hr < 0 || texture.is_null() {
+        note(trace, OT_CREATE_TEXTURE, hr);
+        return None;
+    }
+
+    crate::set_tick(281); // offscreen: CreateRenderTargetView
+    let create_rtv: extern "system" fn(
+        *mut c_void,
+        *mut c_void,
+        *const c_void,
+        *mut *mut c_void,
+    ) -> HRESULT = device.method(D3D11DEVICE_CREATERENDERTARGETVIEW);
+    let mut rtv = ComPtr::NULL;
+    let hr = create_rtv(
+        device.vtbl as *mut c_void,
+        texture.vtbl as *mut c_void,
+        core::ptr::null(),
+        &mut rtv.vtbl as *mut _ as *mut *mut c_void,
+    );
+    if hr < 0 || rtv.is_null() {
+        note(trace, OT_CREATE_RTV, hr);
+        texture.release();
+        return None;
+    }
+
+    // Wrap the texture as a WinRT IDirect3DSurface the compositor accepts.
+    //
+    // `CreateDirect3D11SurfaceFromDXGISurface` takes an **IDXGISurface***, and an `ID3D11Texture2D`
+    // is NOT one: they are siblings under `IDXGIDeviceSubObject` (see `IID_IDXGISURFACE` in
+    // direct.rs). Passing the texture pointer straight through "worked" on desktop only because the
+    // desktop helper QIs leniently; the WP8.1 FL 9.3 driver returns E_NOINTERFACE, which is exactly
+    // what step 43 reported on device. So QI for the surface interface first and pass THAT.
+    crate::set_tick(282); // offscreen: CreateDirect3D11SurfaceFromDXGISurface
+    let mut dxgi_surface = ComPtr::NULL;
+    let hr = texture.query_interface(
+        &IID_IDXGISURFACE as *const Guid,
+        &mut dxgi_surface.vtbl as *mut _ as *mut *mut c_void,
+    );
+    if hr < 0 || dxgi_surface.is_null() {
+        note(trace, OT_QI_SURFACE, hr);
+        rtv.release();
+        texture.release();
+        return None;
+    }
+    let mut surface = ComPtr::NULL;
+    let hr = create_direct3d11_surface_from_dxgi_surface(
+        dxgi_surface.vtbl as *mut c_void,
+        &mut surface.vtbl as *mut _ as *mut *mut c_void,
+    );
+    if hr < 0 || surface.is_null() {
+        note(trace, OT_CREATE_SURFACE, hr);
+        dxgi_surface.release();
+        rtv.release();
+        texture.release();
+        return None;
+    }
+    // The WinRT wrapper took its own reference on the surface, so drop the QI'd one.
+    dxgi_surface.release();
+
+    note(trace, OT_OK, 0);
+    Some((texture, rtv, surface))
+}
+
+/// Step codes for [`create_offscreen_target`] (40..46).
+pub const OT_BAD_SIZE: i32 = 40;
+pub const OT_CREATE_TEXTURE: i32 = 41;
+pub const OT_CREATE_RTV: i32 = 42;
+pub const OT_CREATE_SURFACE: i32 = 43;
+pub const OT_OK: i32 = 44;
+pub const OT_QI_DXGIDEVICE: i32 = 45;
+pub const OT_CREATE_GFX_DEVICE: i32 = 46;
+/// `QueryInterface(IID_IDXGISurface)` on the offscreen texture - the step that failed with
+/// `E_NOINTERFACE` on device before the QI was added (see `direct::IID_IDXGISURFACE`).
+pub const OT_QI_SURFACE: i32 = 47;
+
+/// Wrap a D3D11 device as the WinRT `IDirect3DDevice` the XAML compositor needs alongside a surface.
+pub unsafe fn wrap_device_for_compositor(device: ComPtr, trace: *mut i32) -> Option<ComPtr> {
+    unsafe fn note(trace: *mut i32, step: i32, hr: i32) {
+        if !trace.is_null() {
+            *trace = step;
+            *trace.add(1) = hr;
+        }
+    }
+    // The WinRT wrapper wants the *DXGI* device, not the D3D11 one: `ID3D11Device` derives from
+    // `IUnknown`, so query for `IDXGIDevice` first. (Win2D's own code does exactly this.)
+    let mut dxgi_device = ComPtr::NULL;
+    let hr = device.query_interface(
+        &IID_IDXGIDEVICE as *const Guid,
+        &mut dxgi_device.vtbl as *mut _ as *mut *mut c_void,
+    );
+    if hr < 0 || dxgi_device.is_null() {
+        note(trace, OT_QI_DXGIDEVICE, hr);
+        return None;
+    }
+    crate::set_tick(283); // offscreen: CreateDirect3D11DeviceFromDXGIDevice
+    let mut gfx_device = ComPtr::NULL;
+    let hr = create_direct3d11_device_from_dxgi_device(
+        dxgi_device.vtbl as *mut c_void,
+        &mut gfx_device.vtbl as *mut _ as *mut *mut c_void,
+    );
+    dxgi_device.release();
+    if hr < 0 || gfx_device.is_null() {
+        note(trace, OT_CREATE_GFX_DEVICE, hr);
+        return None;
+    }
+    note(trace, OT_OK, 0);
+    Some(gfx_device)
+}
+
+/// Step codes for [`wrap_device_for_compositor`] (45..46).
+pub const OT_QI_DXGIDEVICE: i32 = 45;
+pub const OT_CREATE_GFX_DEVICE: i32 = 46;
+
 /// Create a composition swapchain for a XAML `SwapChainPanel` and attach it.
 ///
 /// `panel` is the `IInspectable*` of the `SwapChainPanel`; the native side is obtained with
@@ -765,6 +937,20 @@ pub unsafe fn create_swapchain_for_corewindow_traced(
         *mut c_void,
         *mut *mut c_void,
     ) -> HRESULT = factory.method(IDXGIFACTORY2_CREATESWAPCHAINFORCOREWINDOW);
+
+    // Sanity probes before the create. If the vtable is misaligned these return nonsense, which
+    // would explain a uniform DXGI_ERROR_INVALID_CALL across every descriptor shape:
+    //   * IsWindowedStereoEnabled (slot 14) must return 0 or 1 (BOOL),
+    //   * IsCurrent               (slot 13) must return 0 or 1 (BOOL).
+    // Their results are stashed in the CoreWindow probe statics so the C# log prints them.
+    unsafe {
+        let is_current: extern "system" fn(*mut c_void) -> BOOL = factory.method(13);
+        let is_stereo: extern "system" fn(*mut c_void) -> BOOL = factory.method(14);
+        let cur = is_current(factory.vtbl as *mut c_void);
+        let stere = is_stereo(factory.vtbl as *mut c_void);
+        crate::record_factory_probe(cur, 0);
+        crate::record_cw_factory_stereo(stere);
+    }
 
     // Descriptor sweep. `CreateSwapChainForCoreWindow` returns DXGI_ERROR_INVALID_CALL, which the
     // docs define as "invalid data" - and the only data we supply is this descriptor. Rather than

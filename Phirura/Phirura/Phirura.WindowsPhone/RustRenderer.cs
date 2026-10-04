@@ -94,6 +94,9 @@ namespace Phirura
         private static extern int wp81_rs_corewindow_qi();
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_cw_factory_stereo();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern uint wp81_rs_vertex_count();
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -114,9 +117,156 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr wp81_rs_tick_name();
 
+        // --- offscreen + WinRT-interop route (the corrected Stage 1) -------------------------
+        // A WP8.1 *phone* app does not present through a swapchain at all: both
+        // CreateSwapChainForCoreWindow and CreateSwapChainForComposition return
+        // DXGI_ERROR_INVALID_CALL on this Adreno 225 / WDDM 1.2 / FL 9.3 driver. The phone path is
+        // to render into an offscreen texture, wrap it as a WinRT IDirect3DSurface plus the matching
+        // IDirect3DDevice, and hand both to the XAML compositor. Rust does all of that; C# only
+        // forwards the two IInspectable pointers to a XAML Image/CanvasControl.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_start_offscreen(uint width, uint height);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr wp81_rs_gfx_surface();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr wp81_rs_gfx_device();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_route();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_ot_step();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr wp81_rs_ot_step_name();
+
         private static bool _started;
 
         public static bool Started { get { return _started; } }
+
+        /// <summary>
+        /// Bring the Rust renderer up on the **offscreen + WinRT-interop** route - the one that
+        /// actually works on a WP8.1 phone. Creates the device, an offscreen render target and the
+        /// WinRT <c>IDirect3DSurface</c>/<c>IDirect3DDevice</c> pair, then builds the full pipeline.
+        ///
+        /// Runs the native call on the calling thread; the page calls it from a pool thread so the
+        /// UI thread stays alive to flush the log if a native step hard-faults.
+        /// </summary>
+        public static bool StartOffscreen(uint pixelWidth, uint pixelHeight)
+        {
+            if (_started)
+            {
+                return true;
+            }
+            try
+            {
+                AppLog.WriteSync("RustRenderer.StartOffscreen: calling native " + pixelWidth + "x" + pixelHeight);
+                int rc;
+                try
+                {
+                    rc = wp81_rs_start_offscreen(pixelWidth, pixelHeight);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.WriteSync("RustRenderer.StartOffscreen: native threw", ex);
+                    return false;
+                }
+
+                AppLog.WriteSync("RustRenderer.StartOffscreen: native returned rc=" + rc
+                    + " tick=" + Tick + " (" + TickName + ")");
+                if (rc != 0)
+                {
+                    AppLog.WriteSync("RustRenderer.StartOffscreen: failed rc=" + rc + " " + Diagnose());
+                    return false;
+                }
+
+                AppLog.WriteSync("RustRenderer.StartOffscreen: up. route=" + Route
+                    + " surface=0x" + GfxSurface.ToInt32().ToString("X8")
+                    + " device=0x" + GfxDevice.ToInt32().ToString("X8"));
+                _started = true;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AppLog.WriteSync("RustRenderer.StartOffscreen: FAILED", ex);
+                return false;
+            }
+        }
+
+        /// <summary>Which route came up: 0 = swapchain (composition), 1 = offscreen+interop, 2 = CoreWindow, -1 = none.</summary>
+        public static int Route
+        {
+            get
+            {
+                try { return wp81_rs_route(); }
+                catch (Exception) { return -1000; }
+            }
+        }
+
+        /// <summary>A name for <see cref="Route"/>, for the log and the HUD.</summary>
+        public static string RouteName
+        {
+            get
+            {
+                switch (Route)
+                {
+                    case 0: return "swapchain";
+                    case 1: return "offscreen";
+                    case 2: return "corewindow";
+                    default: return "(none)";
+                }
+            }
+        }
+
+        /// <summary>
+        /// The WinRT <c>IDirect3DSurface*</c> (an <c>IInspectable</c>) wrapping the offscreen render
+        /// target. Only valid while the offscreen route is up; the compositor consumes it and the
+        /// Rust side keeps ownership, so callers must NOT release it.
+        /// </summary>
+        public static IntPtr GfxSurface
+        {
+            get
+            {
+                try { return wp81_rs_gfx_surface(); }
+                catch (Exception) { return IntPtr.Zero; }
+            }
+        }
+
+        /// <summary>The WinRT <c>IDirect3DDevice*</c> matching <see cref="GfxSurface"/>. Rust owns it.</summary>
+        public static IntPtr GfxDevice
+        {
+            get
+            {
+                try { return wp81_rs_gfx_device(); }
+                catch (Exception) { return IntPtr.Zero; }
+            }
+        }
+
+        /// <summary>Raw offscreen sub-step code (40..46), 0 if the offscreen route never ran.</summary>
+        public static int OtStep
+        {
+            get
+            {
+                try { return wp81_rs_ot_step(); }
+                catch (Exception) { return 0; }
+            }
+        }
+
+        /// <summary>The failing offscreen call by name, e.g. "offscreen: CreateTexture2D".</summary>
+        public static string OtStepName
+        {
+            get
+            {
+                try
+                {
+                    IntPtr p = wp81_rs_ot_step_name();
+                    return p == IntPtr.Zero ? "(null)" : Marshal.PtrToStringAnsi(p);
+                }
+                catch (Exception) { return "(unavailable)"; }
+            }
+        }
 
         /// <summary>How far Rust's start-up got: 0 = fully up, 1 = device failed, 2 = swapchain, …</summary>
         public static int Stage
@@ -236,7 +386,13 @@ namespace Phirura
             string s = "stage=" + stage + " hr=0x" + hr.ToString("X8")
                 + (name.Length > 0 ? " (" + name + ")" : "")
                 + " tick=" + Tick + " (" + TickName + ")";
-            if (stage >= 100)
+            // Stage codes >= 300 come from the offscreen route (OT_BASE + sub-step); 100..199 from
+            // the swapchain route. Report whichever produced the code so the log names the call.
+            if (stage >= 300)
+            {
+                s += "  offscreen-step=" + OtStepName + " (code " + OtStep + ")";
+            }
+            else if (stage >= 100)
             {
                 s += "  swapchain-step=" + ScStepName + " (code " + ScStep + ")";
             }
@@ -272,8 +428,12 @@ namespace Phirura
                     case 0x7FFFFFFF: qiName = "(not probed)"; break;
                     default: qiName = "0x" + qi.ToString("X8"); break;
                 }
+                string stereo;
+                int st = wp81_rs_cw_factory_stereo();
+                if (st == -1) stereo = "n/a";
+                else stereo = st.ToString();
                 return "  cw-obj=0x" + obj.ToString("X8") + " cw-vtbl=0x" + vtbl.ToString("X8")
-                    + " cw-qi=" + qiName;
+                    + " cw-qi=" + qiName + " cw-stereo=" + stereo;
             }
             catch (Exception)
             {
@@ -775,16 +935,62 @@ namespace Phirura
                     AppLog.WriteSync("RustRenderer.ResolveCoreWindow: GetForCurrentThread returned null");
                     return IntPtr.Zero;
                 }
-                var iface = (Windows.UI.Core.ICoreWindow)cw;
-                IntPtr window = Marshal.GetIUnknownForObject(iface);
-                AppLog.WriteSync("RustRenderer.ResolveCoreWindow: interface IUnknown=0x"
+                // NOTE: this returns the *default* IUnknown of the CoreWindow runtime-class RCW, not
+                // a cast-to-interface pointer. The two are the same pointer value in practice (an
+                // earlier probe showed class-IUnknown == interface-IUnknown), so the cast was a
+                // no-op. Kept un-cast because DXGI's QI inside CreateSwapChainForCoreWindow is what
+                // decides, and handing it the object's own IUnknown is the least surprising form.
+                IntPtr window = Marshal.GetIUnknownForObject(cw);
+                AppLog.WriteSync("RustRenderer.ResolveCoreWindow: IUnknown=0x"
                     + window.ToString("X8"));
+                // Log the CoreWindow's observable state: DXGI_ERROR_INVALID_CALL from
+                // CreateSwapChainForCoreWindow can mean the window is not yet ready (not visible /
+                // not activated), which is plausible during page navigation right after launch.
+                try
+                {
+                    AppLog.WriteSync("RustRenderer.ResolveCoreWindow: state"
+                        + " bounds=" + cw.Bounds.Width + "x" + cw.Bounds.Height
+                        + " visible=" + cw.Visible);
+                }
+                catch (Exception exState)
+                {
+                    AppLog.WriteSync("RustRenderer.ResolveCoreWindow: state read failed", exState);
+                }
                 LogCoreWindowPointer(window);
                 return window;
             }
             catch (Exception ex)
             {
                 AppLog.WriteSync("RustRenderer.ResolveCoreWindow: cannot get CoreWindow", ex);
+                return IntPtr.Zero;
+            }
+        }
+
+        /// <summary>
+        /// A second CoreWindow pointer source: <c>Window.Current.CoreWindow</c>. DXGI's
+        /// <c>INVALID_CALL</c> persists across every descriptor shape, so the pointer's *origin*
+        /// is a suspect; this gives the page an alternative to try when the first one fails.
+        /// UI thread only; caller owns the reference.
+        /// </summary>
+        public static IntPtr ResolveCoreWindowViaWindowCurrent()
+        {
+            try
+            {
+                var cw = Windows.UI.Xaml.Window.Current.CoreWindow;
+                if (cw == null)
+                {
+                    AppLog.WriteSync("RustRenderer.ResolveWindowCurrent: Current.CoreWindow null");
+                    return IntPtr.Zero;
+                }
+                IntPtr window = Marshal.GetIUnknownForObject(cw);
+                AppLog.WriteSync("RustRenderer.ResolveWindowCurrent: IUnknown=0x"
+                    + window.ToString("X8"));
+                LogCoreWindowPointer(window);
+                return window;
+            }
+            catch (Exception ex)
+            {
+                AppLog.WriteSync("RustRenderer.ResolveWindowCurrent: failed", ex);
                 return IntPtr.Zero;
             }
         }

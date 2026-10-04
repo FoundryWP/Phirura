@@ -67,6 +67,7 @@ pub(crate) unsafe fn record_sc_hr(_i: usize, _hr: i32) {}
 /// statics must exist so `renderer.rs` references resolve.
 pub(crate) unsafe fn record_corewindow(_vtbl: u32, _obj: u32) {}
 pub(crate) unsafe fn record_corewindow_qi(_hr: i32) {}
+pub(crate) unsafe fn record_cw_factory_stereo(_v: i32) {}
 
 // --------------------------------------------------------------------------
 // minimal user32 binding: just enough for a hidden window
@@ -276,6 +277,60 @@ fn main() {
             fail(5, "CreateShaderResourceView");
         }
         println!("[hostcheck] 5 test texture + srv ok");
+
+        // ---- 5b. offscreen target: the WP8.1 phone present path's *verifiable half* ----
+        //
+        // `create_offscreen_target` does three things: CreateTexture2D, CreateRenderTargetView, and
+        // the WinRT `CreateDirect3D11SurfaceFromDXGISurface` interop. The first two are the same
+        // calls step 3/5 already make, but with the phone's shape (B8G8R8A8, RENDER_TARGET |
+        // SHADER_RESOURCE, USAGE_DEFAULT, explicit size) and they are exactly what breaks silently
+        // when a descriptor is malformed - so they are worth running as their own case.
+        //
+        // The interop call cannot run here: `CreateDirect3D11SurfaceFromDXGISurface` is a WP8.1/
+        // WinRT export that desktop `d3d11.dll` does not have, and there is no XAML compositor on
+        // this console call to consume the result. `create_offscreen_target` returning `None` with
+        // `OT_CREATE_SURFACE` while steps 41/42 passed is therefore the *expected* desktop outcome,
+        // and is itself the assertion: it proves the texture and RTV succeeded and only the
+        // device-only interop is missing.
+        let mut ot_trace = [0i32; 2];
+        match create_offscreen_target(device, w, h, ot_trace.as_mut_ptr()) {
+            Some((t, r, s)) => {
+                println!("[hostcheck] 5b offscreen target ok (texture + rtv + interop surface)");
+                t.release();
+                r.release();
+                s.release();
+            }
+            None => {
+                let step = ot_trace[0];
+                if step == OT_CREATE_SURFACE {
+                    println!(
+                        "[hostcheck] 5b offscreen texture + rtv ok; interop surface unavailable on \
+                         desktop (expected - device-only export)"
+                    );
+                } else {
+                    fail(5, &format!(
+                        "create_offscreen_target failed before the interop step: step={} hr=0x{:08X}",
+                        step, ot_trace[1] as u32
+                    ));
+                }
+            }
+        }
+
+        // ---- 5c. the WinRT device wrapper's first half: QI(IDXGIDevice) ----
+        //
+        // `wrap_device_for_compositor` starts by querying the D3D11 device for `IDXGIDevice`
+        // (WinRT wants the DXGI device, not the D3D11 one). That QI is desktop-testable and a wrong
+        // IID is a silent `E_NOINTERFACE`, so it earns its own check.
+        let mut dxgi_device = ComPtr::NULL;
+        let hr = device.query_interface(
+            &IID_IDXGIDEVICE as *const Guid,
+            &mut dxgi_device.vtbl as *mut _ as *mut *mut c_void,
+        );
+        if hr < 0 || dxgi_device.is_null() {
+            fail(5, &format!("QI(IID_IDXGIDevice) on the D3D11 device hr=0x{:08X}", hr as u32));
+        }
+        dxgi_device.release();
+        println!("[hostcheck] 5c QI(IDXGIDevice) for the compositor device ok");
 
         // ---- 6. viewport + clear (proves ClearRenderTargetView slot 46) ----
         let vp = D3D11_VIEWPORT {

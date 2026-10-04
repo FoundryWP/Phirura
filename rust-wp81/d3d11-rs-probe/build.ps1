@@ -143,7 +143,14 @@ $linkArgs = @(
     "/EXPORT:wp81_rs_attach_panel",
     "/EXPORT:wp81_rs_corewindow_vtbl",
     "/EXPORT:wp81_rs_corewindow_obj",
-    "/EXPORT:wp81_rs_corewindow_qi"
+    "/EXPORT:wp81_rs_corewindow_qi",
+    "/EXPORT:wp81_rs_cw_factory_stereo",
+    "/EXPORT:wp81_rs_start_offscreen",
+    "/EXPORT:wp81_rs_gfx_surface",
+    "/EXPORT:wp81_rs_gfx_device",
+    "/EXPORT:wp81_rs_route",
+    "/EXPORT:wp81_rs_ot_step",
+    "/EXPORT:wp81_rs_ot_step_name"
 )
 $savedEap2 = $ErrorActionPreference
 $ErrorActionPreference = "Continue"

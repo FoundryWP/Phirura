@@ -12,17 +12,24 @@
         Path A, Stage 1 acceptance test.
 
         This is the ONLY thing the plan requires before Stage 3 may start: a textured quad drawn
-        by *Rust* into a real D3D11 swapchain, attached to a real XAML SwapChainPanel, on the
-        phone. Everything Stage 3 needs (device, swapchain, RTL, shaders, input layout, vertex
-        buffer, sampler, blend/raster state, and a Draw call going through all of them) is
-        exercised by this page - if a quad appears, the binding is proven end to end.
+        by *Rust* into a real D3D11 render target on the phone.
 
-        SwapChainPanel is used rather than Win2D deliberately: Win2D would mean C# owns the
-        device, which is exactly the design the user rejected. Here C# only hands Rust the
-        panel's native pointer and drives the frame loop.
+        ROUND 45 - the host element changed from SwapChainPanel to Image, because a WP8.1 *phone*
+        app cannot create a swapchain at all: CreateSwapChainForCoreWindow and
+        CreateSwapChainForComposition both return DXGI_ERROR_INVALID_CALL on this Adreno 225 /
+        WDDM 1.2 / FL 9.3 driver, and Win2D's own ARM DLL (which renders fine here) imports no
+        swapchain entry points.
+
+        The phone path is: Rust renders into an offscreen ID3D11Texture2D and hands back a WinRT
+        IDirect3DSurface + IDirect3DDevice; C# projects those through Win2D's interop statics into
+        a CanvasImageSource and sets it as this Image's Source. The XAML compositor then displays
+        Rust's pixels. Rust still owns the device, the texture, the pipeline and the draw calls -
+        C# creates nothing but the ImageSource wrapper.
     -->
     <Grid x:Name="RootGrid" Background="#FF07070B">
-        <SwapChainPanel x:Name="RustPanel" />
+        <!-- Rust's render target, composited by XAML. Stretch=None keeps it 1:1 at 96 dpi. -->
+        <Image x:Name="RustImage" Stretch="Fill" Visibility="Collapsed"
+               HorizontalAlignment="Stretch" VerticalAlignment="Stretch" />
 
         <!-- HUD: what the Rust side reports, refreshed every second. -->
         <Grid IsHitTestVisible="False" Margin="14,8,14,8">

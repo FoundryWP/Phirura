@@ -50,6 +50,16 @@ struct State {
     context: ComPtr,
     swapchain: ComPtr,
     rtv: ComPtr,
+    /// The offscreen render-target texture — the WP8.1 phone present path (see
+    /// [`renderer::create_offscreen_target`]). `rtv` above points at *this* on that route, and at
+    /// the swapchain back buffer on the (dead) swapchain route.
+    rt_tex: ComPtr,
+    /// The WinRT `IDirect3DSurface` wrapping `rt_tex`, handed to the XAML compositor.
+    gfx_surface: ComPtr,
+    /// The WinRT `IDirect3DDevice` wrapping our D3D11 device, for the compositor.
+    gfx_device: ComPtr,
+    /// Which route came up: 0 = swapchain (composition), 1 = offscreen+interop, 2 = CoreWindow.
+    route: i32,
     /// The white 1x1 texture the Stage 1 acceptance test samples.
     test_tex: ComPtr,
     test_srv: ComPtr,
@@ -58,6 +68,8 @@ struct State {
     last_hr: i32,
     /// (step, hresult) from the swapchain-attachment path, so a failure names its call.
     sc_trace: [i32; 2],
+    /// (step, hresult) from the offscreen-target path.
+    ot_trace: [i32; 2],
     /// Which swapchain-descriptor variant was accepted (0 = first/flip-sequential).
     sc_variant: i32,
     width: u32,
@@ -85,12 +97,17 @@ static mut STATE: State = State {
     context: ComPtr::NULL,
     swapchain: ComPtr::NULL,
     rtv: ComPtr::NULL,
+    rt_tex: ComPtr::NULL,
+    gfx_surface: ComPtr::NULL,
+    gfx_device: ComPtr::NULL,
+    route: -1,
     test_tex: ComPtr::NULL,
     test_srv: ComPtr::NULL,
     pipeline: None,
     stage: -1,
     last_hr: 0,
     sc_trace: [0, 0],
+    ot_trace: [0, 0],
     sc_variant: -1,
     width: 0,
     height: 0,
@@ -267,6 +284,23 @@ pub static mut COREWINDOW_VTBL: u32 = 0;
 pub static mut COREWINDOW_OBJ: u32 = 0;
 pub static mut COREWINDOW_QI: i32 = 0x7FFF_FFFF;
 
+/// `IDXGIFactory2::IsWindowedStereoEnabled()` (slot 14) captured on the CoreWindow path, just
+/// before `CreateSwapChainForCoreWindow`. BOOL: must be 0 or 1; anything else means the factory
+/// vtable is misaligned, the one failure mode that would make every descriptor shape return
+/// `DXGI_ERROR_INVALID_CALL` identically. -1 = not probed.
+pub static mut CW_FACTORY_STEREO: i32 = -1;
+
+/// Record the CoreWindow path's factory stereo probe (see [`CW_FACTORY_STEREO`]).
+pub(crate) unsafe fn record_cw_factory_stereo(v: i32) {
+    CW_FACTORY_STEREO = v;
+}
+
+/// `IsWindowedStereoEnabled()` as last observed on the CoreWindow path; -1 = not probed.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_cw_factory_stereo() -> i32 {
+    CW_FACTORY_STEREO
+}
+
 /// Record the CoreWindow pointer's vtable + object addresses (see [`COREWINDOW_VTBL`]).
 pub(crate) unsafe fn record_corewindow(vtbl: u32, obj: u32) {
     COREWINDOW_VTBL = vtbl;
@@ -293,8 +327,7 @@ pub unsafe extern "C" fn wp81_rs_corewindow_obj() -> u32 {
 /// `QI(IUnknown)` HRESULT on the last CoreWindow pointer; `0x7FFFFFFF` = not probed.
 #[no_mangle]
 pub unsafe extern "C" fn wp81_rs_corewindow_qi() -> i32 {
-    COREWINDOW_QI
-}
+    COREWINDOW_QI}
 
 // ===========================================================================
 // per-variant swapchain HRESULTs
@@ -352,6 +385,146 @@ unsafe fn stop_here(s: &mut State, n: i32) -> bool {
 // ===========================================================================
 // start-up
 // ===========================================================================
+
+/// Bring up the renderer on the **offscreen render-target route** — the WP8.1 phone present path.
+///
+/// This is the corrected Stage 1. It creates the device, an offscreen `B8G8R8A8` render target and
+/// the WinRT `IDirect3DSurface`/`IDirect3DDevice` pair the XAML compositor needs, then builds the
+/// pipeline. No swapchain is involved: `CreateSwapChainForCoreWindow` and
+/// `CreateSwapChainForComposition` are both unimplemented for a FL 9.3 phone app on this driver,
+/// and Win2D — which renders fine on the same device — imports no swapchain entry points at all.
+///
+/// Returns 0 on success; otherwise the stage code, with `wp81_rs_ot_step()`/`wp81_rs_ot_step_name()`
+/// naming the failing call and `wp81_rs_last_hr()` the HRESULT.
+///
+/// The caller must read the WinRT objects with [`wp81_rs_gfx_surface`] / [`wp81_rs_gfx_device`] and
+/// hand them to XAML (see `RustRenderer.cs`); Rust owns the pixels, the compositor owns presentation.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_start_offscreen(width: u32, height: u32) -> i32 {
+    let s = st();
+    release_all(s);
+    reset_sc_hrs();
+    s.width = width;
+    s.height = height;
+    s.limit = 0;
+    s.reached = 0;
+
+    bump(s, 2); // create_device
+    let (device, context, level, _desc) = match create_device() {
+        Some(v) => v,
+        None => {
+            s.stage = 1;
+            return 1;
+        }
+    };
+    s.device = device;
+    s.context = context;
+    s.last_hr = 0;
+    let _ = level;
+
+    bump(s, 280); // offscreen: texture + RTV + WinRT surface
+    let (rt_tex, rtv, gfx_surface) =
+        match renderer::create_offscreen_target(device, width, height, s.ot_trace.as_mut_ptr()) {
+            Some(v) => v,
+            None => {
+                s.stage = OT_BASE + s.ot_trace[0];
+                s.last_hr = s.ot_trace[1];
+                return 2;
+            }
+        };
+    s.rt_tex = rt_tex;
+    s.rtv = rtv;
+    s.gfx_surface = gfx_surface;
+
+    bump(s, 283); // offscreen: WinRT IDirect3DDevice for the compositor
+    match renderer::wrap_device_for_compositor(device, s.ot_trace.as_mut_ptr()) {
+        Some(d) => s.gfx_device = d,
+        None => {
+            s.stage = OT_BASE + s.ot_trace[0];
+            s.last_hr = s.ot_trace[1];
+            return 3;
+        }
+    }
+
+    bump(s, 30); // build_pipeline
+    let pipeline = match build_pipeline(device, context) {
+        Some(p) => p,
+        None => {
+            s.stage = 5;
+            return 5;
+        }
+    };
+
+    bump(s, 40); // create_test_texture
+    if !create_test_texture(device, s) {
+        s.pipeline = Some(pipeline);
+        s.stage = 6;
+        return 6;
+    }
+    s.pipeline = Some(pipeline);
+
+    let vp = D3D11_VIEWPORT {
+        TopLeftX: 0.0,
+        TopLeftY: 0.0,
+        Width: width as f32,
+        Height: height as f32,
+        MinDepth: 0.0,
+        MaxDepth: 1.0,
+    };
+    let set_viewports: extern "system" fn(*mut c_void, UINT, *const D3D11_VIEWPORT) =
+        context.method(D3D11CONTEXT_RSSETVIEWPORTS);
+    set_viewports(context.vtbl as *mut c_void, 1, &vp);
+
+    s.route = 1; // offscreen + interop
+    bump(s, 99);
+    s.stage = 0;
+    0
+}
+
+/// Added to the raw offscreen step (40..46) so `stage` cannot collide with the 1..6 start-up codes.
+const OT_BASE: i32 = 300;
+
+/// The WinRT `IDirect3DSurface*` (an `IInspectable`) to hand the XAML compositor. 0 if not up.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_gfx_surface() -> *mut c_void {
+    st().gfx_surface.vtbl as *mut c_void
+}
+
+/// The WinRT `IDirect3DDevice*` (an `IInspectable`) matching [`wp81_rs_gfx_surface`].
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_gfx_device() -> *mut c_void {
+    st().gfx_device.vtbl as *mut c_void
+}
+
+/// Which route came up: 0 = swapchain, 1 = offscreen+interop, 2 = CoreWindow, -1 = none.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_route() -> i32 {
+    st().route
+}
+
+/// The raw offscreen sub-step code (40..46).
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_ot_step() -> i32 {
+    st().ot_trace[0]
+}
+
+/// A name for the offscreen sub-step, so a failure reads `offscreen: CreateDirect3D11Surface…`.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_ot_step_name() -> *const u8 {
+    let step = st().ot_trace[0];
+    let s: &[u8] = match step {
+        40 => b"offscreen: bad width/height\0",
+        41 => b"offscreen: CreateTexture2D\0",
+        42 => b"offscreen: CreateRenderTargetView\0",
+        43 => b"offscreen: CreateDirect3D11SurfaceFromDXGISurface\0",
+        44 => b"offscreen: (target created)\0",
+        45 => b"offscreen: QI(IDXGIDevice) for the compositor device\0",
+        46 => b"offscreen: CreateDirect3D11DeviceFromDXGIDevice\0",
+        47 => b"offscreen: QI(IDXGISurface) on the render target\0",
+        _ => b"(none)\0",
+    };
+    s.as_ptr()
+}
 
 /// Create the device, the composition swapchain, its render target view, and the pipeline.
 ///
@@ -598,7 +771,7 @@ pub unsafe extern "C" fn wp81_rs_start_corewindow(
     bump(s, 252); // pointer probed
 
     bump(s, 2);
-    let (device, context, _level, _desc) = match create_device() {
+    let (mut device, mut context, _level, _desc) = match create_device() {
         Some(v) => v,
         None => {
             s.stage = 1;
@@ -609,15 +782,47 @@ pub unsafe extern "C" fn wp81_rs_start_corewindow(
     s.context = context;
 
     bump(s, 10);
-    // Reuse the tail of the composition path by wrapping the CoreWindow swapchain behind the same
-    // "create + RTV + pipeline + quad" sequence. The swapchain itself comes from the other function.
-    let swapchain = match create_swapchain_for_corewindow_traced(
+    // Device-shape sweep. Both swapchain routes returned DXGI_ERROR_INVALID_CALL at the *create*
+    // step, with a sane factory vtable (cw-stereo=0), a valid window pointer (cw-qi=S_OK) and the
+    // same result for every descriptor shape. That leaves the device as the one unvaried argument,
+    // so try the two device shapes WP8.1 samples use:
+    //   1. enumerated non-software adapter + D3D_DRIVER_TYPE_UNKNOWN  (current)
+    //   2. default adapter + D3D_DRIVER_TYPE_HARDWARE                  (the kit sample's shape)
+    // If (2) is what DXGI wants, this same deploy proves it.
+    let mut swapchain = create_swapchain_for_corewindow_traced(
         device,
         core_window,
         width,
         height,
         s.sc_trace.as_mut_ptr(),
-    ) {
+    );
+
+    if swapchain.is_none() {
+        bump(s, 253); // cw: retrying the CoreWindow swapchain with a default-adapter device
+        if let Some((dev2, ctx2, _l2, _d2)) = create_device_default_adapter() {
+            if let Some(sc2) = create_swapchain_for_corewindow_traced(
+                dev2,
+                core_window,
+                width,
+                height,
+                s.sc_trace.as_mut_ptr(),
+            ) {
+                // Adopt the second device so the RTV/pipeline below match the swapchain.
+                device.release();
+                context.release();
+                device = dev2;
+                context = ctx2;
+                s.device = device;
+                s.context = context;
+                swapchain = Some(sc2);
+            } else {
+                dev2.release();
+                ctx2.release();
+            }
+        }
+    }
+
+    let swapchain = match swapchain {
         Some(sc) => sc,
         None => {
             s.stage = SC_BASE + s.sc_trace[0];
@@ -938,6 +1143,16 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
 #[no_mangle]
 pub unsafe extern "C" fn wp81_rs_present() -> i32 {
     let s = st();
+    // Offscreen route: the XAML compositor presents. There is nothing to Present *to* — presenting
+    // into our own texture is what the draw already did. Returning success here keeps the frame
+    // loop in C# uniform across routes, and `Flush` is the honest "make the GPU do it now" call.
+    if s.route == 1 {
+        if s.context.is_null() {
+            return -1;
+        }
+        bump(s, 61); // frame finished (compositor owns presentation)
+        return 0;
+    }
     if s.swapchain.is_null() {
         return -1;
     }
@@ -968,15 +1183,22 @@ unsafe fn release_all(s: &mut State) {
     s.test_srv.release();
     s.test_tex.release();
     s.rtv.release();
+    s.rt_tex.release();
+    s.gfx_surface.release();
+    s.gfx_device.release();
     s.swapchain.release();
     s.context.release();
     s.device.release();
     s.test_srv = ComPtr::NULL;
     s.test_tex = ComPtr::NULL;
     s.rtv = ComPtr::NULL;
+    s.rt_tex = ComPtr::NULL;
+    s.gfx_surface = ComPtr::NULL;
+    s.gfx_device = ComPtr::NULL;
     s.swapchain = ComPtr::NULL;
     s.context = ComPtr::NULL;
     s.device = ComPtr::NULL;
+    s.route = -1;
     s.stage = -1;
 }
 
@@ -1087,7 +1309,6 @@ pub unsafe extern "C" fn wp81_rs_reached() -> i32 {
 /// 60 = frame: Map constant buffer / Map vertex buffer / bind / Draw(4)
 /// 70 = IDXGISwapChain::Present
 /// 99 = fully up
-#[no_mangle]
 // ===========================================================================
 // emergency tick dump - REMOVED
 // ===========================================================================
@@ -1131,7 +1352,7 @@ pub unsafe extern "C" fn wp81_rs_tick_name() -> *const u8 {
         250 => b"corewindow: entered native\0",
         251 => b"corewindow: release_all done\0",
         252 => b"corewindow: pointer probed\0",
-        253 => b"corewindow: about to create_swapchain_for_corewindow\0",
+        253 => b"cw: retrying swapchain with a default-adapter device\0",
         260 => b"cw: entered create_swapchain_for_corewindow\0",
         261 => b"cw: pWindow probe done\0",
         262 => b"cw: QI(IDXGIDevice) from D3D11 device\0",
@@ -1144,6 +1365,10 @@ pub unsafe extern "C" fn wp81_rs_tick_name() -> *const u8 {
         270 => b"cw: swapchain CREATED with variant v0 (STRETCH/PREMULT)\0",
         271 => b"cw: swapchain CREATED with variant v1 (STRETCH/IGNORE)\0",
         272 => b"cw: swapchain CREATED with variant v2 (NONE/PREMULT)\0",
+        280 => b"offscreen: CreateTexture2D\0",
+        281 => b"offscreen: CreateRenderTargetView\0",
+        282 => b"offscreen: CreateDirect3D11SurfaceFromDXGISurface\0",
+        283 => b"offscreen: CreateDirect3D11DeviceFromDXGIDevice\0",
         _ => b"(unknown tick)\0",
     };
     s.as_ptr()

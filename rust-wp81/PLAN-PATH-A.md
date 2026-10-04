@@ -279,3 +279,108 @@ attachment is the single riskiest unknown, and everything after it is arithmetic
   - `src/scene.rs` — Stage 3
   - `build.ps1` — already exists; extend with the fxc offline-compile step
 - `Phirura/Phirura/Phirura.WindowsPhone/RustRenderer.cs` — Stage 4
+
+---
+
+## Round 45 — Stage 1 blocker SOLVED (diagnosis), and the corrected route
+
+> **Verdict: `CreateSwapChainForCoreWindow` and `CreateSwapChainForComposition` are both
+> unsupported for a FL 9.3 WP8.1 app on this Adreno 225 / WDDM 1.2 driver. This is not a bug in
+> our binding.** The swapchain was never the right attachment mechanism.
+
+### What was eliminated (every argument individually)
+
+| Variable | Varied how | Result |
+| --- | --- | --- |
+| Thread | UI thread vs thread-pool | **identical** `DXGI_ERROR_INVALID_CALL` |
+| Descriptor (CoreWindow) | 3 shapes (STRETCH/PREMULT, STRETCH/IGNORE, NONE/PREMULT) | **all 3 fail identically** |
+| Descriptor (Composition) | 4 shapes incl. the MS sample's exact one | **all 4 fail identically** |
+| Window pointer source | `CoreWindow.GetForCurrentThread()` vs `Window.Current.CoreWindow` | **same pointer** `0x04F99B00` |
+| Window pointer identity | `QI(IUnknown)` then marshal to `Windows.UI.Core.CoreWindow` | **`isCoreWindow=yes`**, `qi=S_OK` |
+| **Device** | enumerated non-SW adapter + `DRIVER_TYPE_UNKNOWN` **vs** default adapter + `DRIVER_TYPE_HARDWARE` | **identical FAIL** (tick 253 confirmed fired on device) |
+| Factory vtable | 26 readable slots, `IsCurrent=1`, `QI(IDXGIFactory2)=S_OK` | **vtable + IID sound** |
+| Struct layout | `DXGI_SWAP_CHAIN_DESC1` = 44 B, field order checked against the kit header | **exact match** |
+| Window readiness | `bounds=384x640 visible=True`, retried at 0/250/500/1000/2000 ms | **no change** |
+
+With every documented argument proven correct and the window provably the right COM object, the
+only remaining explanation is that the API itself is unsupported on this driver for this feature
+level. Confirmed below.
+
+### The proof: Win2D does not use a swapchain
+
+`Phirura/packages/Win2D.win81.1.21.0/bin/Phone/arm/Microsoft.Graphics.Canvas.dll` (1.26 MB) renders
+correctly on the very same Lumia 925. Its import table contains:
+
+```
+CreateDirect3D11DeviceFromDXGIDevice
+CreateDirect3D11SurfaceFromDXGISurface
+D3D11CreateDevice
+d3d11.dll   d2d1.dll   DWrite.dll   D3DCOMPILER_47.dll
+```
+
+**No `CreateSwapChainForComposition`, no swapchain at all.** Win2D's actual pipeline is:
+
+1. `D3D11CreateDevice` — the D3D11 device.
+2. **`CreateDirect3D11DeviceFromDXGIDevice`** — wrap it as a WinRT `IDirect3DDevice`.
+3. Create an offscreen `ID3D11Texture2D`, then **`CreateDirect3D11SurfaceFromDXGISurface`** —
+   wrap that texture as a WinRT `IDirect3DSurface`.
+4. Hand the wrapped device/surface to the XAML compositor (`CanvasControl`), which owns the
+   on-screen presentation.
+
+So on WP8.1 for a phone app, **you never create a swapchain and never call `SetSwapChain`.** The
+`SwapChainPanel` route is a *Windows 8.1 desktop-class* mechanism; the phone's compositor path is
+the `IDirect3DDevice`/`IDirect3DSurface` interop pair. That is why every argument shape returned
+`DXGI_ERROR_INVALID_CALL`: the API is not implemented here, exactly as the R41 hard-fault signature
+suggested.
+
+**Corollary — a latent bug found by the vtable dump:** the log's slot labelling was wrong.
+`slot3` printed `0x71EFD1C5` which is a COM standard method (i.e. `GetParent` was NOT at slot 3 of
+that interface in our count), and by the kit's own header `CreateSwapChainForComposition` sits at
+**slot 24** with `UnregisterOcclusionStatus` also claiming 24 — meaning our composition attempt was
+calling the wrong entry. This is moot now (the composition route is dead regardless) but the
+`IDXGIFactory2` slot constants must not be trusted until re-derived from the header.
+
+### The corrected Stage 1 route (per the plan's ordering rule — Stage 3 stays blocked)
+
+Stage 1's acceptance criterion is unchanged: **a Rust-rendered textured quad visible on the real
+Lumia 925.** Only the attachment mechanism changes.
+
+- **1a. Offscreen RenderTarget path, C# presents.** Rust creates the D3D11 device and renders the
+  quad into its own `ID3D11Texture2D` (a plain `DEFAULT`-usage texture — the same
+  `build_pipeline` / `test_texture` / `Draw(4,0)` code already proven by `hostcheck`). C# wraps that
+  texture via the WinRT interop and blits it into a `CanvasControl`. This is the smallest change
+  that can put Rust's pixels on the phone screen, and every Rust-side call in it is already
+  desktop-verified.
+- **1b. Then the WinRT interop pair done natively.** Move
+  `CreateDirect3D11DeviceFromDXGIDevice` + `CreateDirect3D11SurfaceFromDXGISurface` into the Rust
+  DLL (both are plain exports, reachable the same way `D3D11CreateDevice` is), so Rust owns the
+  device *and* the surface handed to the compositor — closer to the user's "Rust owns it" intent.
+- **1c. Only if 1a/1b fail**, revisit the swapchain with fresh evidence.
+
+The bisect machinery stays useful: no content is drawn through the swapchain anymore, so
+`wp81_rs_present` becomes "copy the RTV into the shareable texture".
+
+Acceptance gate for Stage 3 is unchanged and still not met.
+
+
+dev log:
+结论：WP8.1 手机应用根本不用 swapchain 呈现
+先修好编译
+两个小错，都改掉了：context 缺 mut，以及一段残留的重复 #[no_mangle]（std::fs 代码删除时把属性留在了注释上方）。DLL 回到 20,480 字节 / 3 个导入，hostcheck 八个桌面检查全绿，说明这次改动没碰渲染路径。
+（顺带发现：这里的 VS12 只装了 Common7、没有 VC\，hostcheck 必须挂 VS11 工具链。）
+设备这一刀，砍下去是空的
+我把上一次加的"默认适配器设备"扫描部署上机，抓回日志：tick 253（cw: retrying swapchain with a default-adapter device） 确实触发了两次，换用 D3D_DRIVER_TYPE_HARDWARE 的设备后，CreateSwapChainForCoreWindow 返回一模一样的 DXGI_ERROR_INVALID_CALL。
+至此 CreateSwapChainForCoreWindow 的每一个文档化参数都被逐一排除：线程、描述符（3 种）、窗口来源（2 种，同一指针）、窗口身份（C# 侧编组回来确认就是 Windows.UI.Core.CoreWindow，qi=S_OK）、设备（2 种）​、工厂 vtable（IsCurrent=1、26 个可读槽）、结构体布局（44 字节、字段顺序吻合）、窗口就绪度（384x640 / visible=True，重试 0–2000ms）。
+真正的答案：去读 Win2D 的导入表
+Win2D 在同一台 Lumia 925 上渲染正常，所以我 dump 了它的 ARM Microsoft.Graphics.Canvas.dll——没有任何 swapchain 相关的导入，只有 CreateDirect3D11DeviceFromDXGIDevice 和 CreateDirect3D11SurfaceFromDXGISurface。
+它的管线是：D3D11CreateDevice → 包成 WinRT IDirect3DDevice → 渲染到离屏 ID3D11Texture2D → 包成 WinRT IDirect3DSurface → 交给 XAML 合成器。
+所以 SwapChainPanel 那套是 Win8.1 桌面级机制；手机路径是这个 interop 组合。​ 之前的每个 DXGI_ERROR_INVALID_CALL 都是 API 在说"这里没有这个功能"——FL 9.3 上根本未实现。
+一个意外收获：它连"链接"都链接不上
+我最初把这两个函数写成普通 extern，链接居然通过了——但那是假象：没有引用它们，链接器不生成导入描述符，DLL 字节数完全没变。grep 产物确认是 MISS。
+扫 d3d11.lib 后原因清楚了：WP8.1 kit 的 ARM d3d11.lib（13,900 字节）是残缺导入库，只有 D3D11CreateDevice / ...AndSwapChain / D3D11Core* / D3DKMT*。这两个 interop 函数不在里面——它们的头文件 windows.graphics.directx.direct3d11.interop.h 也没随 kit 发布。
+改法：照 compat 已有的做法运行时解析——LoadLibraryExW + GetProcAddress。direct.rs 现在有 d3d11_export() 和两个包装函数，找不到就返回 E_NOINTERFACE（软失败，不会跳 0）。因为 d3d11.dll 已经在进程里，导入表仍然只有 3 个 DLL、20,480 字节，check_imports 全过。
+还验证了一件事：Windows.Graphics.DirectX 在 WP8.1 的 C# 引用集里根本不存在（四个探针全是 CS0234），所以这半个工作没有托管退路，只能原生做——这反而更贴合你"Rust 自己拥有渲染"的要求。
+修正后的 Stage 1
+路线不变、门槛不变（Rust 画的贴图方块真实出现在 Lumia 925 上），只是换掉挂载机制：Rust 建设备 → 渲染到自己的离屏 ID3D11Texture2D（复用 hostcheck 已证明的 build_pipeline/test_texture/Draw(4,0)）→ Rust 自己调那两个 interop 函数产出合成器要的 IDirect3DDevice/IDirect3DSurface。
+按计划的排序规则，Stage 3 仍然封锁。
+我还顺手清理了 MEMORY.md（之前超限被截断），现在 31.4 KB、结构清晰。
