@@ -229,6 +229,35 @@ pub struct D3D11_RASTERIZER_DESC {
     pub AntialiasedLineEnable: BOOL,
 }
 
+/// `D3D11_DEPTH_STENCILOP_DESC` / `D3D11_DEPTH_STENCIL_DESC`, field list taken from the kit's
+/// `d3d11.h`.
+///
+/// The two `UINT8` mask fields matter: they are followed by a 4-byte-aligned struct, so the
+/// compiler inserts two bytes of padding after them, and the header's layout does the same. The
+/// whole descriptor is what decides whether fragments survive the depth test at all - the default
+/// state has `DepthEnable = TRUE`, and Stage 1 has no depth buffer.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct D3D11_DEPTH_STENCILOP_DESC {
+    pub StencilFailOp: UINT,
+    pub StencilDepthFailOp: UINT,
+    pub StencilPassOp: UINT,
+    pub StencilFunc: UINT,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct D3D11_DEPTH_STENCIL_DESC {
+    pub DepthEnable: BOOL,
+    pub DepthWriteMask: UINT,
+    pub DepthFunc: UINT,
+    pub StencilEnable: BOOL,
+    pub StencilReadMask: u8,
+    pub StencilWriteMask: u8,
+    pub FrontFace: D3D11_DEPTH_STENCILOP_DESC,
+    pub BackFace: D3D11_DEPTH_STENCILOP_DESC,
+}
+
 /// `DXGI_SWAP_CHAIN_DESC` (dxgi.h).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -391,6 +420,12 @@ pub const D3D11_TEXTURE_ADDRESS_CLAMP: UINT = 3;
 
 // D3D11.h - D3D11_COMPARISON_FUNC
 pub const D3D11_COMPARISON_ALWAYS: UINT = 8;
+// `D3D11_COMPARISON` and the depth/stencil enums, read from `d3d11.h` rather than assumed:
+// `NEVER = 1, LESS = 2, ... ALWAYS = 8`, `DEPTH_WRITE_MASK_ZERO = 0, _ALL = 1`,
+// `STENCIL_OP_KEEP = 1` (the enum starts at 1, not 0).
+pub const D3D11_COMPARISON_LESS: UINT = 2;
+pub const D3D11_DEPTH_WRITE_MASK_ALL: UINT = 1;
+pub const D3D11_STENCIL_OP_KEEP: UINT = 1;
 
 // D3D11.h - D3D11_BLEND / D3D11_BLEND_OP
 pub const D3D11_BLEND_ZERO: UINT = 1;
@@ -1018,6 +1053,7 @@ pub const D3D11DEVICE_CREATEINPUTLAYOUT: usize = 11;
 pub const D3D11DEVICE_CREATEVERTEXSHADER: usize = 12;
 pub const D3D11DEVICE_CREATEPIXELSHADER: usize = 15;
 pub const D3D11DEVICE_CREATEBLENDSTATE: usize = 20;
+pub const D3D11DEVICE_CREATEDEPTHSTENCILSTATE: usize = 21;
 pub const D3D11DEVICE_CREATERASTERIZERSTATE: usize = 22;
 pub const D3D11DEVICE_CREATESAMPLERSTATE: usize = 23;
 pub const D3D11DEVICE_CREATEQUERY: usize = 24;
@@ -1058,6 +1094,11 @@ pub const D3D11CONTEXT_GETDATA: usize = 29;
 pub const D3D11_QUERY_PIPELINE_STATISTICS: UINT = 4;
 pub const D3D11CONTEXT_OMSETRENDERTARGETS: usize = 33;
 pub const D3D11CONTEXT_OMSETBLENDSTATE: usize = 35;
+// `OMSetDepthStencilState` is the other half of the output-merger: the default state object has
+// `DepthEnable = TRUE` while Stage 1 never binds a depth-stencil view, so nothing here can pass a
+// depth test unless an explicit state with `DepthEnable = FALSE` is bound. Slot 36, straight
+// after `OMSetBlendState` (35).
+pub const D3D11CONTEXT_OMSETDEPTHSTENCILSTATE: usize = 36;
 pub const D3D11CONTEXT_RSSETSTATE: usize = 43;
 pub const D3D11CONTEXT_RSSETVIEWPORTS: usize = 44;
 pub const D3D11CONTEXT_UPDATESUBRESOURCE: usize = 48;

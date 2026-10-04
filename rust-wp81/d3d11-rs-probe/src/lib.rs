@@ -1351,9 +1351,9 @@ pub unsafe extern "C" fn wp81_rs_clear(r: f32, g: f32, b: f32, a: f32) -> i32 {
 /// Draw one full-screen textured quad - the Stage 1 acceptance test.
 ///
 /// This is deliberately the *whole* pipeline in one call: it binds the input layout, vertex
-/// buffer, shaders, sampler, blend/raster state and constant buffer, uploads the projection,
-/// and issues exactly one `Draw(4, 0)`. If this shows a quadrilateral on the phone, every piece
-/// Stage 3 needs is already proven.
+/// buffer, shaders, sampler, blend/raster/depth state and constant buffer, uploads the
+/// projection, and issues exactly one `Draw(6, 0)` covering the quad as two triangles. If this
+/// shows a quadrilateral on the phone, every piece Stage 3 needs is already proven.
 #[no_mangle]
 pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
     let s = st();
@@ -1363,7 +1363,7 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
     };
     let ctx = s.context;
     // `set_tick` (not `bump(s, ..)`) because `p` holds an immutable borrow of `s.pipeline` here.
-    set_tick(60); // frame: Map(constant buffer) + Map(vertex buffer) + bind + Draw(4)
+    set_tick(60); // frame: Map(constant buffer) + Map(vertex buffer) + bind + Draw(6)
 
     // ---- which experiment this frame runs -------------------------------------------------
     //
@@ -1430,7 +1430,7 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
         }
         // From here the frame is bisected with its own ticks (62..72) rather than one 60 for the
         // whole thing: on the Lumia 925 the first build that actually got past the view hung inside
-        // this function, and a single "frame: Map/bind/Draw(4)" can only say *somewhere in here*.
+        // this function, and a single "frame: Map/bind/Draw(6)" can only say *somewhere in here*.
         // The bg watchdog logs on change, so the last line names the call that never returned.
         set_tick(62); // BeginDraw returned
         if s.surface.frame_rtv.is_null() {
@@ -1513,10 +1513,18 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
     unmap(ctx.vtbl as *mut c_void, p.cb.vtbl as *mut c_void, 0);
     set_tick(65); // constant buffer Map/upload/Unmap done
 
-    // ---- upload the quad's four vertices ----
-    let quad: [Vertex; 4] = [
+    // ---- upload the quad as two triangles ----
+    //
+    // Six vertices, not four: `Draw(4, 0)` over a TRIANGLELIST forms only *one* triangle, because
+    // the fourth vertex does not complete a primitive and is simply dropped - the GPU's own
+    // pipeline counters said `IAtris = 1` while half a quad landed on screen. `(BL,BR,TR)` and
+    // `(BL,TR,TL)` cover the whole quad with no index buffer, which is what a sprite batcher will
+    // push per quad later as well.
+    let quad: [Vertex; 6] = [
         Vertex { x: -0.5, y: -0.5, z: 0.0, u: 0.0, v: 1.0, r: 1.0, g: 0.4, b: 0.2, a: 1.0 },
         Vertex { x: 0.5, y: -0.5, z: 0.0, u: 1.0, v: 1.0, r: 1.0, g: 0.4, b: 0.2, a: 1.0 },
+        Vertex { x: 0.5, y: 0.5, z: 0.0, u: 1.0, v: 0.0, r: 1.0, g: 0.4, b: 0.2, a: 1.0 },
+        Vertex { x: -0.5, y: -0.5, z: 0.0, u: 0.0, v: 1.0, r: 1.0, g: 0.4, b: 0.2, a: 1.0 },
         Vertex { x: 0.5, y: 0.5, z: 0.0, u: 1.0, v: 0.0, r: 1.0, g: 0.4, b: 0.2, a: 1.0 },
         Vertex { x: -0.5, y: 0.5, z: 0.0, u: 0.0, v: 0.0, r: 1.0, g: 0.4, b: 0.2, a: 1.0 },
     ];
@@ -1575,12 +1583,31 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
         ctx.method(D3D11CONTEXT_IASETPRIMITIVETOPOLOGY);
     set_topo(ctx.vtbl as *mut c_void, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    let set_vs: extern "system" fn(*mut c_void, *mut c_void, UINT) =
+    // `VSSetShader`/`PSSetShader` take **three** parameters - shader, class-instance array,
+    // count - not two. Declaring them with only `(shader, 0)` left `NumClassInstances` reading
+    // whatever happened to be in the fourth argument register: whenever that garbage was
+    // non-zero with a null instance array the runtime rejected the call outright, and the draw
+    // then ran with **no vertex shader**, producing no fragments at all. It is why the Lumia
+    // showed a perfect clear colour and nothing else through round after round while every HRESULT
+    // in the path stayed green - and why the pixel shader happened to bind (the register held a
+    // zero by luck). The header's own declaration: `VSSetShader(pVertexShader,
+    // ppClassInstances, NumClassInstances)`.
+    let set_vs: extern "system" fn(*mut c_void, *mut c_void, *const *mut c_void, UINT) =
         ctx.method(D3D11CONTEXT_VSSETSHADER);
-    set_vs(ctx.vtbl as *mut c_void, p.vs.vtbl as *mut c_void, 0);
-    let set_ps: extern "system" fn(*mut c_void, *mut c_void, UINT) =
+    set_vs(
+        ctx.vtbl as *mut c_void,
+        p.vs.vtbl as *mut c_void,
+        core::ptr::null(),
+        0,
+    );
+    let set_ps: extern "system" fn(*mut c_void, *mut c_void, *const *mut c_void, UINT) =
         ctx.method(D3D11CONTEXT_PSSETSHADER);
-    set_ps(ctx.vtbl as *mut c_void, p.ps.vtbl as *mut c_void, 0);
+    set_ps(
+        ctx.vtbl as *mut c_void,
+        p.ps.vtbl as *mut c_void,
+        core::ptr::null(),
+        0,
+    );
 
     let set_vscb: extern "system" fn(*mut c_void, UINT, UINT, *const *mut c_void) =
         ctx.method(D3D11CONTEXT_VSSETCONSTANTBUFFERS);
@@ -1611,13 +1638,24 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
     let set_raster: extern "system" fn(*mut c_void, *mut c_void) =
         ctx.method(D3D11CONTEXT_RSSETSTATE);
     set_raster(ctx.vtbl as *mut c_void, p.raster.vtbl as *mut c_void);
+
+    // No depth buffer exists here, so state that instead of inheriting the default
+    // `DepthEnable = TRUE` and letting the driver decide what a depth test against an unbound
+    // depth-stencil view means. Stage 1 draws 2D; this makes "2D" mean one thing everywhere.
+    let set_depth: extern "system" fn(*mut c_void, *mut c_void, UINT) =
+        ctx.method(D3D11CONTEXT_OMSETDEPTHSTENCILSTATE);
+    set_depth(
+        ctx.vtbl as *mut c_void,
+        p.depth.vtbl as *mut c_void,
+        0,
+    );
     set_tick(68); // every pipeline slot bound
 
-    // ---- one triangle list of four vertices ----
+    // ---- one triangle list: two triangles, six vertices ----
     let draw: extern "system" fn(*mut c_void, UINT, UINT) = ctx.method(D3D11CONTEXT_DRAW);
-    draw(ctx.vtbl as *mut c_void, 4, 0);
-    s.vertex_count = 4;
-    set_tick(69); // Draw(4, 0) issued
+    draw(ctx.vtbl as *mut c_void, 6, 0);
+    s.vertex_count = 6;
+    set_tick(69); // Draw(6, 0) issued
 
     // ---- hand the finished frame back to the compositor ----------------------------------
     //
@@ -1717,6 +1755,7 @@ unsafe fn release_all(s: &mut State) {
         p.sampler.release();
         p.blend.release();
         p.raster.release();
+        p.depth.release();
     }
     s.test_srv.release();
     s.test_tex.release();
@@ -1847,7 +1886,7 @@ pub unsafe extern "C" fn wp81_rs_reached() -> i32 {
 /// 30 = build_pipeline (D3DCompile x2, shaders, input layout, buffers, states)
 /// 40 = create_test_texture
 /// 50 = RSSetViewports
-/// 60 = frame: Map constant buffer / Map vertex buffer / bind / Draw(4)
+/// 60 = frame: Map constant buffer / Map vertex buffer / bind / Draw(6)
 /// 70 = IDXGISwapChain::Present
 /// 99 = fully up
 // ===========================================================================
@@ -1883,7 +1922,7 @@ pub unsafe extern "C" fn wp81_rs_tick_name() -> *const u8 {
         30 => b"build_pipeline (compile shaders / create states)\0",
         40 => b"create_test_texture\0",
         50 => b"RSSetViewports\0",
-        60 => b"frame: Map/bind/Draw(4)\0",
+        60 => b"frame: Map/bind/Draw(6)\0",
         61 => b"frame: done\0",
         // Route-3 frame bisection (added when the first build to get a view hung inside the frame:
         // one 60 for Map+bind+Draw could only say "somewhere in here").
@@ -1894,7 +1933,7 @@ pub unsafe extern "C" fn wp81_rs_tick_name() -> *const u8 {
         66 => b"frame: vertices uploaded\0",
         67 => b"frame: clear issued\0",
         68 => b"frame: pipeline bound\0",
-        69 => b"frame: Draw(4) issued\0",
+        69 => b"frame: Draw(6) issued\0",
         71 => b"frame: about to EndDraw\0",
         72 => b"frame: EndDraw returned\0",
         // build_rtv's two attempts get a tick each: 63 then stops here tells which one killed the

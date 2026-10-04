@@ -90,17 +90,7 @@ struct VSOut
 VSOut vs_main(VSIn i)
 {
     VSOut o;
-    // EXPERIMENT: clip-space z = 0.5 instead of 0.0.
-    //
-    // Every fragment so far lands at depth exactly 0 (the orthographic projection leaves z alone
-    // and the vertices carry z = 0), while the context never binds a depth-stencil state, so the
-    // default one is in force: DepthEnable = TRUE, DepthFunc = LESS. With no depth-stencil view
-    // bound there is nothing to compare against, and if the driver treats that as a depth of 0
-    // then `LESS` rejects 0 < 0 for every single fragment: a draw that rasterizes and discards
-    // everything, which is exactly the symptom: the clear (no depth test) lands, the draw does
-    // not. Moving z off the boundary tells us whether that is it. The projection is also bypassed
-    // so the vertex buffer stays the only input being tested.
-    o.pos = float4(i.pos.xy, 0.5, 1.0);
+    o.pos = mul(float4(i.pos, 1.0), u_proj);
     o.uv  = i.uv;
     o.col = i.col;
     return o;
@@ -140,6 +130,15 @@ pub struct Pipeline {
     pub sampler: ComPtr,
     pub blend: ComPtr,
     pub raster: ComPtr,
+    /// Depth/stencil state with `DepthEnable = FALSE`.
+    ///
+    /// Stage 1 is 2D and never binds a depth-stencil view, but the state object D3D11 uses when
+    /// none is set has `DepthEnable = TRUE` with `DepthFunc = LESS` - an enabled depth test with
+    /// no depth attachment to test against, which leaves the outcome of every fragment up to the
+    /// driver. Binding an explicit state that says "no depth, no stencil" makes a 2D draw mean the
+    /// same thing on every implementation, which is the only thing that survives contact with
+    /// both a desktop GPU and a Lumia.
+    pub depth: ComPtr,
 }
 
 /// Create the device and immediate context.
@@ -1349,6 +1348,48 @@ pub unsafe fn build_pipeline(device: ComPtr, context: ComPtr) -> Option<Pipeline
         return None;
     }
 
+    // Depth/stencil: Stage 1 has no depth buffer, so say so explicitly instead of leaving the
+    // default state object - `DepthEnable = TRUE`, `DepthFunc = LESS` - to run a depth test
+    // against a depth-stencil view that is never bound.
+    let keep_op = D3D11_DEPTH_STENCILOP_DESC {
+        StencilFailOp: D3D11_STENCIL_OP_KEEP,
+        StencilDepthFailOp: D3D11_STENCIL_OP_KEEP,
+        StencilPassOp: D3D11_STENCIL_OP_KEEP,
+        StencilFunc: D3D11_COMPARISON_ALWAYS,
+    };
+    let dsd = D3D11_DEPTH_STENCIL_DESC {
+        DepthEnable: 0,
+        DepthWriteMask: D3D11_DEPTH_WRITE_MASK_ALL,
+        DepthFunc: D3D11_COMPARISON_LESS,
+        StencilEnable: 0,
+        StencilReadMask: 0xff,
+        StencilWriteMask: 0xff,
+        FrontFace: keep_op,
+        BackFace: keep_op,
+    };
+    let create_dss: extern "system" fn(
+        *mut c_void,
+        *const D3D11_DEPTH_STENCIL_DESC,
+        *mut *mut c_void,
+    ) -> HRESULT = device.method(D3D11DEVICE_CREATEDEPTHSTENCILSTATE);
+    let mut depth = ComPtr::NULL;
+    if create_dss(
+        device.vtbl as *mut c_void,
+        &dsd,
+        &mut depth.vtbl as *mut _ as *mut *mut c_void,
+    ) < 0
+    {
+        vs.release();
+        ps.release();
+        input_layout.release();
+        vb.release();
+        cb.release();
+        sampler.release();
+        blend.release();
+        raster.release();
+        return None;
+    }
+
     Some(Pipeline {
         device,
         context,
@@ -1360,6 +1401,7 @@ pub unsafe fn build_pipeline(device: ComPtr, context: ComPtr) -> Option<Pipeline
         sampler,
         blend,
         raster,
+        depth,
     })
 }
 

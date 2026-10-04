@@ -384,9 +384,15 @@ fn main() {
             context.method(D3D11CONTEXT_UNMAP);
         unmap(context.vtbl as *mut c_void, p.cb.vtbl as *mut c_void, 0);
 
-        let quad: [Vertex; 4] = [
+        // Six vertices, two triangles. A `Draw(4, 0)` over a TRIANGLELIST only ever forms *one*
+        // triangle - the fourth vertex is dropped, and `IAtris` reported exactly that - which is
+        // why the quad kept rasterizing as half a quad whose diagonal ran straight through the
+        // centre pixel the readback tests. The two triangles are (BL,BR,TR) and (BL,TR,TL).
+        let quad: [Vertex; 6] = [
             Vertex { x: -0.5, y: -0.5, z: 0.0, u: 0.0, v: 1.0, r: 1.0, g: 0.4, b: 0.2, a: 1.0 },
             Vertex { x: 0.5, y: -0.5, z: 0.0, u: 1.0, v: 1.0, r: 1.0, g: 0.4, b: 0.2, a: 1.0 },
+            Vertex { x: 0.5, y: 0.5, z: 0.0, u: 1.0, v: 0.0, r: 1.0, g: 0.4, b: 0.2, a: 1.0 },
+            Vertex { x: -0.5, y: -0.5, z: 0.0, u: 0.0, v: 1.0, r: 1.0, g: 0.4, b: 0.2, a: 1.0 },
             Vertex { x: 0.5, y: 0.5, z: 0.0, u: 1.0, v: 0.0, r: 1.0, g: 0.4, b: 0.2, a: 1.0 },
             Vertex { x: -0.5, y: 0.5, z: 0.0, u: 0.0, v: 0.0, r: 1.0, g: 0.4, b: 0.2, a: 1.0 },
         ];
@@ -430,12 +436,27 @@ fn main() {
         let set_topo: extern "system" fn(*mut c_void, UINT) =
             context.method(D3D11CONTEXT_IASETPRIMITIVETOPOLOGY);
         set_topo(context.vtbl as *mut c_void, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        let set_vs: extern "system" fn(*mut c_void, *mut c_void, UINT) =
+        // Three parameters, per the header's own declaration: `VSSetShader(pVertexShader,
+        // ppClassInstances, NumClassInstances)`. Declaring only `(shader, 0)` leaves the count
+        // reading a stray argument register, and a non-zero count with a null instance array is
+        // a call the runtime silently discards - which is how the draw ended up with no vertex
+        // shader while every HRESULT stayed green.
+        let set_vs: extern "system" fn(*mut c_void, *mut c_void, *const *mut c_void, UINT) =
             context.method(D3D11CONTEXT_VSSETSHADER);
-        set_vs(context.vtbl as *mut c_void, p.vs.vtbl as *mut c_void, 0);
-        let set_ps: extern "system" fn(*mut c_void, *mut c_void, UINT) =
+        set_vs(
+            context.vtbl as *mut c_void,
+            p.vs.vtbl as *mut c_void,
+            core::ptr::null(),
+            0,
+        );
+        let set_ps: extern "system" fn(*mut c_void, *mut c_void, *const *mut c_void, UINT) =
             context.method(D3D11CONTEXT_PSSETSHADER);
-        set_ps(context.vtbl as *mut c_void, p.ps.vtbl as *mut c_void, 0);
+        set_ps(
+            context.vtbl as *mut c_void,
+            p.ps.vtbl as *mut c_void,
+            core::ptr::null(),
+            0,
+        );
         let set_vscb: extern "system" fn(*mut c_void, UINT, UINT, *const *mut c_void) =
             context.method(D3D11CONTEXT_VSSETCONSTANTBUFFERS);
         let cbv = p.cb.vtbl as *mut c_void;
@@ -450,20 +471,27 @@ fn main() {
         set_samp(context.vtbl as *mut c_void, 0, 1, &smp);
         let set_blend: extern "system" fn(*mut c_void, *mut c_void, *const FLOAT, UINT) =
             context.method(D3D11CONTEXT_OMSETBLENDSTATE);
-        // EXPERIMENT: bind *no* blend state, which is D3D11's default opaque copy. It splits the
-        // two ways the centre can come back as the clear colour: with alpha blending on, a pixel
-        // shader that outputs zero leaves the destination untouched exactly as a rasterizer that
-        // never fired does, while opaque writes the shader's result outright — black means the
-        // texture path is broken, clear means no fragments were produced at all.
         set_blend(
             context.vtbl as *mut c_void,
-            core::ptr::null_mut(),
+            p.blend.vtbl as *mut c_void,
             core::ptr::null(),
             0xffff_ffff,
         );
         let set_raster: extern "system" fn(*mut c_void, *mut c_void) =
             context.method(D3D11CONTEXT_RSSETSTATE);
         set_raster(context.vtbl as *mut c_void, p.raster.vtbl as *mut c_void);
+
+        // Stage 1 has no depth buffer: bind a state that says so instead of inheriting the
+        // default, which has `DepthEnable = TRUE` and would run a depth test against a
+        // depth-stencil view this path never binds. The phone binds the same object.
+        let set_depth: extern "system" fn(*mut c_void, *mut c_void, UINT) =
+            context.method(D3D11CONTEXT_OMSETDEPTHSTENCILSTATE);
+        set_depth(
+            context.vtbl as *mut c_void,
+            p.depth.vtbl as *mut c_void,
+            0,
+        );
+        println!("[hostcheck] 7a depth-stencil state bound (DepthEnable=FALSE)");
 
         // Read the bound state back instead of trusting the setters.
         //
@@ -581,14 +609,24 @@ fn main() {
         // reports the PS, the setter works and the fault is in `p.vs` itself; if it still reports
         // nothing, the setter call is the broken link. Both results are followed by restoring the
         // real vertex shader so the draw below stays comparable.
-        set_vs(context.vtbl as *mut c_void, p.ps.vtbl as *mut c_void, 0);
+        set_vs(
+            context.vtbl as *mut c_void,
+            p.ps.vtbl as *mut c_void,
+            core::ptr::null(),
+            0,
+        );
         let mut vs_probe = core::ptr::null_mut();
         get_vs(context.vtbl as *mut c_void, &mut vs_probe, &mut ci, &mut nci);
         println!(
             "[hostcheck] 7e VSSetShader(p.ps={:p}) -> VSGetShader={:p} (setter works if equal)",
             p.ps.vtbl, vs_probe
         );
-        set_vs(context.vtbl as *mut c_void, p.vs.vtbl as *mut c_void, 0);
+        set_vs(
+            context.vtbl as *mut c_void,
+            p.vs.vtbl as *mut c_void,
+            core::ptr::null(),
+            0,
+        );
         let mut vs_again = core::ptr::null_mut();
         get_vs(context.vtbl as *mut c_void, &mut vs_again, &mut ci, &mut nci);
         println!(
@@ -673,36 +711,19 @@ fn main() {
         }
 
         let draw: extern "system" fn(*mut c_void, UINT, UINT) = context.method(D3D11CONTEXT_DRAW);
-        draw(context.vtbl as *mut c_void, 4, 0);
-        println!("[hostcheck] 7 draw ok (Draw(4,0) through every bound slot)");
+        draw(context.vtbl as *mut c_void, 6, 0);
+        println!("[hostcheck] 7 draw ok (Draw(6,0) through every bound slot)");
 
         let end: extern "system" fn(*mut c_void, *mut c_void) = context.method(D3D11CONTEXT_END);
         if have_q {
             end(context.vtbl as *mut c_void, q.vtbl as *mut c_void);
-            let get_data: extern "system" fn(*mut c_void, *mut c_void, *mut c_void, usize, UINT) ->
-                HRESULT = context.method(D3D11CONTEXT_GETDATA);
-            let mut st = PipeStats::default();
-            let mut tries = 0u32;
-            let mut ghr = -1i32;
-            while tries < 200 {
-                ghr = get_data(
-                    context.vtbl as *mut c_void,
-                    q.vtbl as *mut c_void,
-                    &mut st as *mut PipeStats as *mut c_void,
-                    core::mem::size_of::<PipeStats>(),
-                    0,
-                );
-                if ghr == 0 {
-                    break;
-                }
-                tries += 1;
-            }
-            println!(
-                "[hostcheck] 7c stats IAverts={} IAtris={} VSinv={} PSinv={} (hr=0x{:08X} tries={})",
-                st.ia_vertices, st.ia_primitives, st.vs_invocations, st.ps_invocations,
-                ghr as u32, tries
-            );
-            q.release();
+            // The result is read *after* the pixel readback below, not here: `GetData` never
+            // blocks, it returns `S_FALSE` while the GPU is still working, and asking for it in a
+            // tight loop on a machine that has not yet run the draw hands back whatever the
+            // freshly created query contains - zeros, which read as "the draw fed no vertices"
+            // and send the investigation down entirely the wrong path. The staging-texture `Map`
+            // in the readback is what actually waits for the GPU, so the counters are honest
+            // once they are read on the far side of it.
         }
 
         // ---- 7b. read the pixels back: the only check that says the quad *rasterized* --------
@@ -805,9 +826,70 @@ fn main() {
         };
         let center = read(w / 2, h / 2);
         let corner = read(4, 4);
+        // Where did it actually land? The centre pixel answers for one point only, and this
+        // round has already been through several wrong models of where the quad is; a bounding
+        // box of everything that is neither the clear colour nor an untouched pixel answers for
+        // all of them at once.
+        let (mut min_x, mut max_x, mut min_y, mut max_y, mut hits) = (u32::MAX, 0u32, u32::MAX, 0u32, 0u64);
+        let mut y = 0u32;
+        while y < h {
+            let mut x = 0u32;
+            while x < w {
+                let px = read(x, y);
+                let (r, g, b) = ((px >> 16) & 0xff, (px >> 8) & 0xff, px & 0xff);
+                let clear = (r as i32 - 13).abs() <= 2 && (g as i32 - 13).abs() <= 2 && (b as i32 - 26).abs() <= 3;
+                if px != 0 && !clear {
+                    hits += 1;
+                    if x < min_x { min_x = x; }
+                    if x > max_x { max_x = x; }
+                    if y < min_y { min_y = y; }
+                    if y > max_y { max_y = y; }
+                }
+                x += 2;
+            }
+            y += 2;
+        }
+        if hits > 0 {
+            println!(
+                "[hostcheck] 7g non-clear pixels={} bbox x=[{}..{}] y=[{}..{}] (viewport {}x{})",
+                hits, min_x, max_x, min_y, max_y, w, h
+            );
+        } else {
+            println!("[hostcheck] 7g no non-clear pixel anywhere in {}x{}", w, h);
+        }
         unmap(context.vtbl as *mut c_void, staging.vtbl as *mut c_void, 0);
         staging.release();
         bb2.release();
+
+        // The GPU has finished by now - the staging `Map` above blocked until it did - so the
+        // query brackets around the draw can be read for what they counted.
+        if have_q {
+            let get_data: extern "system" fn(*mut c_void, *mut c_void, *mut c_void, usize, UINT) ->
+                HRESULT = context.method(D3D11CONTEXT_GETDATA);
+            let mut st = PipeStats::default();
+            let mut tries = 0u32;
+            let mut ghr = -1i32;
+            while tries < 200 {
+                ghr = get_data(
+                    context.vtbl as *mut c_void,
+                    q.vtbl as *mut c_void,
+                    &mut st as *mut PipeStats as *mut c_void,
+                    core::mem::size_of::<PipeStats>(),
+                    0,
+                );
+                if ghr == 0 {
+                    break;
+                }
+                tries += 1;
+            }
+            println!(
+                "[hostcheck] 7c stats IAverts={} IAtris={} VSinv={} PSinv={} (hr=0x{:08X} tries={})",
+                st.ia_vertices, st.ia_primitives, st.vs_invocations, st.ps_invocations,
+                ghr as u32, tries
+            );
+            q.release();
+        }
+
         // The quad is white texture x (1.0, 0.4, 0.2, 1.0) alpha-blended over a clear of
         // (0.05, 0.05, 0.1) — opaque, so 0xFFFF6633 exactly.
         println!(
@@ -845,6 +927,7 @@ fn main() {
         p.sampler.release();
         p.blend.release();
         p.raster.release();
+        p.depth.release();
         context.release();
         device.release();
         DestroyWindow(hwnd);
