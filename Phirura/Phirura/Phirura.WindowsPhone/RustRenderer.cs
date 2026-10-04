@@ -208,6 +208,19 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_rs_sis_hr();
 
+        /// <summary>
+        /// One entry of the route-3 target surface's diagnostics (see `wp81_rs_sis_diag` in Rust):
+        /// 0 format, 1 BindFlags, 2 width, 3 height, 4 sample count, 5 misc flags,
+        /// 6 QI(ID3D11Texture2D) hr, 7 RTV(NULL desc) hr, 8 RTV(explicit desc) hr,
+        /// 9 format the explicit attempt used. -1 = index out of range.
+        ///
+        /// Only populated once the first frame has tried to build a render target view over the
+        /// surface XAML handed back, so read it from the frame path - reading it right after
+        /// attach would report the pre-frame zeros.
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_sis_diag(int index);
+
         private static bool _started;
 
         /// <summary>
@@ -368,6 +381,44 @@ namespace Phirura
             {
                 try { return wp81_rs_sis_hr(); }
                 catch (Exception) { return 0; }
+            }
+        }
+
+        /// <summary>One entry of the route-3 surface diagnostics - see the import above.</summary>
+        public static int SisDiag(int index)
+        {
+            try { return wp81_rs_sis_diag(index); }
+            catch (Exception) { return -1; }
+        }
+
+        /// <summary>
+        /// The surface diagnostics as one log line, HRESULTs in hex.
+        ///
+        /// Written for the single question the phone log must answer when the acceptance test shows
+        /// nothing on screen: *is the surface XAML handed back renderable at all, and if not, why?*
+        /// `fmt`/`bind` decide between the two opposite fixes - a typeless format wants an explicit
+        /// descriptor, a missing <c>D3D11_BIND_RENDER_TARGET</c> cannot be viewed at all.
+        /// </summary>
+        public static string SisDiagText
+        {
+            get
+            {
+                try
+                {
+                    return "surf fmt=" + SisDiag(0)
+                        + " bind=0x" + SisDiag(1).ToString("X")
+                        + " " + SisDiag(2) + "x" + SisDiag(3)
+                        + " samples=" + SisDiag(4)
+                        + " misc=0x" + SisDiag(5).ToString("X")
+                        + " qi(tex2d)=0x" + unchecked((uint)SisDiag(6)).ToString("X8")
+                        + " rtv(null)=0x" + unchecked((uint)SisDiag(7)).ToString("X8")
+                        + " rtv(explicit)=0x" + unchecked((uint)SisDiag(8)).ToString("X8")
+                        + " rtv-fmt=" + SisDiag(9);
+                }
+                catch (Exception ex)
+                {
+                    return "diag unavailable: " + ex.Message;
+                }
             }
         }
 
@@ -1396,17 +1447,37 @@ namespace Phirura
             }
         }
 
-        /// <summary>Draw one frame: clear, one test quad, present. Returns false if not started.</summary>
-        public static bool DrawTestFrame()        {
+        /// <summary>
+        /// Draw one frame: clear, one test quad, present. Returns false if not started or if the
+        /// frame itself failed.
+        ///
+        /// The return code of the *draw* is kept in <see cref="LastFrameRc"/> rather than swallowed:
+        /// on route 3 `present` reports the frame's own status, and a frame loop that counts failed
+        /// frames as fps would print a healthy number against a screen showing nothing.
+        /// </summary>
+        public static bool DrawTestFrame()
+        {
             if (!_started)
             {
                 return false;
             }
             wp81_rs_clear(0.10f, 0.11f, 0.13f, 1.0f);
-            wp81_rs_draw_test_quad();
+            try
+            {
+                LastFrameRc = wp81_rs_draw_test_quad();
+            }
+            catch (Exception ex)
+            {
+                LastFrameRc = -1000;
+                AppLog.WriteSync("RustRenderer.DrawTestFrame: threw", ex);
+                return false;
+            }
             wp81_rs_present();
-            return true;
+            return LastFrameRc == 0;
         }
+
+        /// <summary>The last <c>wp81_rs_draw_test_quad</c> result: 0 = the frame drew.</summary>
+        public static int LastFrameRc { get; private set; }
 
         public static uint LastVertexCount { get { return wp81_rs_vertex_count(); } }
 

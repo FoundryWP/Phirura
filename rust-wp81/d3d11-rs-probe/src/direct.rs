@@ -965,6 +965,14 @@ pub const D3D11DEVICE_CREATEBUFFER: usize = 3;
 pub const D3D11DEVICE_CREATETEXTURE2D: usize = 5;
 pub const D3D11DEVICE_CREATESHADERRESOURCEVIEW: usize = 7;
 pub const D3D11DEVICE_CREATERENDERTARGETVIEW: usize = 9; // NOT 10 (that is DepthStencilView)
+// `ID3D11Texture2D::GetDesc`, extracted with `tools/vtable_slots.py --iface ID3D11Texture2D
+// --method GetDesc` (IUnknown 3 + ID3D11DeviceChild 4 + ID3D11Resource 3 + own 0 = 10) rather
+// than remembered - the same tool reproduces every slot REFERENCE.md already records as proven.
+pub const ID3D11TEXTURE2D_GETDESC: usize = 10;
+/// `D3D11_RTV_DIMENSION_TEXTURE2D` / `_TEXTURE2DMS` (d3d11.h), for an explicit
+/// `D3D11_RENDER_TARGET_VIEW_DESC` when the NULL-descriptor form is refused.
+pub const D3D11_RTV_DIM_TEXTURE2D: u32 = 4;
+pub const D3D11_RTV_DIM_TEXTURE2DMS: u32 = 6;
 pub const D3D11DEVICE_CREATEINPUTLAYOUT: usize = 11;
 pub const D3D11DEVICE_CREATEVERTEXSHADER: usize = 12;
 pub const D3D11DEVICE_CREATEPIXELSHADER: usize = 15;

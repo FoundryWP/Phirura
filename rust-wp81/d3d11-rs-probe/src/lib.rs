@@ -74,6 +74,13 @@ struct State {
     /// Kept so `wp81_rs_present` can report the frame's real outcome instead of a blanket success
     /// after the draw has already closed the frame with `EndDraw`.
     frame_err: i32,
+    /// Colour the last `wp81_rs_clear` asked for.
+    ///
+    /// On route 3 a clear cannot happen when it is called: there is no render target until
+    /// `BeginDraw` hands one back inside `wp81_rs_draw_test_quad`. So the request is remembered here
+    /// and applied after the frame's view is bound. Without that the acceptance test paints only the
+    /// quad and leaves whatever the compositor's atlas already held behind it.
+    clear_color: [f32; 4],
     /// The white 1x1 texture the Stage 1 acceptance test samples.
     test_tex: ComPtr,
     test_srv: ComPtr,
@@ -119,6 +126,7 @@ static mut STATE: State = State {
     sis_trace: [0, 0],
     dxgi_device: ComPtr::NULL,
     frame_err: 0,
+    clear_color: [0.06, 0.07, 0.09, 1.0],
     test_tex: ComPtr::NULL,
     test_srv: ComPtr::NULL,
     pipeline: None,
@@ -667,6 +675,26 @@ pub unsafe extern "C" fn wp81_rs_sis_step() -> i32 {
 #[no_mangle]
 pub unsafe extern "C" fn wp81_rs_sis_hr() -> i32 {
     st().sis_trace[1]
+}
+
+/// One entry of the route-3 target surface's diagnostics — what the surface *is*, and what each
+/// view-building attempt answered.
+///
+/// Index: 0 `DXGI_FORMAT`, 1 `BindFlags`, 2 width, 3 height, 4 `SampleDesc.Count`,
+/// 5 `MiscFlags`, 6 `QI(ID3D11Texture2D)` HRESULT,
+/// 7 `CreateRenderTargetView(NULL desc)` HRESULT, 8 the explicit-descriptor retry's HRESULT,
+/// 9 the format that retry used. Out-of-range returns -1.
+///
+/// The surface is XAML's, so this is the only channel through which the phone log can explain a
+/// refused view: `E_INVALIDARG` alone does not say whether the format was typeless or the resource
+/// was never bound as a render target, and those two need opposite fixes.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_sis_diag(index: i32) -> i32 {
+    let s = st();
+    if index < 0 || index as usize >= s.surface.diag.len() {
+        return -1;
+    }
+    s.surface.diag[index as usize]
 }
 
 /// English name of the `wp81_rs_sis_step()` code, for the phone log.
@@ -1244,6 +1272,9 @@ pub unsafe extern "C" fn wp81_rs_clear(r: f32, g: f32, b: f32, a: f32) -> i32 {
         if s.surface.in_frame {
             return -2;
         }
+        // Remembered, not applied: there is no render target until `BeginDraw` hands one back
+        // inside `wp81_rs_draw_test_quad`. See `State::clear_color`.
+        s.clear_color = [r, g, b, a];
         return s.frame_err;
     }
     if s.rtv.is_null() {
@@ -1292,17 +1323,19 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
             s.frame_err = -2;
             return -2;
         }
+        // From here the frame is bisected with its own ticks (62..72) rather than one 60 for the
+        // whole thing: on the Lumia 925 the first build that actually got past the view hung inside
+        // this function, and a single "frame: Map/bind/Draw(4)" can only say *somewhere in here*.
+        // The bg watchdog logs on change, so the last line names the call that never returned.
+        set_tick(62); // BeginDraw returned
         if s.surface.frame_rtv.is_null() {
-            let dev: extern "system" fn(*mut c_void, *mut c_void, *const c_void, *mut *mut c_void)
-                -> HRESULT = s.device.method(D3D11DEVICE_CREATERENDERTARGETVIEW);
-            let mut rtv = ComPtr::NULL;
-            let hr = dev(
-                s.device.vtbl as *mut c_void,
-                s.surface.frame_surface.vtbl as *mut c_void,
-                core::ptr::null(),
-                &mut rtv.vtbl as *mut _ as *mut *mut c_void,
-            );
-            if hr < 0 || rtv.is_null() {
+            // Record what the surface actually *is* first: if the view below is refused, the phone
+            // log needs the format and BindFlags to say why, and there is no second chance to read
+            // them (the frame has to end before anything else can be tried).
+            s.surface.inspect_surface();
+            set_tick(63); // GetDesc recorded
+            let hr = s.surface.build_rtv(&s.device);
+            if hr < 0 {
                 s.surface.end_draw();
                 s.sis_trace[0] = SIS_CREATE_RTV;
                 s.sis_trace[1] = hr;
@@ -1310,8 +1343,8 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
                 s.frame_err = -3;
                 return -3;
             }
-            s.surface.frame_rtv = rtv;
         }
+        set_tick(64); // render target view ready
         rt = s.surface.frame_rtv.vtbl as *mut c_void;
         // The offset is where the compositor parked this frame inside the source's own atlas. A
         // renderer that ignores it draws into the wrong place as soon as XAML returns a sub-rect.
@@ -1357,6 +1390,7 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
     let unmap: extern "system" fn(*mut c_void, *mut c_void, UINT) =
         ctx.method(D3D11CONTEXT_UNMAP);
     unmap(ctx.vtbl as *mut c_void, p.cb.vtbl as *mut c_void, 0);
+    set_tick(65); // constant buffer Map/upload/Unmap done
 
     // ---- upload the quad's four vertices ----
     let quad: [Vertex; 4] = [
@@ -1382,6 +1416,7 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
         core::mem::size_of_val(&quad),
     );
     unmap(ctx.vtbl as *mut c_void, p.vb.vtbl as *mut c_void, 0);
+    set_tick(66); // vertex buffer Map/upload/Unmap done
 
     // ---- bind ----
     let set_rt: extern "system" fn(*mut c_void, UINT, *const *mut c_void, *mut c_void) =
@@ -1393,6 +1428,15 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
         let set_vp: extern "system" fn(*mut c_void, UINT, *const f32) =
             ctx.method(D3D11CONTEXT_RSSETVIEWPORTS);
         set_vp(ctx.vtbl as *mut c_void, 1, viewport.as_ptr());
+
+        // Honour the clear `wp81_rs_clear` was asked for earlier in the frame - it could not run
+        // then, because this view did not exist yet (see `State::clear_color`). Without it the quad
+        // is painted over whatever the compositor's atlas already held, so a working draw would look
+        // no different from a broken one.
+        let clear: extern "system" fn(*mut c_void, *mut c_void, *const FLOAT) =
+            ctx.method(D3D11CONTEXT_CLEARRENDERTARGETVIEW);
+        clear(ctx.vtbl as *mut c_void, rt, s.clear_color.as_ptr());
+        set_tick(67); // clear issued
     }
 
     let set_layout: extern "system" fn(*mut c_void, *mut c_void) =
@@ -1439,17 +1483,20 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
     let set_raster: extern "system" fn(*mut c_void, *mut c_void) =
         ctx.method(D3D11CONTEXT_RSSETSTATE);
     set_raster(ctx.vtbl as *mut c_void, p.raster.vtbl as *mut c_void);
+    set_tick(68); // every pipeline slot bound
 
     // ---- one triangle list of four vertices ----
     let draw: extern "system" fn(*mut c_void, UINT, UINT) = ctx.method(D3D11CONTEXT_DRAW);
     draw(ctx.vtbl as *mut c_void, 4, 0);
     s.vertex_count = 4;
+    set_tick(69); // Draw(4, 0) issued
 
     // ---- hand the finished frame back to the compositor ----------------------------------
     //
     // `EndDraw` is what publishes it. Doing it here (rather than in `wp81_rs_present`) keeps the
     // frame one balanced pair per call, and lets `present` stay an honest no-op on this route.
     if s.route == 3 {
+        set_tick(71); // handing the finished frame to the compositor
         let hr = s.surface.end_draw();
         if hr < 0 {
             s.sis_trace[0] = SIS_END_DRAW;
@@ -1458,6 +1505,7 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
             s.frame_err = -4;
             return -4;
         }
+        set_tick(72); // EndDraw returned - the frame is published
     }
     0
 }
@@ -1675,6 +1723,18 @@ pub unsafe extern "C" fn wp81_rs_tick_name() -> *const u8 {
         50 => b"RSSetViewports\0",
         60 => b"frame: Map/bind/Draw(4)\0",
         61 => b"frame: done\0",
+        // Route-3 frame bisection (added when the first build to get a view hung inside the frame:
+        // one 60 for Map+bind+Draw could only say "somewhere in here").
+        62 => b"frame: BeginDraw returned\0",
+        63 => b"frame: surface GetDesc recorded\0",
+        64 => b"frame: render target view ready\0",
+        65 => b"frame: constant buffer uploaded\0",
+        66 => b"frame: vertices uploaded\0",
+        67 => b"frame: clear issued\0",
+        68 => b"frame: pipeline bound\0",
+        69 => b"frame: Draw(4) issued\0",
+        71 => b"frame: about to EndDraw\0",
+        72 => b"frame: EndDraw returned\0",
         70 => b"IDXGISwapChain::Present\0",
         99 => b"fully up\0",
         200 => b"corewindow: pWindow was NULL\0",

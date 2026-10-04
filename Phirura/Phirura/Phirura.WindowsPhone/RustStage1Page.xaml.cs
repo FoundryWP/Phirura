@@ -28,6 +28,13 @@ namespace Phirura
         private readonly Stopwatch _clock = new Stopwatch();
         private int _frames;
         private bool _hookAttached;
+        /// <summary>
+        /// Set once the first frame's outcome has been logged. That line is the only place the phone
+        /// log says whether pixels were actually drawn (and, if not, what the target surface looks
+        /// like), so it must fire exactly once per bring-up - once every second would drown it, and
+        /// never would leave the acceptance test unanswerable.
+        /// </summary>
+        private bool _firstFrameLogged;
         private Windows.UI.Xaml.DispatcherTimer _watchdog;
 
         /// <summary>
@@ -75,6 +82,18 @@ namespace Phirura
 
         private System.Threading.Timer _bgWatchdog;
 
+        /// <summary>
+        /// UI-thread frame entries, counted independently of <c>_frames</c> (which resets every
+        /// second to compute fps).
+        ///
+        /// Read by the background watchdog, whose thread-pool timer keeps firing while the UI thread
+        /// does not. Without it a UI thread stuck inside a native call and a dead process look
+        /// identical in the log: both are just "the log stopped".
+        /// </summary>
+        private int _uiFrames;
+        private int _lastReportedUiFrames;
+        private int _bgHeartbeat;
+
         private void OnBackgroundWatchdog(object state)
         {
             try
@@ -87,7 +106,33 @@ namespace Phirura
                 {
                     AppLog.WriteRaw("RustStage1: [bg] tick -> " + RustRenderer.LastSeenTick
                         + " (" + RustRenderer.LastSeenTickName + ")");
+                    System.Threading.Interlocked.Exchange(ref _bgHeartbeat, 0);
+                    return;
                 }
+
+                // ~4 s with no tick change: heartbeat anyway. A healthy frame loop changes the tick
+                // several times a second, so this branch only fires when something has stopped.
+                if (System.Threading.Interlocked.Increment(ref _bgHeartbeat) < 27)
+                {
+                    return;
+                }
+                System.Threading.Interlocked.Exchange(ref _bgHeartbeat, 0);
+
+                int ui = System.Threading.Interlocked.CompareExchange(ref _uiFrames, 0, 0);
+                int prev = System.Threading.Interlocked.CompareExchange(ref _lastReportedUiFrames, 0, 0);
+                System.Threading.Interlocked.Exchange(ref _lastReportedUiFrames, ui);
+                string uiState;
+                if (!_hookAttached)
+                {
+                    uiState = "frame loop not attached";
+                }
+                else
+                {
+                    uiState = ui != prev ? "ui advancing" : "UI THREAD STUCK";
+                }
+                AppLog.WriteRaw("RustStage1: [bg] held tick=" + RustRenderer.LastSeenTick
+                    + " (" + RustRenderer.LastSeenTickName + ") ui-frames=" + ui
+                    + " -> " + uiState);
             }
             catch (Exception)
             {
@@ -250,6 +295,7 @@ namespace Phirura
 
                 _clock.Start();
                 _frames = 0;
+                _firstFrameLogged = false;
                 if (!_hookAttached)
                 {
                     CompositionTarget.Rendering += OnFrame;
@@ -326,6 +372,12 @@ namespace Phirura
         /// </summary>
         private void OnFrame(object sender, object e)
         {
+            // First, before anything that can block: this counter is the background watchdog's proof
+            // that the UI thread is still running (see `_uiFrames`). Incrementing it after the
+            // native call would make the proof circular - a UI thread stuck *inside* that call would
+            // look identical to a healthy idle one.
+            System.Threading.Interlocked.Increment(ref _uiFrames);
+
             if (!RustRenderer.Started)
             {
                 return;
@@ -333,7 +385,23 @@ namespace Phirura
 
             // `draw_test_quad` is the whole frame on this route: BeginDraw, draw, EndDraw. There is
             // no blit afterwards because there is nothing to blit *to* - EndDraw is what publishes.
-            if (!RustRenderer.DrawTestFrame())
+            bool drew = RustRenderer.DrawTestFrame();
+
+            // The first frame is the whole Stage 1 verdict, so it is logged either way. On a blank
+            // screen this line is the only evidence: `rc=-3` plus the surface's format/BindFlags and
+            // both render-target-view attempts' HRESULTs say which of the two opposite fixes applies,
+            // while `rc=0` proves the draw and points at XAML/visibility instead.
+            if (!_firstFrameLogged)
+            {
+                _firstFrameLogged = true;
+                AppLog.WriteSync("RustStage1: frame#1 rc=" + RustRenderer.LastFrameRc
+                    + " verts=" + RustRenderer.LastVertexCount
+                    + " sis-step=" + RustRenderer.SisStep
+                    + " sis-hr=0x" + RustRenderer.SisHr.ToString("X8")
+                    + " | " + RustRenderer.SisDiagText);
+            }
+
+            if (!drew)
             {
                 return;
             }

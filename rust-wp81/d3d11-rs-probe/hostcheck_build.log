@@ -1,8 +1,8 @@
    Compiling d3d11-rs-probe v0.1.0 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\d3d11-rs-probe)
 warning: creating a shared reference to mutable static
-   --> src\lib.rs:362:12
+   --> src\lib.rs:370:12
     |
-362 |     if i < SC_HRS.len() {
+370 |     if i < SC_HRS.len() {
     |            ^^^^^^^^^^^^ shared reference to mutable static
     |
     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
@@ -11,9 +11,9 @@ warning: creating a shared reference to mutable static
     = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
 
 warning: creating a mutable reference to mutable static
-   --> src\lib.rs:370:14
+   --> src\lib.rs:378:14
     |
-370 |     for h in SC_HRS.iter_mut() {
+378 |     for h in SC_HRS.iter_mut() {
     |              ^^^^^^^^^^^^^^^^^ mutable reference to mutable static
     |
     = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
@@ -21,9 +21,9 @@ warning: creating a mutable reference to mutable static
     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
 
 warning: creating a shared reference to mutable static
-   --> src\lib.rs:378:23
+   --> src\lib.rs:386:23
     |
-378 |     if (i as usize) < SC_HRS.len() {
+386 |     if (i as usize) < SC_HRS.len() {
     |                       ^^^^^^^^^^^^ shared reference to mutable static
     |
     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
@@ -39,4 +39,4 @@ warning: linker stdout: LINK : warning LNK4044: unrecognized option '/NATVIS:C:\
   = note: `#[warn(linker_messages)]` on by default
 
 warning: `d3d11-rs-probe` (bin "hostcheck") generated 1 warning
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.23s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.78s

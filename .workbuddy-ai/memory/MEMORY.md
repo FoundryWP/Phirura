@@ -16,10 +16,35 @@ ref: `phira-main/phira-main/` (`prpr`, `prpr-*`). 2nd workstream: `rust-wp81/`. 
 textured quad on a real device.**
 
 ---
-## Current state (R48)
+## Current state (R50)
 
-**Stage 1 = XAML `SurfaceImageSource` route (route 3). Deployed and running on device without
-crashing.** Bring-up reached tick 286; the first bug was `SURFACE_IMAGE_SOURCE_RUNTIME_CLASS` declared
+**R49–R50, the two rules that made route 3 come up and are easy to break again:**
+
+- **The bring-up is split by thread affinity.** `SurfaceImageSource` is a XAML object, so
+  `RoGetActivationFactory` + `CreateInstanceWithDimensionsAndOpacity` + `QI` + `SetDevice` from a
+  pool thread answer **`RPC_E_WRONG_THREAD` (0x8001010E)**. Hence
+  `wp81_rs_start_surface_prepare(w,h)` (device/pipeline — *any* thread, deliberately a pool thread so
+  a driver fault still leaves the UI thread free to flush AppLog) and
+  `wp81_rs_start_surface_attach()` (**UI thread only**); C# mirrors this with
+  `StartSurfacePrepare`/`StartSurfaceAttach` and a `_prepared` flag so `Stop()` releases a
+  prepare-only state. Both exports **must stay in `build.ps1`'s `/EXPORT:` list**.
+- **The chain now reaches the compositor end to end on device:** `rc=0 tick=99 (fully up)`,
+  `sis source projects to Windows.UI.Xaml.Media.Imaging.SurfaceImageSource`,
+  `compositor source set (image 768x1229)`, `surface attach -> True`.
+
+**R50, the remaining blocker (no picture despite 启动成功):** `CreateRenderTargetView(surface, NULL)`
+on the `BeginDraw` surface answers **`E_INVALIDARG`** (`sis-step=8` = `SIS_CREATE_RTV`), so
+`draw_test_quad` returns -3 before drawing. Fixes in place: `SurfaceChain::inspect_surface` +
+`build_rtv` (NULL desc → explicit typed desc) record everything in `diag[]`, read by the new export
+**`wp81_rs_sis_diag(index)`** and logged once by the page as `frame#1 rc=… | surf fmt=… bind=…`;
+**`begin_draw` now releases the previous frame's RTV + surface** (it didn't — frame N drew into frame
+N-1's target while `EndDraw` published frame N, an independent way to get a blank screen — and leaked
+a reference per frame, since `ComPtr` has no `Drop`); and `wp81_rs_clear` now *stores* its colour for
+route 3 (`State::clear_color`) instead of silently doing nothing, applied after the view is bound.
+**If `bind` lacks `D3D11_BIND_RENDER_TARGET` (0x20), no view is possible** — fall back to rendering
+into our own texture and `CopyResource` (slot 47).
+
+**R48, the original bring-up fix.** First bug was `SURFACE_IMAGE_SOURCE_RUNTIME_CLASS` declared
 `[u16; 56]` for a **48**-char name, so `with_hstring` passed `length = 56` and WinRT looked up
 `"…SurfaceImageSource\0\0\0\0\0\0\0\0"` → activation failed with `hr = S_OK` but a **null factory**.
 Fixed (array is now `[u16; 48]`); also fixed the diagnostic that hid it (`SurfaceChain::create` now

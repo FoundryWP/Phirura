@@ -170,6 +170,7 @@ $linkArgs = @(
     "/EXPORT:wp81_rs_start_surface_prepare",
     "/EXPORT:wp81_rs_start_surface_attach",
     "/EXPORT:wp81_rs_sis_source",
+    "/EXPORT:wp81_rs_sis_diag",
     "/EXPORT:wp81_rs_sis_step",
     "/EXPORT:wp81_rs_sis_step_name",
     "/EXPORT:wp81_rs_sis_hr"
