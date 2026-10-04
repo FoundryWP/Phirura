@@ -464,9 +464,82 @@ fn main() {
         let set_raster: extern "system" fn(*mut c_void, *mut c_void) =
             context.method(D3D11CONTEXT_RSSETSTATE);
         set_raster(context.vtbl as *mut c_void, p.raster.vtbl as *mut c_void);
+        // The GPU's own account of what this draw does. `Draw` returns void, so an HRESULT can
+        // never say whether it rasterized anything; these counters split "nothing happened" into
+        // the three different failures it could be: no vertices entered the input assembler, the
+        // vertex shader never ran, or the VS ran and every fragment was discarded on the way out.
+        #[repr(C)]
+        #[derive(Default)]
+        struct PipeStats {
+            ia_vertices: u64,
+            ia_primitives: u64,
+            vs_invocations: u64,
+            gs_invocations: u64,
+            gs_primitives: u64,
+            c_invocations: u64,
+            c_primitives: u64,
+            ps_invocations: u64,
+            hs_invocations: u64,
+            ds_invocations: u64,
+            cs_invocations: u64,
+        }
+        #[repr(C)]
+        struct QueryDesc {
+            query: u32,
+            misc_flags: u32,
+        }
+        let create_query: extern "system" fn(*mut c_void, *const QueryDesc, *mut *mut c_void) -> HRESULT =
+            device.method(D3D11DEVICE_CREATEQUERY);
+        let mut q = ComPtr::NULL;
+        let qhr = create_query(
+            device.vtbl as *mut c_void,
+            &QueryDesc {
+                query: D3D11_QUERY_PIPELINE_STATISTICS,
+                misc_flags: 0,
+            },
+            &mut q.vtbl as *mut _ as *mut *mut c_void,
+        );
+        let have_q = qhr >= 0 && !q.is_null();
+        if !have_q {
+            println!("[hostcheck] 7c CreateQuery hr=0x{:08X} - no pipeline stats", qhr as u32);
+        }
+        let begin: extern "system" fn(*mut c_void, *mut c_void) = context.method(D3D11CONTEXT_BEGIN);
+        if have_q {
+            begin(context.vtbl as *mut c_void, q.vtbl as *mut c_void);
+        }
+
         let draw: extern "system" fn(*mut c_void, UINT, UINT) = context.method(D3D11CONTEXT_DRAW);
         draw(context.vtbl as *mut c_void, 4, 0);
         println!("[hostcheck] 7 draw ok (Draw(4,0) through every bound slot)");
+
+        let end: extern "system" fn(*mut c_void, *mut c_void) = context.method(D3D11CONTEXT_END);
+        if have_q {
+            end(context.vtbl as *mut c_void, q.vtbl as *mut c_void);
+            let get_data: extern "system" fn(*mut c_void, *mut c_void, *mut c_void, usize, UINT) ->
+                HRESULT = context.method(D3D11CONTEXT_GETDATA);
+            let mut st = PipeStats::default();
+            let mut tries = 0u32;
+            let mut ghr = -1i32;
+            while tries < 200 {
+                ghr = get_data(
+                    context.vtbl as *mut c_void,
+                    q.vtbl as *mut c_void,
+                    &mut st as *mut PipeStats as *mut c_void,
+                    core::mem::size_of::<PipeStats>(),
+                    0,
+                );
+                if ghr == 0 {
+                    break;
+                }
+                tries += 1;
+            }
+            println!(
+                "[hostcheck] 7c stats IAverts={} IAtris={} VSinv={} PSinv={} (hr=0x{:08X} tries={})",
+                st.ia_vertices, st.ia_primitives, st.vs_invocations, st.ps_invocations,
+                ghr as u32, tries
+            );
+            q.release();
+        }
 
         // ---- 7b. read the pixels back: the only check that says the quad *rasterized* --------
         //

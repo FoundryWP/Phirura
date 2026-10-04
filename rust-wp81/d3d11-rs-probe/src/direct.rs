@@ -999,6 +999,7 @@ pub const D3D11DEVICE_CREATEPIXELSHADER: usize = 15;
 pub const D3D11DEVICE_CREATEBLENDSTATE: usize = 20;
 pub const D3D11DEVICE_CREATERASTERIZERSTATE: usize = 22;
 pub const D3D11DEVICE_CREATESAMPLERSTATE: usize = 23;
+pub const D3D11DEVICE_CREATEQUERY: usize = 24;
 pub const D3D11DEVICE_GETFEATURELEVEL: usize = 37;
 
 // ID3D11DeviceContext
@@ -1022,6 +1023,18 @@ pub const D3D11CONTEXT_IASETINPUTLAYOUT: usize = 17;
 pub const D3D11CONTEXT_IASETVERTEXBUFFERS: usize = 18;
 pub const D3D11CONTEXT_IASETINDEXBUFFER: usize = 19;
 pub const D3D11CONTEXT_IASETPRIMITIVETOPOLOGY: usize = 24;
+// `Begin`/`End`/`GetData` bracket an asynchronous query - the one way a draw can be *measured*
+// instead of guessed at: `D3D11_QUERY_PIPELINE_STATISTICS` counts the vertices the input
+// assembler fed, the vertex shader invocations, and the pixel shader invocations separately, so
+// "the draw did nothing" splits into "nothing entered", "the VS never ran" and "the VS ran but no
+// fragment survived rasterization". Slots from `vtable_slots.py --iface ID3D11DeviceContext
+// --method Begin` (27/28/29, between `IASetPrimitiveTopology` and `OMSetRenderTargets`).
+pub const D3D11CONTEXT_BEGIN: usize = 27;
+pub const D3D11CONTEXT_END: usize = 28;
+pub const D3D11CONTEXT_GETDATA: usize = 29;
+// `D3D11_QUERY` enum, read from `d3d11.h`: EVENT = 0, OCCLUSION = +1, TIMESTAMP = +1,
+// TIMESTAMP_DISJOINT = +1, PIPELINE_STATISTICS = TIMESTAMP_DISJOINT + 1 = 4.
+pub const D3D11_QUERY_PIPELINE_STATISTICS: UINT = 4;
 pub const D3D11CONTEXT_OMSETRENDERTARGETS: usize = 33;
 pub const D3D11CONTEXT_OMSETBLENDSTATE: usize = 35;
 pub const D3D11CONTEXT_RSSETSTATE: usize = 43;

@@ -78,10 +78,6 @@ struct VSIn
     float3 pos : POSITION;
     float2 uv  : TEXCOORD0;
     float4 col : COLOR0;
-    // EXPERIMENT: the vertex id comes from the input assembler itself rather than from the vertex
-    // buffer, so this input needs no `D3D11_INPUT_ELEMENT_DESC`. It is how the shader can prove it
-    // ran without a single byte of uploaded vertex data.
-    uint   vid : SV_VertexID;
 };
 
 struct VSOut
@@ -94,20 +90,19 @@ struct VSOut
 VSOut vs_main(VSIn i)
 {
     VSOut o;
-    // EXPERIMENT: build the position from `SV_VertexID`, ignoring the vertex buffer entirely.
+    // EXPERIMENT: clip-space z = 0.5 instead of 0.0.
     //
-    // The constant buffer has already been ruled out by the same trick (the screen stayed clear
-    // when `u_proj` was bypassed), and binding alpha was ruled out by an opaque blend, so what is
-    // left is either a vertex buffer that never reaches the shader, or a draw that never
-    // rasterizes. A triangle whose corners the shader invents itself survives the first of those;
-    // if this one is invisible too, the fault is downstream of the vertices and in the draw
-    // plumbing.
-    float2 xy = float2(-0.9, -0.9);
-    if (i.vid == 1) xy = float2(0.9, -0.9);
-    if (i.vid >= 2) xy = float2(0.0, 0.9);
-    o.pos = float4(xy, 0.0, 1.0);
-    o.uv  = float2(0.5, 0.5);
-    o.col = float4(1.0, 0.4, 0.2, 1.0);   // constant: keeps the texture path the only variable
+    // Every fragment so far lands at depth exactly 0 (the orthographic projection leaves z alone
+    // and the vertices carry z = 0), while the context never binds a depth-stencil state, so the
+    // default one is in force: DepthEnable = TRUE, DepthFunc = LESS. With no depth-stencil view
+    // bound there is nothing to compare against, and if the driver treats that as a depth of 0
+    // then `LESS` rejects 0 < 0 for every single fragment: a draw that rasterizes and discards
+    // everything, which is exactly the symptom: the clear (no depth test) lands, the draw does
+    // not. Moving z off the boundary tells us whether that is it. The projection is also bypassed
+    // so the vertex buffer stays the only input being tested.
+    o.pos = float4(i.pos.xy, 0.5, 1.0);
+    o.uv  = i.uv;
+    o.col = i.col;
     return o;
 }
 
