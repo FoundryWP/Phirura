@@ -651,6 +651,24 @@ pub unsafe extern "C" fn wp81_rs_start_surface_attach() -> i32 {
 
     s.surface = chain;
     s.route = 3; // XAML SurfaceImageSource
+
+    // Read the surface shape *now*, before the first frame can touch it.
+    //
+    // `CreateRenderTargetView` on this surface is the call that has twice ended the process, and
+    // the description that would say why was only ever returned by `draw_test_quad` — i.e. logged
+    // after the very call it explains. One `BeginDraw`/`GetDesc`/`EndDraw` at attach time puts
+    // `fmt`/`BindFlags` in the log line C# prints immediately after this returns, so if the frame
+    // still dies the log names the surface rather than just the tick. Failure is recorded, not
+    // fatal: a broken probe would have failed the frame the same way, and losing it must not cost
+    // the bring-up line that follows.
+    bump(s, 98); // surface probe: BeginDraw/GetDesc/EndDraw
+    if let Err((step, hr)) = s.surface.probe(&s.device) {
+        s.sis_trace[0] = step;
+        s.sis_trace[1] = hr;
+        s.last_hr = hr;
+        // stage is left alone: attach itself succeeded.
+    }
+
     bump(s, 99);
     s.stage = 0;
     0
@@ -683,11 +701,16 @@ pub unsafe extern "C" fn wp81_rs_sis_hr() -> i32 {
 /// Index: 0 `DXGI_FORMAT`, 1 `BindFlags`, 2 width, 3 height, 4 `SampleDesc.Count`,
 /// 5 `MiscFlags`, 6 `QI(ID3D11Texture2D)` HRESULT,
 /// 7 `CreateRenderTargetView(NULL desc)` HRESULT, 8 the explicit-descriptor retry's HRESULT,
-/// 9 the format that retry used. Out-of-range returns -1.
+/// 9 the format that retry used,
+/// 10 whether the texture's `GetDevice` is our device (1 same, 0 other, -1 unknown),
+/// 11 which path the frame took (0 direct, 1 own-texture + `CopyResource`, -1 texture refused,
+///    -2 view refused),
+/// 12 the HRESULT that refused that path. Out-of-range returns -1.
 ///
 /// The surface is XAML's, so this is the only channel through which the phone log can explain a
-/// refused view: `E_INVALIDARG` alone does not say whether the format was typeless or the resource
-/// was never bound as a render target, and those two need opposite fixes.
+/// refused view: `E_INVALIDARG` alone does not say whether the format was typeless, the resource
+/// was never bound as a render target, or it was made by another device — and those need
+/// different fixes (a typed descriptor, a copy into our own texture, or nothing at all).
 #[no_mangle]
 pub unsafe extern "C" fn wp81_rs_sis_diag(index: i32) -> i32 {
     let s = st();
@@ -1332,7 +1355,7 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
             // Record what the surface actually *is* first: if the view below is refused, the phone
             // log needs the format and BindFlags to say why, and there is no second chance to read
             // them (the frame has to end before anything else can be tried).
-            s.surface.inspect_surface();
+            s.surface.inspect_surface(&s.device);
             set_tick(63); // GetDesc recorded
             let hr = s.surface.build_rtv(&s.device);
             if hr < 0 {
@@ -1493,8 +1516,24 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
 
     // ---- hand the finished frame back to the compositor ----------------------------------
     //
-    // `EndDraw` is what publishes it. Doing it here (rather than in `wp81_rs_present`) keeps the
-    // frame one balanced pair per call, and lets `present` stay an honest no-op on this route.
+    // A frame that was drawn into our own texture (XAML's surface refused a view) is not in the
+    // surface yet: `EndDraw` publishes whatever is *in the surface*, so without this copy the
+    // compositor would be shown whatever the atlas already held — a "working" draw that looks
+    // exactly like a broken one. Same size, same format, one `CopyResource`, then `EndDraw`.
+    if s.route == 3 && s.surface.need_copy {
+        set_tick(75); // about to move the frame into XAML's surface
+        let copy: extern "system" fn(*mut c_void, *mut c_void, *mut c_void) =
+            ctx.method(D3D11CONTEXT_COPYRESOURCE);
+        copy(
+            ctx.vtbl as *mut c_void,
+            // QI'd texture, for the same reason `build_rtv` uses it: `CopyResource` takes
+            // `ID3D11Resource*`, and it returns *void*, so a pointer the runtime refuses is not an
+            // error you get to see - it is a frame that silently never arrives.
+            s.surface.frame_tex.vtbl as *mut c_void,
+            s.surface.own_texture.vtbl as *mut c_void,
+        );
+        set_tick(76); // CopyResource issued
+    }
     if s.route == 3 {
         set_tick(71); // handing the finished frame to the compositor
         let hr = s.surface.end_draw();
@@ -1735,7 +1774,16 @@ pub unsafe extern "C" fn wp81_rs_tick_name() -> *const u8 {
         69 => b"frame: Draw(4) issued\0",
         71 => b"frame: about to EndDraw\0",
         72 => b"frame: EndDraw returned\0",
+        // build_rtv's two attempts get a tick each: 63 then stops here tells which one killed the
+        // frame, and (with the attach-time probe) the log carries `fmt`/`BindFlags` beforehand.
+        73 => b"frame: RTV attempt 1 (NULL descriptor) returned\0",
+        74 => b"frame: RTV attempt 2 (explicit descriptor) entered\0",
+        // Set only when XAML's surface refused a view and the frame was drawn into our own
+        // texture instead: 75 then no 76 says the copy into the surface never returned.
+        75 => b"frame: CopyResource into XAML's surface entered\0",
+        76 => b"frame: CopyResource issued\0",
         70 => b"IDXGISwapChain::Present\0",
+        98 => b"surface probe: BeginDraw/GetDesc/EndDraw done\0",
         99 => b"fully up\0",
         200 => b"corewindow: pWindow was NULL\0",
         201 => b"corewindow: QI(IUnknown) on pWindow = S_OK (valid COM object)\0",

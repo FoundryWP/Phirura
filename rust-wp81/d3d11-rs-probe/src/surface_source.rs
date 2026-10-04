@@ -120,6 +120,14 @@ fn typed_view_format(fmt: i32) -> u32 {
     }
 }
 
+/// Number of entries in [`SurfaceChain::diag`], and their state before anything has been asked.
+///
+/// `[10]` (which device made the texture) and `[15]` (whether the two interface pointers are the
+/// same address) start at `-1` rather than `0`: each has a `0` meaning that reads as a *finding*,
+/// and a finding nobody measured is worse than no finding at all.
+const DIAG_LEN: usize = 16;
+const DIAG_INIT: [i32; DIAG_LEN] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1];
+
 /// The live `SurfaceImageSource` chain.
 ///
 /// Every one of these is a COM reference this struct owns and must release. They are held together
@@ -135,6 +143,17 @@ pub struct SurfaceChain {
     pub native: ComPtr,
     /// The current frame's surface from `BeginDraw`, or null between frames.
     pub frame_surface: ComPtr,
+    /// That same surface QI'd to `ID3D11Texture2D` — the pointer everything actually wants.
+    ///
+    /// `BeginDraw` hands back an `IDXGISurface*`, and **an interface pointer may be used as another
+    /// interface of the same object only when the two are pointer-identical**: true for single
+    /// inheritance, false as soon as the implementation has more than one base. Nothing has
+    /// established identity here, and passing an `IDXGISurface*` where an `ID3D11Resource*` is
+    /// expected is exactly the kind of wrong that is *quiet* — `CreateRenderTargetView` answers
+    /// `E_INVALIDARG` for a pointer it does not recognise, and `CopyResource` returns `void`, so a
+    /// refused copy is indistinguishable from one that ran. QI is the only sanctioned way to get
+    /// the resource, so the frame works from this pointer and from nothing else.
+    pub frame_tex: ComPtr,
     /// The render target view over `frame_surface`, rebuilt whenever `BeginDraw` returns a new one.
     pub frame_rtv: ComPtr,
     /// Where `BeginDraw` put this frame inside the source's own atlas. A renderer that ignores this
@@ -145,17 +164,35 @@ pub struct SurfaceChain {
     pub height: i32,
     /// `true` between a successful `BeginDraw` and its `EndDraw`.
     pub in_frame: bool,
+    /// Our own render target, used when XAML's surface refuses a view (see [`Self::build_rtv`]).
+    ///
+    /// It is made to match the surface's description exactly — same width, height and format —
+    /// because `CopyResource` allows no mismatch, and is kept across frames: reallocating ~4 MB
+    /// per frame to work around a refused view would be a second bug stacked on the first.
+    pub own_texture: ComPtr,
+    /// `own_texture`'s `[width, height, format]`, so a changed surface rebuilds it instead of
+    /// copying between two resources that no longer match.
+    pub own_key: [i32; 3],
+    /// `true` when this frame drew into `own_texture` and must copy it into `frame_surface`
+    /// before `EndDraw`.
+    pub need_copy: bool,
     /// What the target surface *is*, and what the two render-target-view attempts answered.
     ///
     /// `[0]` format (`DXGI_FORMAT_*`), `[1]` `BindFlags`, `[2]` width, `[3]` height,
     /// `[4]` `SampleDesc.Count`, `[5]` `MiscFlags`, `[6]` `QI(ID3D11Texture2D)` HRESULT,
     /// `[7]` `CreateRenderTargetView(NULL desc)` HRESULT, `[8]` the explicit-descriptor retry's
-    /// HRESULT, `[9]` the format the retry used.
+    /// HRESULT, `[9]` the format the retry used,
+    /// `[10]` whether the texture's `GetDevice` is *our* device (1 same, 0 other, -1 unknown),
+    /// `[11]` which path the frame took (0 direct, 1 own-texture+copy, -1/-2/-3 refused),
+    /// `[12]` the HRESULT that refused the own-texture path,
+    /// `[13]`/`[14]` `BeginDraw`'s offset of this frame inside the source's atlas,
+    /// `[15]` whether `IDXGISurface*` and `ID3D11Texture2D*` are the same address (1 same,
+    ///        0 different, -1 not asked yet).
     ///
     /// Measured on the Lumia 925: `[7] = E_INVALIDARG` where `[0]`/`[1]` decide the fix. The
     /// surface is XAML's, so nothing about its shape can be inspected off-device - this array is
     /// the only way the phone log can say *why* a view of it was refused.
-    pub diag: [i32; 10],
+    pub diag: [i32; DIAG_LEN],
 }
 
 impl SurfaceChain {
@@ -163,12 +200,18 @@ impl SurfaceChain {
         source_inspectable: ComPtr::NULL,
         native: ComPtr::NULL,
         frame_surface: ComPtr::NULL,
+        frame_tex: ComPtr::NULL,
         frame_rtv: ComPtr::NULL,
         frame_offset: Point { x: 0, y: 0 },
         width: 0,
         height: 0,
         in_frame: false,
-        diag: [0; 10],
+        own_texture: ComPtr::NULL,
+        own_key: [0; 3],
+        need_copy: false,
+        // `[10]`/`[15]` start *unknown*, not "0 = another device" / "0 = different address": a
+        // default that means something specific would be believed before anything had asked.
+        diag: DIAG_INIT,
     };
 
     /// Create a `SurfaceImageSource` of `width` x `height` pixels and QI its native interface.
@@ -261,12 +304,16 @@ impl SurfaceChain {
             source_inspectable: instance,
             native,
             frame_surface: ComPtr::NULL,
+            frame_tex: ComPtr::NULL,
             frame_rtv: ComPtr::NULL,
             frame_offset: Point { x: 0, y: 0 },
             width,
             height,
             in_frame: false,
-            diag: [0; 10],
+            diag: DIAG_INIT,
+            own_texture: ComPtr::NULL,
+            own_key: [0; 3],
+            need_copy: false,
         })
     }
 
@@ -306,6 +353,11 @@ impl SurfaceChain {
         if !self.frame_surface.is_null() {
             self.frame_surface.release();
             self.frame_surface = ComPtr::NULL;
+        }
+        // The QI'd texture belongs to the same frame as the surface, so it goes with it.
+        if !self.frame_tex.is_null() {
+            self.frame_tex.release();
+            self.frame_tex = ComPtr::NULL;
         }
 
         let rect = Rect { left: 0, top: 0, right: self.width, bottom: self.height };
@@ -352,7 +404,8 @@ impl SurfaceChain {
         Ok(())
     }
 
-    /// Read the target surface's `D3D11_TEXTURE2D_DESC` into [`SurfaceChain::diag`].
+    /// Read the target surface's `D3D11_TEXTURE2D_DESC` into [`SurfaceChain::diag`], and ask the
+    /// texture which device made it.
     ///
     /// The surface belongs to XAML, so its shape cannot be known off-device: `CreateRenderTargetView`
     /// answering `E_INVALIDARG` on it does not say which argument was wrong. Format, `BindFlags`
@@ -360,8 +413,13 @@ impl SurfaceChain {
     /// work (a view needs a typed format) and has to be given explicitly, while a missing
     /// `D3D11_BIND_RENDER_TARGET` means no view is possible at all and the frame has to reach the
     /// surface some other way.
-    pub unsafe fn inspect_surface(&mut self) {
+    ///
+    /// `device` is ours, for the third possibility: a resource created by a *different* device is
+    /// refused the same way, and `SetDevice` only asks XAML to use our device — it does not prove
+    /// it did. `diag[10]` is the answer, straight from `GetDevice` pointer identity.
+    pub unsafe fn inspect_surface(&mut self, device: &ComPtr) {
         self.diag[6] = E_NOINTERFACE;
+        self.diag[10] = -1; // not known, unless the QI below gets far enough to ask
         if self.frame_surface.is_null() {
             return;
         }
@@ -377,12 +435,38 @@ impl SurfaceChain {
                 *slot = 0;
             }
             return;
-        }
         let get_desc: extern "system" fn(*mut c_void, *mut D3D11_TEXTURE2D_DESC) =
             tex.method(ID3D11TEXTURE2D_GETDESC);
         let mut d = D3D11_TEXTURE2D_DESC::default();
         get_desc(tex.vtbl as *mut c_void, &mut d);
-        tex.release();
+
+        // Which device owns it? `GetDevice` AddRefs, so the reference is dropped here rather than
+        // left for someone who cannot see where it came from.
+        let get_dev: extern "system" fn(*mut c_void, *mut *mut c_void) =
+            tex.method(ID3D11DEVICECHILD_GETDEVICE);
+        let mut owner = ComPtr::NULL;
+        get_dev(
+            tex.vtbl as *mut c_void,
+            &mut owner.vtbl as *mut _ as *mut *mut c_void,
+        );
+        self.diag[10] = if owner.is_null() {
+            -1
+        } else if owner.vtbl == device.vtbl {
+            1
+        } else {
+            0
+        };
+        owner.release();
+
+        // Keep the QI'd texture: everything that must reach this resource as a *resource* (the
+        // render target view, `CopyResource`) uses this pointer rather than the `IDXGISurface*`
+        // `BeginDraw` handed back. Both are recorded, because whether they are the same address
+        // is the question that decides which of those two answers `E_INVALIDARG`.
+        self.diag[15] = if tex.vtbl == self.frame_surface.vtbl { 1 } else { 0 };
+        if !self.frame_tex.is_null() {
+            self.frame_tex.release();
+        }
+        self.frame_tex = tex;
 
         self.diag[0] = d.Format as i32;
         self.diag[1] = d.BindFlags as i32;
@@ -390,6 +474,10 @@ impl SurfaceChain {
         self.diag[3] = d.Height as i32;
         self.diag[4] = d.SampleDesc.Count as i32;
         self.diag[5] = d.MiscFlags as i32;
+        // Where in XAML's atlas this frame sits, for the log: a viewport built from a garbage
+        // offset rasterizes into empty space, which looks exactly like a failed draw.
+        self.diag[13] = self.frame_offset.x;
+        self.diag[14] = self.frame_offset.y;
     }
 
     /// Read the target surface's shape *before the first frame* — `BeginDraw` + `GetDesc` +
@@ -403,12 +491,12 @@ impl SurfaceChain {
     ///
     /// Not fatal on failure — the frame will hit the same wall and `sis_trace` names it — because
     /// losing the probe must not cost the bring-up log line that follows it.
-    pub unsafe fn probe(&mut self) -> Result<(), (i32, HRESULT)> {
+    pub unsafe fn probe(&mut self, device: &ComPtr) -> Result<(), (i32, HRESULT)> {
         if self.native.is_null() {
             return Err((SIS_BEGIN_DRAW, E_NOINTERFACE));
         }
         self.begin_draw()?;
-        self.inspect_surface();
+        self.inspect_surface(device);
         self.end_draw();
         Ok(())
     }
@@ -446,7 +534,15 @@ impl SurfaceChain {
             *mut *mut c_void,
         ) -> HRESULT = device.method(D3D11DEVICE_CREATERENDERTARGETVIEW);
         let this = device.vtbl as *mut c_void;
-        let res = self.frame_surface.vtbl as *mut c_void;
+        // The *resource*, QI'd — not the `IDXGISurface*` `BeginDraw` returned. A view API takes
+        // `ID3D11Resource*`, and passing a different interface of an object whose identity we have
+        // never checked is precisely how you get `E_INVALIDARG` out of a description that is
+        // otherwise correct. `diag[15]` records whether the two addresses matched after all.
+        let res = if self.frame_tex.is_null() {
+            self.frame_surface.vtbl as *mut c_void
+        } else {
+            self.frame_tex.vtbl as *mut c_void
+        };
 
         // ---- attempt 1: NULL descriptor ----
         let mut rtv = ComPtr::NULL;
@@ -455,6 +551,8 @@ impl SurfaceChain {
         crate::set_tick(73); // NULL-descriptor view attempt returned
         if hr1 >= 0 && !rtv.is_null() {
             self.frame_rtv = rtv;
+            self.need_copy = false;
+            self.diag[11] = 0; // drew straight into XAML's surface
             return 0;
         }
         if !rtv.is_null() {
@@ -475,7 +573,7 @@ impl SurfaceChain {
             } else {
                 -3 // format already typed: the NULL descriptor failed for some other reason
             };
-            return hr1;
+            return self.build_own_target(device, hr1);
         }
 
         // ---- attempt 2: explicit descriptor, typed format ----
@@ -502,12 +600,122 @@ impl SurfaceChain {
         self.diag[9] = fmt as i32;
         if hr2 >= 0 && !rtv2.is_null() {
             self.frame_rtv = rtv2;
+            self.need_copy = false;
+            self.diag[11] = 0;
             return 0;
         }
         if !rtv2.is_null() {
             rtv2.release();
         }
-        hr2
+        // Neither form worked: stop asking this resource for a view and draw somewhere viewable.
+        self.build_own_target(device, if hr1 < 0 { hr1 } else { hr2 })
+    }
+
+    /// Give up on viewing XAML's surface and make a render target of our own to draw into.
+    ///
+    /// The surface answers `E_INVALIDARG` to a view that its own `GetDesc` says should be legal
+    /// (`fmt=87`, `BindFlags=0x20`, one sample — every precondition of the documented call), so
+    /// the reason is not in the description and cannot be repaired by changing the arguments:
+    /// measured on the Lumia 925, guessing at it took the process down. Rather than keep asking,
+    /// draw into a texture **we** create — which is what the offscreen route already does there —
+    /// and let [`Self::need_copy`] move the result into the surface before `EndDraw`.
+    ///
+    /// The texture is copied only when its shape matches (`own_key`), and it must: `CopyResource`
+    /// allows no mismatch, so a surface that changes size has to rebuild it rather than silently
+    /// copy into a stale one.
+    ///
+    /// `refused` is the HRESULT the view attempts answered, kept for the log. Returns 0 with
+    /// `diag[11] = 1` on success; a negative `diag[11]` (`-1` texture, `-2` view) with the failing
+    /// call's HRESULT in `diag[12]` means even the fallback could not be built, which is the case
+    /// that says something about the *device* rather than about XAML's surface.
+    unsafe fn build_own_target(&mut self, device: &ComPtr, refused: HRESULT) -> HRESULT {
+        let w = self.diag[2] as u32;
+        let h = self.diag[3] as u32;
+        // Without a description there is nothing to match, and a view cannot be built blind.
+        if self.diag[6] < 0 || w == 0 || h == 0 {
+            self.diag[11] = -2;
+            self.diag[12] = refused;
+            return refused;
+        }
+        // The *exact* surface format, not a typed version of it: `CopyResource` compares formats
+        // literally, so a typeless surface would need a typeless copy source.
+        let surface_fmt = self.diag[0] as u32;
+        let key = [w as i32, h as i32, surface_fmt as i32];
+        if self.own_texture.is_null() || self.own_key != key {
+            if !self.own_texture.is_null() {
+                self.own_texture.release();
+                self.own_texture = ComPtr::NULL;
+            }
+            let td = D3D11_TEXTURE2D_DESC {
+                Width: w,
+                Height: h,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: surface_fmt,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: self.diag[4].max(1) as u32,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_RENDER_TARGET,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let create_tex: extern "system" fn(
+                *mut c_void,
+                *const D3D11_TEXTURE2D_DESC,
+                *const c_void,
+                *mut *mut c_void,
+            ) -> HRESULT = device.method(D3D11DEVICE_CREATETEXTURE2D);
+            let mut tex = ComPtr::NULL;
+            let hr = create_tex(
+                device.vtbl as *mut c_void,
+                &td,
+                core::ptr::null(),
+                &mut tex.vtbl as *mut _ as *mut *mut c_void,
+            );
+            if hr < 0 || tex.is_null() {
+                self.diag[11] = -1;
+                self.diag[12] = if hr < 0 { hr } else { E_NOINTERFACE };
+                return self.diag[12];
+            }
+            self.own_texture = tex;
+            self.own_key = key;
+        }
+
+        // An explicit descriptor, not the NULL form: on *our* texture that is not a guess — we
+        // chose the format, the dimension and `D3D11_BIND_RENDER_TARGET` ourselves, and for a
+        // typeless copy source it is the only way to a typed view.
+        let fmt = typed_view_format(self.diag[0]);
+        let dim = if self.diag[4] > 1 {
+            D3D11_RTV_DIM_TEXTURE2DMS
+        } else {
+            D3D11_RTV_DIM_TEXTURE2D
+        };
+        let desc: [u32; 5] = [fmt, dim, 0, 0, 0];
+        let create_rtv: extern "system" fn(
+            *mut c_void,
+            *mut c_void,
+            *const c_void,
+            *mut *mut c_void,
+        ) -> HRESULT = device.method(D3D11DEVICE_CREATERENDERTARGETVIEW);
+        let mut rtv = ComPtr::NULL;
+        let hr = create_rtv(
+            device.vtbl as *mut c_void,
+            self.own_texture.vtbl as *mut c_void,
+            desc.as_ptr() as *const c_void,
+            &mut rtv.vtbl as *mut _ as *mut *mut c_void,
+        );
+        if hr < 0 || rtv.is_null() {
+            self.diag[11] = -2;
+            self.diag[12] = if hr < 0 { hr } else { E_NOINTERFACE };
+            return self.diag[12];
+        }
+        self.frame_rtv = rtv;
+        self.need_copy = true;
+        self.diag[11] = 1;
+        self.diag[12] = 0;
+        0
     }
 
     /// `ISurfaceImageSourceNative::EndDraw()`. Must be called once per `BeginDraw`.
@@ -531,6 +739,14 @@ impl SurfaceChain {
         self.frame_rtv = ComPtr::NULL;
         self.frame_surface.release();
         self.frame_surface = ComPtr::NULL;
+        self.frame_tex.release();
+        self.frame_tex = ComPtr::NULL;
+        // The fallback render target outlives any one frame by design, so it is released here
+        // rather than in `begin_draw`.
+        self.own_texture.release();
+        self.own_texture = ComPtr::NULL;
+        self.own_key = [0; 3];
+        self.need_copy = false;
         self.native.release();
         self.native = ComPtr::NULL;
         // The `SurfaceImageSource` is intentionally released last: the compositor may still hold a

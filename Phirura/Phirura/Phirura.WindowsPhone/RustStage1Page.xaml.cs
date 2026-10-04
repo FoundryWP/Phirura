@@ -242,7 +242,10 @@ namespace Phirura
                         + " sis-step=" + RustRenderer.SisStep
                         + " sis-hr=0x" + RustRenderer.SisHr.ToString("X8")
                         + " source=0x" + RustRenderer.SisSource.ToInt32().ToString("X8")
-                        + " " + RustRenderer.Diagnose());
+                        // The attach-time probe just read XAML's surface: log its shape here, before
+                        // any frame can try to build a view of it and take the process down.
+                        + " | " + RustRenderer.SisDiagText
+                        + " | " + RustRenderer.Diagnose());
                 }
                 ok = ok && attached;
 

@@ -308,7 +308,8 @@ namespace Phirura
                 }
                 AppLog.WriteSync("RustRenderer.Attach: native returned rc=" + rc
                     + " tick=" + Tick + " (" + TickName + ")"
-                    + " sis-step=" + SisStep + " sis-hr=0x" + SisHr.ToString("X8"));
+                    + " sis-step=" + SisStep + " sis-hr=0x" + SisHr.ToString("X8")
+                    + " | " + SisDiagText);
                 if (rc != 0)
                 {
                     AppLog.WriteSync("RustRenderer.Attach: failed rc=" + rc + " " + Diagnose());
@@ -412,13 +413,88 @@ namespace Phirura
                         + " misc=0x" + SisDiag(5).ToString("X")
                         + " qi(tex2d)=0x" + unchecked((uint)SisDiag(6)).ToString("X8")
                         + " rtv(null)=0x" + unchecked((uint)SisDiag(7)).ToString("X8")
-                        + " rtv(explicit)=0x" + unchecked((uint)SisDiag(8)).ToString("X8")
-                        + " rtv-fmt=" + SisDiag(9);
+                        + " " + Rtv2Text
+                        + " dev=" + DevText
+                        + " path=" + PathText;
                 }
                 catch (Exception ex)
                 {
                     return "diag unavailable: " + ex.Message;
                 }
+            }
+        }
+
+        /// <summary>
+        /// The second <c>CreateRenderTargetView</c> attempt as one log fragment.
+        ///
+        /// It has three states, and only two of them are an HRESULT: <c>build_rtv</c> refuses to run
+        /// the attempt at all unless QI succeeded, the format is typeless and the resource carries
+        /// <c>D3D11_BIND_RENDER_TARGET</c> - because running it in any other case is what killed the
+        /// process on the Lumia 925. So "not attempted, and here is which precondition failed" is a
+        /// first-class answer, and is printed as such; <c>0</c> with no reason means the frame has
+        /// not got that far yet (the attach-time probe reads the surface but builds no view).
+        /// </summary>
+        private static string Rtv2Text
+        {
+            get
+            {
+                int hr = SisDiag(8);
+                int why = SisDiag(9);
+                if (hr == 0 && why < 0)
+                {
+                    string reason = why == -1 ? "QI(ID3D11Texture2D) failed"
+                        : why == -2 ? "no D3D11_BIND_RENDER_TARGET"
+                        : "format already typed";
+                    return "rtv(explicit)=skipped(" + reason + ")";
+                }
+                if (hr == 0 && why == 0)
+                {
+                    return "rtv(explicit)=not attempted yet";
+                }
+                return "rtv(explicit)=0x" + unchecked((uint)hr).ToString("X8")
+                    + " rtv-fmt=" + why;
+            }
+        }
+
+        /// <summary>
+        /// Whether XAML's surface was made by *our* device (<c>ID3D11DeviceChild::GetDevice</c>,
+        /// compared by pointer identity in Rust).
+        ///
+        /// `SetDevice` asks XAML to use our device but does not prove it did, and a resource from
+        /// another device is refused with exactly the same `E_INVALIDARG` as a bad description -
+        /// so this is the one bit that separates "we passed the wrong argument" from "this is not
+        /// ours to draw into".
+        /// </summary>
+        private static string DevText
+        {
+            get
+            {
+                int d = SisDiag(10);
+                return d == 1 ? "ours" : d == 0 ? "OTHER" : "unknown";
+            }
+        }
+
+        /// <summary>
+        /// Which path the last frame actually drew through.
+        ///
+        /// `direct` = a view of XAML's surface; `own+copy` = a view of a texture we created, copied
+        /// in with `CopyResource` because the surface refused one; a negative value with an HRESULT
+        /// is the fallback itself being refused, which points at the device rather than at XAML.
+        /// </summary>
+        private static string PathText
+        {
+            get
+            {
+                int path = SisDiag(11);
+                if (path == 1) { return "own+copy"; }
+                if (path < 0)
+                {
+                    return (path == -1 ? "own-texture refused " : "own-view refused ")
+                        + "0x" + unchecked((uint)SisDiag(12)).ToString("X8");
+                }
+                // 0 means "direct" only once something tried to make that view; before the first
+                // frame it means nothing has happened yet.
+                return SisDiag(7) == 0 && SisDiag(8) == 0 ? "not attempted yet" : "direct";
             }
         }
 

@@ -171,9 +171,20 @@ namespace Phirura
                 // When the navigation stack isn't restored navigate to the first page,
                 // configuring the new page by passing required information as a navigation
                 // parameter
-                if (!rootFrame.Navigate(typeof(MainPage), e.Arguments))
+                //
+                // **Stage 1 bring-up shortcut**: land straight on the Rust renderer test page rather
+                // than on MainPage, so every redeploy starts on the acceptance test with no menu
+                // round-trip in between. The type is resolved by name because this file is shared
+                // with the Windows head, where `Phirura.WindowsPhone.RustStage1Page` does not exist
+                // (`typeof` there would not compile); when it is absent the launch is unchanged.
+                var stage1 = Type.GetType(
+                    "Phirura.RustStage1Page, Phirura.WindowsPhone", false);
+                if (stage1 == null || !rootFrame.Navigate(stage1, e.Arguments))
                 {
-                    throw new Exception("Failed to create initial page");
+                    if (!rootFrame.Navigate(typeof(MainPage), e.Arguments))
+                    {
+                        throw new Exception("Failed to create initial page");
+                    }
                 }
             }
 

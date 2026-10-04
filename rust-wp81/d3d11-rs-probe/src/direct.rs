@@ -969,6 +969,11 @@ pub const D3D11DEVICE_CREATERENDERTARGETVIEW: usize = 9; // NOT 10 (that is Dept
 // --method GetDesc` (IUnknown 3 + ID3D11DeviceChild 4 + ID3D11Resource 3 + own 0 = 10) rather
 // than remembered - the same tool reproduces every slot REFERENCE.md already records as proven.
 pub const ID3D11TEXTURE2D_GETDESC: usize = 10;
+// `ID3D11DeviceChild::GetDevice` (slot 3: IUnknown's three methods, then the first method of the
+// first base interface) - the one question that separates "XAML's surface is on our device" from
+// "it is not", which is the difference between a refused view we can do something about and one
+// we cannot. Extracted the same way as `ID3D11TEXTURE2D_GETDESC`, never remembered.
+pub const ID3D11DEVICECHILD_GETDEVICE: usize = 3;
 /// `D3D11_RTV_DIMENSION_TEXTURE2D` / `_TEXTURE2DMS` (d3d11.h), for an explicit
 /// `D3D11_RENDER_TARGET_VIEW_DESC` when the NULL-descriptor form is refused.
 pub const D3D11_RTV_DIM_TEXTURE2D: u32 = 4;
@@ -1009,6 +1014,10 @@ pub const D3D11CONTEXT_RSSETVIEWPORTS: usize = 44;
 pub const D3D11CONTEXT_UPDATESUBRESOURCE: usize = 48;
 pub const D3D11CONTEXT_CLEARRENDERTARGETVIEW: usize = 50;
 pub const D3D11CONTEXT_FLUSH: usize = 111;
+// `ID3D11DeviceContext::CopyResource` (slot 47) - `vtable_slots.py --iface ID3D11DeviceContext
+// --method CopyResource`, between `CopySubresourceRegion` (46) and `UpdateSubresource` (48). It is
+// how a frame drawn into a texture we *can* make a view of reaches a surface we cannot.
+pub const D3D11CONTEXT_COPYRESOURCE: usize = 47;
 
 // ===========================================================================
 // the probe report (kept: the C# side reads it to show what the platform gave us)
