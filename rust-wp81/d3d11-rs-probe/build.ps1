@@ -114,6 +114,15 @@ $linkArgs = @(
     "d3dcompiler.lib",
     "WindowsPhoneCore.lib",
     "ws2_32.lib",
+    # `runtimeobject.lib` is the WP8.1 kit's WinRT activation library and the *only* sanctioned way
+    # for an app to reach the WinRT runtime. It imports from `api-ms-win-core-winrt-l1-1-0.dll`
+    # (RoActivateInstance / RoGetActivationFactory), `...-string-l1-1-0.dll` (WindowsCreateString)
+    # and `...-error-l1-1-0.dll` - all API sets an app container is allowed to load, which is
+    # exactly why Win2D's own ARM DLL imports `RoGetActivationFactory` from that same API set.
+    # This replaces the `LoadLibraryExW("winrt.dll")` attempt, which is provably impossible here:
+    # `winrt.dll` cannot be loaded from an app container (handle 0 on device) and `d3d11.dll` does
+    # not export the Direct3D interop helpers either.
+    "runtimeobject.lib",
     "/EXPORT:wp81_d3d11_rs_probe",
     "/EXPORT:wp81_d3d11_rs_report",
     "/EXPORT:wp81_rs_start",
@@ -153,7 +162,12 @@ $linkArgs = @(
     "/EXPORT:wp81_rs_ot_step_name",
     "/EXPORT:wp81_rs_ot_surface_kind",
     "/EXPORT:wp81_rs_interop_source",
-    "/EXPORT:wp81_rs_interop_trace"
+    "/EXPORT:wp81_rs_interop_trace",
+    "/EXPORT:wp81_rs_start_surface",
+    "/EXPORT:wp81_rs_sis_source",
+    "/EXPORT:wp81_rs_sis_step",
+    "/EXPORT:wp81_rs_sis_step_name",
+    "/EXPORT:wp81_rs_sis_hr"
 )
 $savedEap2 = $ErrorActionPreference
 $ErrorActionPreference = "Continue"

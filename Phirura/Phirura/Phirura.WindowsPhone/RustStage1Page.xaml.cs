@@ -155,56 +155,60 @@ namespace Phirura
                 // log if a native step hard-faults. Each step is logged before and after, so the last
                 // line in phirura.log names the call that killed the process.
                 //
-                // CORRECTED ROUTE (Round 45): a WP8.1 *phone* app does not present through a
-                // swapchain. Both CreateSwapChainForCoreWindow and CreateSwapChainForComposition
-                // return DXGI_ERROR_INVALID_CALL on this Adreno 225 / WDDM 1.2 / FL 9.3 driver, and
-                // Win2D - which renders fine on the same device - imports no swapchain entry points
-                // at all. So the bring-up is now the offscreen + WinRT-interop route: Rust renders
-                // into an offscreen texture and hands back a WinRT IDirect3DSurface/IDirect3DDevice
-                // pair for the XAML compositor. The old composition/CoreWindow fallback chain is
-                // gone - neither can ever succeed here.
-                AppLog.WriteSync("RustStage1: starting offscreen bring-up on pool thread");
+                // ROUTE (Round 48): neither a swapchain nor the D3D/WinRT interop helpers are
+                // reachable from a WP8.1 phone app. CreateSwapChainForCoreWindow and
+                // CreateSwapChainForComposition both return DXGI_ERROR_INVALID_CALL on this Adreno
+                // 225 / WDDM 1.2 / FL 9.3 driver, and the interop load probe logged
+                // `interop-trace=winrt{h=0,exp=0} d3d11{h=1,exp=0}` - winrt.dll will not load from
+                // an app container and d3d11.dll does not export the helper.
+                //
+                // What is reachable is XAML's own SurfaceImageSource: Rust activates it with
+                // RoGetActivationFactory (from runtimeobject.lib, the API set an app *can* load and
+                // the one Win2D itself imports), QIs ISurfaceImageSourceNative with a plain
+                // QueryInterface - no interop helper - and draws into the IDXGISurface that
+                // BeginDraw hands back, which lives inside the compositor's own render target.
+                // Drawing into it *is* presenting.
+                AppLog.WriteSync("RustStage1: starting surface bring-up on pool thread");
                 bool ok = false;
                 await System.Threading.Tasks.Task.Run(delegate
                 {
-                    ok = RustRenderer.StartOffscreen(w, h);
+                    ok = RustRenderer.StartSurface(w, h);
                 });
 
-                AppLog.WriteSync("RustStage1: offscreen bring-up finished, ok=" + ok
+                AppLog.WriteSync("RustStage1: surface bring-up finished, ok=" + ok
                     + " route=" + RustRenderer.Route + " (" + RustRenderer.RouteName + ")"
-                    + " ot-step=" + RustRenderer.OtStep
-                    + " surface-kind=" + RustRenderer.OtSurfaceKindName
-                    + " interop-src=" + RustRenderer.InteropSourceName
-                    + " interop-trace=" + RustRenderer.InteropTrace
-                    + " surface=0x" + RustRenderer.GfxSurface.ToInt32().ToString("X8")
-                    + " device=0x" + RustRenderer.GfxDevice.ToInt32().ToString("X8")
+                    + " sis-step=" + RustRenderer.SisStep
+                    + " sis-hr=0x" + RustRenderer.SisHr.ToString("X8")
+                    + " source=0x" + RustRenderer.SisSource.ToInt32().ToString("X8")
                     + " " + RustRenderer.Diagnose());
 
-                // The interop objects exist only if the route came all the way up. If it did, hand
-                // the surface+device to the compositor (UI thread - it touches XAML).
+                // The SurfaceImageSource object exists only if the route came all the way up. If it
+                // did, hand it to XAML (UI thread - it touches XAML).
                 bool presented = false;
                 if (ok)
                 {
-                    presented = AttachInteropSurface(w, h);
-                    AppLog.WriteSync("RustStage1: interop attach -> " + presented);
+                    presented = AttachSurfaceSource(w, h);
+                    AppLog.WriteSync("RustStage1: surface attach -> " + presented);
                 }
 
                 string route = RustRenderer.RouteName;
                 StageText.Text = ok ? "启动成功 · stage=0" : "启动失败 · " + RustRenderer.Diagnose();
                 HrText.Text = ok
                     ? "route: " + route
-                      + (RustRenderer.OtStep > 0 && RustRenderer.OtStep < 44
-                          ? " · " + RustRenderer.OtStepName : "")
-                    : (RustRenderer.Stage >= 300
-                        ? "offscreen 步: " + RustRenderer.OtStepName
-                          + "  hr=0x" + RustRenderer.LastHr.ToString("X8")
+                    : (RustRenderer.Stage >= 500
+                        ? "surface 步: " + RustRenderer.SisStepName
+                          + "  hr=0x" + RustRenderer.SisHr.ToString("X8")
                           + (RustRenderer.LastHrName.Length > 0 ? " (" + RustRenderer.LastHrName + ")" : "")
-                        : RustRenderer.ScStep > 0
-                            ? "swapchain 步: " + RustRenderer.ScStepName + "  hr=0x" + RustRenderer.LastHr.ToString("X8")
+                        : RustRenderer.Stage >= 300
+                            ? "offscreen 步: " + RustRenderer.OtStepName
+                              + "  hr=0x" + RustRenderer.LastHr.ToString("X8")
                               + (RustRenderer.LastHrName.Length > 0 ? " (" + RustRenderer.LastHrName + ")" : "")
-                            : "");
+                            : RustRenderer.ScStep > 0
+                                ? "swapchain 步: " + RustRenderer.ScStepName + "  hr=0x" + RustRenderer.LastHr.ToString("X8")
+                                  + (RustRenderer.LastHrName.Length > 0 ? " (" + RustRenderer.LastHrName + ")" : "")
+                                : "");
                 SizeText.Text = w + " x " + h + " px  (scale " + scale.ToString("0.00") + ")"
-                    + (ok ? "  · composite=" + (presented ? "yes" : "no") : "");
+                    + (ok ? "  · attach=" + (presented ? "yes" : "no") : "");
                 if (!ok)
                 {
                     // Do not attach the frame loop to a renderer that never came up.
@@ -226,105 +230,66 @@ namespace Phirura
         }
 
         /// <summary>
-        /// Hand the WinRT <c>IDirect3DSurface</c>/<c>IDirect3DDevice</c> pair that Rust created to
-        /// the XAML compositor. **Must run on the UI thread** - it touches XAML.
+        /// Hand the WinRT <c>SurfaceImageSource</c> that Rust created to XAML. **Must run on the UI
+        /// thread** - it touches XAML.
         ///
-        /// This is the one place C# touches the render target, and it does <em>not</em> own it:
-        /// Rust created the device, the offscreen texture and the surface, and keeps ownership. C#
-        /// only carries the two raw <c>IInspectable*</c>s into the compositor, using Win2D purely
-        /// as a <b>projector + blitter</b>:
+        /// This is the entire C# involvement in presentation: one <c>IInspectable*</c> is projected
+        /// back to a managed object and assigned to an <see cref="Image"/>'s <c>Source</c>. The
+        /// projection round-trips to <c>Windows.UI.Xaml.Media.Imaging.SurfaceImageSource</c>, which
+        /// <b>is</b> a <c>Windows.UI.Xaml.Media.ImageSource</c> - verified with
+        /// <c>tools/probe_api.py --file t_sis1.cs</c>, which compiled
+        /// <c>img.Source = new SurfaceImageSource(64, 64);</c> against the real WP8.1 reference set.
         ///
-        ///   <c>IDirect3DDevice*</c>  -> <c>CanvasDevice</c>   (satisfies Win2D's "has a device" rule)
-        ///   <c>IDirect3DSurface*</c> -> <c>CanvasBitmap</c>   (wraps Rust's texture; no copy)
-        ///   <c>CanvasImageSource</c> sized to the panel, then one <c>DrawImage</c> per frame
-        ///
-        /// Every signature here was verified against the vendored Win2D winmd with
-        /// <c>tools/probe_api.py</c> - including the fact that the interop types live in
-        /// <c>Microsoft.Graphics.Canvas.DirectX.Direct3D11</c>, because <b><c>Windows.Graphics.DirectX</c>
-        /// does not exist in the WP8.1 C# reference set at all</b> (CS0234 on every type in it).
-        ///
-        /// Nothing here creates a device, a texture or a swapchain - that is all Rust's, which is
-        /// what keeps this Path A and not a C# renderer with a Rust backend.
+        /// Nothing here creates a device, a texture, a swapchain, a Win2D object or a blit. Rust
+        /// owns the device, the surface and every draw call; the compositor reads the surface Rust
+        /// draws into, because that surface <em>is</em> part of the compositor's own render target.
+        /// That is what keeps this Path A and not a C# renderer with a Rust backend.
         /// </summary>
-        private bool AttachInteropSurface(uint pixelWidth, uint pixelHeight)
+        private bool AttachSurfaceSource(uint pixelWidth, uint pixelHeight)
         {
-            IntPtr surface = RustRenderer.GfxSurface;
-            IntPtr device = RustRenderer.GfxDevice;
-            if (surface == IntPtr.Zero || device == IntPtr.Zero)
+            IntPtr source = RustRenderer.SisSource;
+            if (source == IntPtr.Zero)
             {
-                AppLog.WriteSync("RustStage1: interop pointers null (surface=0x"
-                    + surface.ToInt32().ToString("X8") + " device=0x"
-                    + device.ToInt32().ToString("X8") + ")");
+                AppLog.WriteSync("RustStage1: sis source pointer null");
                 return false;
             }
             try
             {
-                // Raw IInspectable*s -> managed RCWs. GetObjectForIUnknown performs the QI.
-                var winrtDevice = (Microsoft.Graphics.Canvas.DirectX.Direct3D11.IDirect3DDevice)
-                    Marshal.GetObjectForIUnknown(device);
-                var winrtSurface = (Microsoft.Graphics.Canvas.DirectX.Direct3D11.IDirect3DSurface)
-                    Marshal.GetObjectForIUnknown(surface);
+                // Raw IInspectable* -> managed RCW. The runtime QIs and projects it.
+                object obj = Marshal.GetObjectForIUnknown(source);
+                AppLog.WriteSync("RustStage1: sis source projects to "
+                    + (obj == null ? "(null)" : obj.GetType().FullName));
 
-                // Win2D wraps *Rust's* device and *Rust's* texture - it does not allocate either.
-                _canvasDevice = Microsoft.Graphics.Canvas.CanvasDevice.CreateFromDirect3D11Device(winrtDevice);
-                _canvasBitmap = Microsoft.Graphics.Canvas.CanvasBitmap.CreateFromDirect3D11Surface(
-                    _canvasDevice, winrtSurface, 96.0f);
+                var imageSource = obj as ImageSource;
+                if (imageSource == null)
+                {
+                    AppLog.WriteSync("RustStage1: sis source is not an ImageSource");
+                    return false;
+                }
 
-                // A CanvasImageSource is an ImageSource, and XAML blits it for us. It needs a size
-                // in DIPs; at 96 dpi that is the pixel size, which is what Rust rendered at.
-                _imageSource = new Microsoft.Graphics.Canvas.UI.Xaml.CanvasImageSource(
-                    _canvasDevice, (float)pixelWidth, (float)pixelHeight, 96.0f);
-
-                RustImage.Width = pixelWidth;
-                RustImage.Height = pixelHeight;
-                RustImage.Source = _imageSource;
+                // No Width/Height to set: a SurfaceImageSource already knows its pixel size
+                // (Rust created it at exactly this size), and XAML sizes the Image from that.
+                RustImage.Source = imageSource;
                 RustImage.Visibility = Visibility.Visible;
 
-                // One blit so the very first frame is visible even before CompositionTarget ticks.
-                BlitToImageSource();
-
-                AppLog.WriteSync("RustStage1: compositor source set ("
-                    + _canvasBitmap.SizeInPixels.Width + "x" + _canvasBitmap.SizeInPixels.Height
-                    + ", image " + pixelWidth + "x" + pixelHeight + ")");
+                AppLog.WriteSync("RustStage1: compositor source set (image "
+                    + pixelWidth + "x" + pixelHeight + ")");
                 return true;
             }
             catch (Exception ex)
             {
-                AppLog.WriteSync("RustStage1: interop attach threw", ex);
+                AppLog.WriteSync("RustStage1: surface attach threw", ex);
                 return false;
-            }
-        }
-
-        private Microsoft.Graphics.Canvas.CanvasDevice _canvasDevice;
-        private Microsoft.Graphics.Canvas.CanvasBitmap _canvasBitmap;
-        private Microsoft.Graphics.Canvas.UI.Xaml.CanvasImageSource _imageSource;
-
-        /// <summary>
-        /// Copy Rust's current render target into the <c>CanvasImageSource</c> XAML displays.
-        ///
-        /// This is a GPU-to-GPU blit inside the compositor's own device chain: the source is the
-        /// <c>CanvasBitmap</c> wrapping Rust's <c>ID3D11Texture2D</c>, the destination is the
-        /// <c>CanvasImageSource</c> XAML owns. No pixels come back to the CPU, and no draw state
-        /// from Rust is touched. UI thread only.
-        /// </summary>
-        private void BlitToImageSource()
-        {
-            if (_imageSource == null || _canvasBitmap == null)
-            {
-                return;
-            }
-            using (var ds = _imageSource.CreateDrawingSession(Windows.UI.Colors.Black))
-            {
-                ds.DrawImage(_canvasBitmap);
             }
         }
 
         /// <summary>
         /// One frame. Clear -> one test quad -> present, all inside Rust.
         ///
-        /// Kept on the UI thread on purpose: the pixels are composited by XAML, and touching a
-        /// XAML-owned surface's producing device off the UI thread is not something WP8.1
-        /// guarantees. The work per frame is three native calls, so this is cheap.
+        /// Kept on the UI thread on purpose: the pixels are composited by XAML, and XAML's
+        /// <c>SurfaceImageSource</c> is a UI-thread object, so the <c>BeginDraw</c>/<c>EndDraw</c>
+        /// pair Rust drives must happen on the thread that owns it. The work per frame is three
+        /// native calls, so this is cheap.
         /// </summary>
         private void OnFrame(object sender, object e)
         {
@@ -333,15 +298,12 @@ namespace Phirura
                 return;
             }
 
+            // `draw_test_quad` is the whole frame on this route: BeginDraw, draw, EndDraw. There is
+            // no blit afterwards because there is nothing to blit *to* - EndDraw is what publishes.
             if (!RustRenderer.DrawTestFrame())
             {
                 return;
             }
-
-            // Rust has just cleared + drawn into its offscreen texture; make the compositor show
-            // that texture. This is the "present" step on the offscreen route - Rust's own
-            // wp81_rs_present() is a no-op here because there is no swapchain to present to.
-            BlitToImageSource();
 
             _frames++;
             VertsText.Text = "vertices = " + RustRenderer.LastVertexCount;
@@ -398,10 +360,10 @@ namespace Phirura
                 _hookAttached = false;
             }
             _clock.Reset();
-            // Drop the compositor's reference to Rust's surface before the native side releases it,
-            // so the compositor cannot be left holding a freed texture. Order matters: the XAML
-            // Image lets go of the CanvasImageSource first, then the CanvasBitmap that wraps Rust's
-            // texture, and only then does Rust free the texture itself (RustRenderer.Stop below).
+            // Drop XAML's reference to Rust's SurfaceImageSource before the native side releases it,
+            // so the compositor cannot be left holding a freed surface. There is no Win2D object in
+            // the chain any more - on this route the surface *is* the compositor's render target, so
+            // clearing Image.Source is the whole hand-back.
             try
             {
                 if (RustImage != null)
@@ -411,18 +373,6 @@ namespace Phirura
                 }
             }
             catch (Exception) { }
-            _imageSource = null;
-            if (_canvasBitmap != null)
-            {
-                try { _canvasBitmap.Dispose(); } catch (Exception) { }
-                _canvasBitmap = null;
-            }
-            if (_canvasDevice != null)
-            {
-                // Do NOT Dispose() this - it wraps Rust's device, and disposing it would release a
-                // device Rust still owns. Dropping the reference is all that is correct here.
-                _canvasDevice = null;
-            }
             RustRenderer.Stop();
         }
     }

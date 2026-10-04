@@ -151,9 +151,145 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_rs_interop_trace(int i);
 
+        // --- XAML `SurfaceImageSource` route (the corrected Stage 1) -------------------------
+        //
+        // Rounds 45-47 established, on the device, that neither a swapchain nor the D3D/WinRT
+        // interop helpers are reachable from a WP8.1 phone app:
+        //
+        //   * `CreateSwapChainForCoreWindow` and `CreateSwapChainForComposition` both answer
+        //     `DXGI_ERROR_INVALID_CALL` for every documented argument shape on the Adreno 225 /
+        //     WDDM 1.2 / FL 9.3 driver;
+        //   * `CreateDirect3D11SurfaceFromDXGISurface` cannot be resolved at all - the loader probe
+        //     logged `interop-trace=winrt{h=0,exp=0} d3d11{h=1,exp=0}`, i.e. `winrt.dll` will not
+        //     load from an app container and `d3d11.dll` does not export the helper.
+        //
+        // What *is* reachable is the WinRT activation API set (`RoGetActivationFactory`, imported
+        // from `runtimeobject.lib`, the same one Win2D uses). That is enough for XAML's own
+        // `SurfaceImageSource`: its native interface `ISurfaceImageSourceNative` is obtained by a
+        // plain `QueryInterface` - no interop helper - and its `BeginDraw` hands back an
+        // `IDXGISurface*` that lives inside the compositor's own render target. Drawing into it
+        // *is* presenting, so there is no swapchain, no offscreen texture and no per-frame blit.
+        //
+        // Rust still owns the device, the surface, the shaders and every draw call. C# receives one
+        // `IInspectable*` and assigns it to a XAML `Image.Source`, because XAML cannot be driven
+        // from native code without a C#/C++ object to hang it on.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_start_surface(uint width, uint height);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr wp81_rs_sis_source();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_sis_step();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr wp81_rs_sis_step_name();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_rs_sis_hr();
+
         private static bool _started;
 
         public static bool Started { get { return _started; } }
+
+        /// <summary>
+        /// Bring the Rust renderer up on the **XAML `SurfaceImageSource`** route - the present path
+        /// that actually works on a WP8.1 phone.
+        ///
+        /// Rust creates the device, activates the WinRT `SurfaceImageSource`, QIs
+        /// `ISurfaceImageSourceNative` and calls `SetDevice`, then builds the full pipeline. The
+        /// <c>IInspectable*</c> to show is read back with <see cref="SisSource"/>.
+        ///
+        /// Runs the native call on the calling thread; the page calls it from a pool thread so the
+        /// UI thread stays alive to flush the log if a native step hard-faults.
+        /// </summary>
+        public static bool StartSurface(uint pixelWidth, uint pixelHeight)
+        {
+            if (_started)
+            {
+                return true;
+            }
+            try
+            {
+                AppLog.WriteSync("RustRenderer.StartSurface: calling native " + pixelWidth + "x" + pixelHeight);
+                int rc;
+                try
+                {
+                    rc = wp81_rs_start_surface(pixelWidth, pixelHeight);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.WriteSync("RustRenderer.StartSurface: native threw", ex);
+                    return false;
+                }
+
+                AppLog.WriteSync("RustRenderer.StartSurface: native returned rc=" + rc
+                    + " tick=" + Tick + " (" + TickName + ")");
+                if (rc != 0)
+                {
+                    AppLog.WriteSync("RustRenderer.StartSurface: failed rc=" + rc + " " + Diagnose());
+                    return false;
+                }
+
+                AppLog.WriteSync("RustRenderer.StartSurface: up. route=" + Route
+                    + " source=0x" + SisSource.ToInt32().ToString("X8"));
+                _started = true;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                AppLog.WriteSync("RustRenderer.StartSurface: FAILED", ex);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// The WinRT <c>SurfaceImageSource*</c> (an <c>IInspectable</c>, and a
+        /// <c>Windows.UI.Xaml.Media.ImageSource</c>) the compositor must display. Only valid while
+        /// the surface route is up; Rust keeps ownership, so callers must NOT release it.
+        /// </summary>
+        public static IntPtr SisSource
+        {
+            get
+            {
+                try { return wp81_rs_sis_source(); }
+                catch (Exception) { return IntPtr.Zero; }
+            }
+        }
+
+        /// <summary>Raw `SurfaceImageSource` sub-step code (500+n), 0 if that route never ran.</summary>
+        public static int SisStep
+        {
+            get
+            {
+                try { return wp81_rs_sis_step(); }
+                catch (Exception) { return 0; }
+            }
+        }
+
+        /// <summary>The failing `SurfaceImageSource` call by name, e.g. "surface: SetDevice".</summary>
+        public static string SisStepName
+        {
+            get
+            {
+                try
+                {
+                    IntPtr p = wp81_rs_sis_step_name();
+                    return p == IntPtr.Zero ? "(null)" : Marshal.PtrToStringAnsi(p);
+                }
+                catch (Exception) { return "(unavailable)"; }
+            }
+        }
+
+        /// <summary>The HRESULT recorded alongside <see cref="SisStep"/>.</summary>
+        public static int SisHr
+        {
+            get
+            {
+                try { return wp81_rs_sis_hr(); }
+                catch (Exception) { return 0; }
+            }
+        }
 
         /// <summary>
         /// Bring the Rust renderer up on the **offscreen + WinRT-interop** route - the one that
@@ -204,7 +340,7 @@ namespace Phirura
             }
         }
 
-        /// <summary>Which route came up: 0 = swapchain (composition), 1 = offscreen+interop, 2 = CoreWindow, -1 = none.</summary>
+        /// <summary>Which route came up: 0 = swapchain (composition), 1 = offscreen+interop, 2 = CoreWindow, 3 = XAML SurfaceImageSource, -1 = none.</summary>
         public static int Route
         {
             get
@@ -224,6 +360,7 @@ namespace Phirura
                     case 0: return "swapchain";
                     case 1: return "offscreen";
                     case 2: return "corewindow";
+                    case 3: return "surfaceimagesource";
                     default: return "(none)";
                 }
             }
@@ -484,9 +621,15 @@ namespace Phirura
             string s = "stage=" + stage + " hr=0x" + hr.ToString("X8")
                 + (name.Length > 0 ? " (" + name + ")" : "")
                 + " tick=" + Tick + " (" + TickName + ")";
-            // Stage codes >= 300 come from the offscreen route (OT_BASE + sub-step); 100..199 from
-            // the swapchain route. Report whichever produced the code so the log names the call.
-            if (stage >= 300)
+            // Stage codes >= 500 come from the SurfaceImageSource route (SIS_BASE + sub-step), 300+
+            // from the offscreen route (OT_BASE + sub-step), 100..199 from the swapchain route.
+            // Report whichever produced the code so the log names the call.
+            if (stage >= 500)
+            {
+                s += "  surface-step=" + SisStepName + " (code " + SisStep + ")"
+                    + " surface-hr=0x" + SisHr.ToString("X8");
+            }
+            else if (stage >= 300)
             {
                 s += "  offscreen-step=" + OtStepName + " (code " + OtStep + ")";
             }

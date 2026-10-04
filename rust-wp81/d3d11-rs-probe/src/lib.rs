@@ -33,10 +33,12 @@
 
 pub mod direct;
 pub mod renderer;
+pub mod surface_source;
 
 use core::ffi::c_void;
 use direct::*;
 use renderer::*;
+use surface_source::*;
 
 // ===========================================================================
 // global state
@@ -58,8 +60,20 @@ struct State {
     gfx_surface: ComPtr,
     /// The WinRT `IDirect3DDevice` wrapping our D3D11 device, for the compositor.
     gfx_device: ComPtr,
-    /// Which route came up: 0 = swapchain (composition), 1 = offscreen+interop, 2 = CoreWindow.
+    /// Which route came up: 0 = swapchain (composition), 1 = offscreen+interop, 2 = CoreWindow,
+    /// 3 = XAML `SurfaceImageSource`.
     route: i32,
+    /// The XAML `SurfaceImageSource` chain — route 3, the WP8.1 phone present path.
+    surface: SurfaceChain,
+    /// `(step, hresult)` from the `SurfaceImageSource` path.
+    sis_trace: [i32; 2],
+    /// `IDXGIDevice` handed to `ISurfaceImageSourceNative::SetDevice`, held for the route's life.
+    dxgi_device: ComPtr,
+    /// The worst status of the last `wp81_rs_draw_test_quad` on route 3 (0 = the frame drew).
+    ///
+    /// Kept so `wp81_rs_present` can report the frame's real outcome instead of a blanket success
+    /// after the draw has already closed the frame with `EndDraw`.
+    frame_err: i32,
     /// The white 1x1 texture the Stage 1 acceptance test samples.
     test_tex: ComPtr,
     test_srv: ComPtr,
@@ -101,6 +115,10 @@ static mut STATE: State = State {
     gfx_surface: ComPtr::NULL,
     gfx_device: ComPtr::NULL,
     route: -1,
+    surface: SurfaceChain::EMPTY,
+    sis_trace: [0, 0],
+    dxgi_device: ComPtr::NULL,
+    frame_err: 0,
     test_tex: ComPtr::NULL,
     test_srv: ComPtr::NULL,
     pipeline: None,
@@ -479,6 +497,166 @@ pub unsafe extern "C" fn wp81_rs_start_offscreen(width: u32, height: u32) -> i32
     bump(s, 99);
     s.stage = 0;
     0
+}
+
+/// Bring up the renderer on the **XAML `SurfaceImageSource` route** — the real WP8.1 phone present
+/// path, and the one that needs no D3D interop helper.
+///
+/// This supersedes [`wp81_rs_start_offscreen`]. That route had to project an
+/// `IDXGISurface` to a WinRT `IDirect3DSurface` with `CreateDirect3D11SurfaceFromDXGISurface`, and
+/// on device that helper is unreachable: the loader probe logged
+/// `interop-trace=winrt{h=0,exp=0} d3d11{h=1,exp=0}`, i.e. `winrt.dll` cannot be loaded from an app
+/// container and `d3d11.dll` does not export it, and Win2D's own import table shows it never uses
+/// the helper either.
+///
+/// `SurfaceImageSource` needs none of that. It is a XAML type, so a plain
+/// `RoGetActivationFactory` — the API set an app container *is* allowed to load, and the one Win2D
+/// itself imports — reaches it, and its native interface `ISurfaceImageSourceNative` is obtained by
+/// an ordinary `QueryInterface`. Its `BeginDraw` then returns an `IDXGISurface*` that lives inside
+/// the compositor's own render target, so drawing into it *is* presenting:
+///
+///   * no swapchain (which this driver does not implement for phone apps),
+///   * no interop helper (which is unreachable from an app),
+///   * no full-screen offscreen texture, and no per-frame blit through C#.
+///
+/// Returns 0 on success; otherwise the stage code, with `wp81_rs_sis_step()` naming the failing call
+/// and `wp81_rs_last_hr()` the HRESULT.
+///
+/// The caller must read the `SurfaceImageSource` `IInspectable*` with [`wp81_rs_sis_source`] and
+/// assign it to a XAML `Image.Source` (it is a `Windows.UI.Xaml.Media.ImageSource`). Rust owns the
+/// device, the surface and every draw call; XAML only displays.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_start_surface(width: u32, height: u32) -> i32 {
+    let s = st();
+    release_all(s);
+    reset_sc_hrs();
+    s.width = width;
+    s.height = height;
+    s.limit = 0;
+    s.reached = 0;
+
+    bump(s, 2); // create_device
+    let (device, context, level, _desc) = match create_device() {
+        Some(v) => v,
+        None => {
+            s.stage = 1;
+            return 1;
+        }
+    };
+    s.device = device;
+    s.context = context;
+    s.last_hr = 0;
+    let _ = level;
+
+    // The XAML surface needs the device's DXGI side for `SetDevice`.
+    bump(s, 285); // surface: QueryInterface(IDXGIDevice)
+    let mut dxgi_device = ComPtr::NULL;
+    let hr = device.query_interface(
+        &IID_IDXGIDEVICE as *const Guid,
+        &mut dxgi_device.vtbl as *mut _ as *mut *mut c_void,
+    );
+    if hr < 0 || dxgi_device.is_null() {
+        s.last_hr = hr;
+        s.sis_trace[0] = SIS_QI_DXGIDEVICE;
+        s.sis_trace[1] = hr;
+        s.stage = SIS_BASE + SIS_QI_DXGIDEVICE;
+        return 2;
+    }
+    s.dxgi_device = dxgi_device;
+
+    // Activate the WinRT class, create the instance, QI the native interface.
+    bump(s, 286); // surface: activate + create + QI native
+    let mut chain = match SurfaceChain::create(width as i32, height as i32, true) {
+        Ok(c) => c,
+        Err((step, hr)) => {
+            s.sis_trace[0] = step;
+            s.sis_trace[1] = hr;
+            s.last_hr = hr;
+            s.stage = SIS_BASE + step;
+            return 3;
+        }
+    };
+
+    bump(s, 287); // surface: SetDevice
+    let hr = chain.set_device(dxgi_device.vtbl as *mut c_void);
+    if hr < 0 {
+        chain.release_all();
+        s.sis_trace[0] = SIS_SET_DEVICE;
+        s.sis_trace[1] = hr;
+        s.last_hr = hr;
+        s.stage = SIS_BASE + SIS_SET_DEVICE;
+        return 4;
+    }
+
+    bump(s, 30); // build_pipeline
+    let pipeline = match build_pipeline(device, context) {
+        Some(p) => p,
+        None => {
+            chain.release_all();
+            s.stage = 5;
+            return 5;
+        }
+    };
+
+    bump(s, 40); // create_test_texture
+    if !create_test_texture(device, s) {
+        s.pipeline = Some(pipeline);
+        chain.release_all();
+        s.stage = 6;
+        return 6;
+    }
+    s.pipeline = Some(pipeline);
+    s.surface = chain;
+
+    s.route = 3; // XAML SurfaceImageSource
+    bump(s, 99);
+    s.stage = 0;
+    0
+}
+
+/// The `SurfaceImageSource` `IInspectable*` C# must assign to a XAML `Image.Source`.
+///
+/// It is a `Windows.UI.Xaml.Media.ImageSource`, so the C# side can cast it directly after a
+/// `Marshal.GetObjectForIUnknown`. Null unless the `SurfaceImageSource` route came up.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_sis_source() -> *mut c_void {
+    st().surface.source_inspectable.vtbl as *mut c_void
+}
+
+/// The step code the `SurfaceImageSource` bring-up failed at (0 = it did not fail).
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_sis_step() -> i32 {
+    st().sis_trace[0]
+}
+
+/// The HRESULT recorded alongside [`wp81_rs_sis_step`].
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_sis_hr() -> i32 {
+    st().sis_trace[1]
+}
+
+/// English name of the `wp81_rs_sis_step()` code, for the phone log.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_sis_step_name() -> *const u8 {
+    match st().sis_trace[0] {
+        SIS_OK => b"surface: OK\0".as_ptr(),
+        SIS_ACTIVATION_FACTORY => {
+            b"surface: RoGetActivationFactory(Windows.UI.Xaml.Media.Imaging.SurfaceImageSource)\0".as_ptr()
+        }
+        SIS_CREATE_INSTANCE => {
+            b"surface: ISurfaceImageSourceFactory::CreateInstanceWithDimensionsAndOpacity\0".as_ptr()
+        }
+        SIS_QI_NATIVE => {
+            b"surface: QueryInterface(IID_ISurfaceImageSourceNative)\0".as_ptr()
+        }
+        SIS_SET_DEVICE => b"surface: ISurfaceImageSourceNative::SetDevice\0".as_ptr(),
+        SIS_BEGIN_DRAW => b"surface: ISurfaceImageSourceNative::BeginDraw\0".as_ptr(),
+        SIS_END_DRAW => b"surface: ISurfaceImageSourceNative::EndDraw\0".as_ptr(),
+        SIS_QI_SURFACE => b"surface: QueryInterface(IID_IDXGISurface) on the BeginDraw surface\0".as_ptr(),
+        SIS_CREATE_RTV => b"surface: CreateRenderTargetView on the BeginDraw surface\0".as_ptr(),
+        SIS_QI_DXGIDEVICE => b"surface: QueryInterface(IID_IDXGIDevice) on our device\0".as_ptr(),
+        _ => b"\0".as_ptr(),
+    }
 }
 
 /// Added to the raw offscreen step (40..46) so `stage` cannot collide with the 1..6 start-up codes.
@@ -1026,6 +1204,14 @@ unsafe fn create_test_texture(device: ComPtr, s: &mut State) -> bool {
 #[no_mangle]
 pub unsafe extern "C" fn wp81_rs_clear(r: f32, g: f32, b: f32, a: f32) -> i32 {
     let s = st();
+    if s.route == 3 {
+        // The compositor presents the finished surface, but a failed BeginDraw is a real error and
+        // must not be reported as a clean frame.
+        if s.surface.in_frame {
+            return -2;
+        }
+        return s.frame_err;
+    }
     if s.rtv.is_null() {
         return -1;
     }
@@ -1051,6 +1237,56 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
     let ctx = s.context;
     // `set_tick` (not `bump(s, ..)`) because `p` holds an immutable borrow of `s.pipeline` here.
     set_tick(60); // frame: Map(constant buffer) + Map(vertex buffer) + bind + Draw(4)
+
+    // ---- open the compositor's frame, and target the surface it hands back -----------------
+    //
+    // On route 1 (offscreen) we draw into our own texture. On route 3 (XAML SurfaceImageSource)
+    // `BeginDraw` hands back an `IDXGISurface` that lives inside the compositor's own render
+    // target, and drawing into it *is* presenting. Everything after this block is identical.
+    let mut rt = s.rtv.vtbl as *mut c_void;
+    let mut viewport = [0.0f32, 0.0f32, s.width as f32, s.height as f32];
+    if s.route == 3 {
+        if s.surface.native.is_null() {
+            s.frame_err = -1;
+            return -1;
+        }
+        s.frame_err = 0;
+        if let Err((step, hr)) = s.surface.begin_draw() {
+            s.sis_trace[0] = step;
+            s.sis_trace[1] = hr;
+            s.last_hr = hr;
+            s.frame_err = -2;
+            return -2;
+        }
+        if s.surface.frame_rtv.is_null() {
+            let dev: extern "system" fn(*mut c_void, *mut c_void, *const c_void, *mut *mut c_void)
+                -> HRESULT = s.device.method(D3D11DEVICE_CREATERENDERTARGETVIEW);
+            let mut rtv = ComPtr::NULL;
+            let hr = dev(
+                s.device.vtbl as *mut c_void,
+                s.surface.frame_surface.vtbl as *mut c_void,
+                core::ptr::null(),
+                &mut rtv.vtbl as *mut _ as *mut *mut c_void,
+            );
+            if hr < 0 || rtv.is_null() {
+                s.surface.end_draw();
+                s.sis_trace[0] = SIS_CREATE_RTV;
+                s.sis_trace[1] = hr;
+                s.last_hr = hr;
+                s.frame_err = -3;
+                return -3;
+            }
+            s.surface.frame_rtv = rtv;
+        }
+        rt = s.surface.frame_rtv.vtbl as *mut c_void;
+        // The offset is where the compositor parked this frame inside the source's own atlas. A
+        // renderer that ignores it draws into the wrong place as soon as XAML returns a sub-rect.
+        let off = s.surface.frame_offset;
+        viewport = [off.x as f32, off.y as f32, s.width as f32, s.height as f32];
+    } else if s.rtv.is_null() {
+        s.frame_err = -1;
+        return -1;
+    }
 
     // ---- upload the projection (one float4x4) ----
     let map: extern "system" fn(
@@ -1116,8 +1352,14 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
     // ---- bind ----
     let set_rt: extern "system" fn(*mut c_void, UINT, *const *mut c_void, *mut c_void) =
         ctx.method(D3D11CONTEXT_OMSETRENDERTARGETS);
-    let rt = s.rtv.vtbl as *mut c_void;
     set_rt(ctx.vtbl as *mut c_void, 1, &rt, core::ptr::null_mut());
+
+    // XAML may hand back a sub-rectangle of the source, so the viewport has to move with it.
+    if s.route == 3 {
+        let set_vp: extern "system" fn(*mut c_void, UINT, *const f32) =
+            ctx.method(D3D11CONTEXT_RSSETVIEWPORTS);
+        set_vp(ctx.vtbl as *mut c_void, 1, viewport.as_ptr());
+    }
 
     let set_layout: extern "system" fn(*mut c_void, *mut c_void) =
         ctx.method(D3D11CONTEXT_IASETINPUTLAYOUT);
@@ -1168,6 +1410,21 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
     let draw: extern "system" fn(*mut c_void, UINT, UINT) = ctx.method(D3D11CONTEXT_DRAW);
     draw(ctx.vtbl as *mut c_void, 4, 0);
     s.vertex_count = 4;
+
+    // ---- hand the finished frame back to the compositor ----------------------------------
+    //
+    // `EndDraw` is what publishes it. Doing it here (rather than in `wp81_rs_present`) keeps the
+    // frame one balanced pair per call, and lets `present` stay an honest no-op on this route.
+    if s.route == 3 {
+        let hr = s.surface.end_draw();
+        if hr < 0 {
+            s.sis_trace[0] = SIS_END_DRAW;
+            s.sis_trace[1] = hr;
+            s.last_hr = hr;
+            s.frame_err = -4;
+            return -4;
+        }
+    }
     0
 }
 
@@ -1183,6 +1440,12 @@ pub unsafe extern "C" fn wp81_rs_present() -> i32 {
         }
         bump(s, 61); // frame finished (compositor owns presentation)
         return 0;
+    }
+    // XAML `SurfaceImageSource`: `wp81_rs_draw_test_quad` already closed the frame with `EndDraw`,
+    // which is what publishes it. Report the frame's own status rather than pretending success.
+    if s.route == 3 {
+        bump(s, 61); // frame finished (compositor owns presentation)
+        return s.frame_err;
     }
     if s.swapchain.is_null() {
         return -1;
@@ -1215,6 +1478,8 @@ unsafe fn release_all(s: &mut State) {
     s.test_tex.release();
     s.rtv.release();
     s.rt_tex.release();
+    s.surface.release_all();
+    s.dxgi_device.release();
     s.gfx_surface.release();
     s.gfx_device.release();
     s.swapchain.release();
@@ -1224,6 +1489,7 @@ unsafe fn release_all(s: &mut State) {
     s.test_tex = ComPtr::NULL;
     s.rtv = ComPtr::NULL;
     s.rt_tex = ComPtr::NULL;
+    s.dxgi_device = ComPtr::NULL;
     s.gfx_surface = ComPtr::NULL;
     s.gfx_device = ComPtr::NULL;
     s.swapchain = ComPtr::NULL;

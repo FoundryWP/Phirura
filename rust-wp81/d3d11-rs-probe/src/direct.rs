@@ -482,46 +482,126 @@ extern "system" {
 }
 
 // ===========================================================================
+// WinRT activation — how an *app* reaches the WinRT runtime
+// ===========================================================================
+//
+// `runtimeobject.lib` ships in the WP8.1 kit and imports these from the API sets an app container
+// is allowed to load (`api-ms-win-core-winrt-l1-1-0.dll`, `...-string-l1-1-0.dll`). This is the
+// same mechanism Win2D's own ARM DLL uses. On desktop `runtimeobject.lib` does not exist under
+// that name; `hostcheck` therefore links `RoGetActivationFactory`/`WindowsCreateString` from
+// `combase.lib`, which carries identical names.
+
+extern "system" {
+    /// `RoGetActivationFactory(HSTRING classId, REFIID iid, void** factory)`.
+    ///
+    /// The class name must be a WinRT `HSTRING`, which is why [`hstring`] exists - a plain
+    /// NUL-terminated `u16*` is *not* an `HSTRING` and passing one is a callback into the
+    /// `HSTRING` header word, which is a hard fault rather than an error return.
+    pub fn RoGetActivationFactory(
+        activatable_class_id: *mut c_void,
+        iid: *const Guid,
+        factory: *mut *mut c_void,
+    ) -> HRESULT;
+
+    /// `WindowsCreateString(LPCWSTR sourceString, UINT32 length, HSTRING* string)`.
+    pub fn WindowsCreateString(
+        source_string: *const u16,
+        length: u32,
+        string: *mut *mut c_void,
+    ) -> HRESULT;
+
+    /// `WindowsDeleteString(HSTRING string)`.
+    pub fn WindowsDeleteString(string: *mut c_void) -> HRESULT;
+}
+
+/// A WinRT string, as the `HSTRING` opaque handle.
+pub type HSTRING = *mut c_void;
+
+/// Build an `HSTRING` from a compile-time UTF-16 literal, run `f`, then free it.
+///
+/// Wrapping the create/delete in one place means a failure to create cannot leak, and no caller
+/// has to remember `WindowsDeleteString`. `f` receives the handle and returns the callee's
+/// `HRESULT`.
+pub unsafe fn with_hstring<T>(
+    literal: &[u16],
+    f: impl FnOnce(HSTRING) -> T,
+) -> Result<T, HRESULT> {
+    // A WinRT string literal is stored without its trailing NUL; passing the NUL as part of the
+    // length makes the class name "Foo\0", which `RoGetActivationFactory` rejects with
+    // `E_INVALIDARG` (0x80070057) rather than "class not registered".
+    let len = literal.len() as u32;
+    let mut hs: HSTRING = core::ptr::null_mut();
+    let hr = WindowsCreateString(literal.as_ptr(), len, &mut hs);
+    if hr < 0 || hs.is_null() {
+        return Err(hr);
+    }
+    let out = f(hs);
+    WindowsDeleteString(hs);
+    Ok(out)
+}
+
+/// Run `f` with an `HSTRING` for `literal`, **including** the trailing NUL in the length.
+///
+/// Used only for `RoActivateInstance`, where the kit's own samples pass `ARRAYSIZE(name)` on a
+/// NUL-terminated `WCHAR[]`. Kept separate from [`with_hstring`] so the two conventions are
+/// explicit rather than one function guessing.
+pub unsafe fn with_hstring_nul<T>(
+    literal: &[u16],
+    f: impl FnOnce(HSTRING) -> T,
+) -> Result<T, HRESULT> {
+    let mut hs: HSTRING = core::ptr::null_mut();
+    let hr = WindowsCreateString(literal.as_ptr(), literal.len() as u32, &mut hs);
+    if hr < 0 || hs.is_null() {
+        return Err(hr);
+    }
+    let out = f(hs);
+    WindowsDeleteString(hs);
+    Ok(out)
+}
+
+// ===========================================================================
 // DXGI <-> WinRT interop — the WP8.1 phone render path
 // ===========================================================================
 //
 // A WP8.1 *phone* app does not present through a swapchain. `CreateSwapChainForCoreWindow` and
 // `CreateSwapChainForComposition` both answer `DXGI_ERROR_INVALID_CALL` for every documented
-// argument shape on the Adreno 225 / FL 9.3 driver (proven exhaustively on device — see
-// `PLAN-PATH-A.md`, Round 45). The `SwapChainPanel` mechanism is the desktop-class Windows 8.1
-// path; the phone path is these two interop functions plus the XAML compositor.
+// argument shape on the Adreno 225 / WDDM 1.2 / FL 9.3 driver (proven exhaustively on device —
+// see `PLAN-PATH-A.md`, Round 45). The `SwapChainPanel` mechanism is the desktop-class Windows 8.1
+// path. The phone path is the **XAML `SurfaceImageSource`** pair of interfaces:
 //
-// **They cannot be linked.** The WP8.1 kit's ARM `d3d11.lib` is a *limited* import library: it
-// carries only `D3D11CreateDevice`, `D3D11CreateDeviceAndSwapChain`, the `D3D11Core*` family and
-// the `D3DKMT*` entries. `CreateDirect3D11DeviceFromDXGIDevice` is **not** among them (verified by
-// scanning the lib's symbol table).
+//     ISurfaceImageSourceNative::SetDevice(IDXGIDevice*)   // slot 3
+//     ISurfaceImageSourceNative::BeginDraw(rect, &surface, &offset)  // slot 4
+//     ISurfaceImageSourceNative::EndDraw()                 // slot 5
 //
-// **Which DLL exports them.** Not `d3d11.dll` on this platform. Win2D's own ARM
-// `Microsoft.Graphics.Canvas.dll` - which renders fine on the Lumia 925 - imports both names from
-// **`winrt.dll`** (found by locating the two name strings and the DLL-name strings in its import
-// table). That is the decisive evidence: on WP8.1 these interop helpers live in the WinRT core
-// DLL, and the `winrt.dll` copy is the one with a working implementation. Resolving them out of
-// `d3d11.dll` found *a* symbol, but it returns E_NOINTERFACE for every surface - which is exactly
-// what the device log showed after the first QI fix.
+// Rust calls `SetDevice` **once** with its own `IDXGIDevice`, then calls `BeginDraw` on every frame:
+// the returned `IDXGISurface*` *is inside the compositor's own render target*, so drawing into it
+// **is** presenting. That removes the whole "large offscreen texture" copy and removes the interop
+// helpers from the picture entirely — the only thing needed is a raw QI for
+// `ISurfaceImageSourceNative`, which every WinRT object answers natively.
 //
-// So the resolution order is `winrt.dll` first, `d3d11.dll` second (desktop Windows keeps them in
-// `d3d11.dll`, so the fallback is what makes this same source run under `hostcheck`).
+// ### Why the old approach was impossible
 //
-// They cannot be *linked* either way: the WP8.1 kit's ARM `d3d11.lib` is a limited import library
-// (only `D3D11CreateDevice`, `D3D11CreateDeviceAndSwapChain`, the `D3D11Core*` family and
-// `D3DKMT*`), and there is no `winrt.lib` in the kit at all. Hence `LoadLibraryExW` +
-// `GetProcAddress`.
+// The earlier design called `CreateDirect3D11SurfaceFromDXGISurface` / `CreateDirect3D11DeviceFromDXGIDevice`
+// resolved through `LoadLibraryExW` + `GetProcAddress`. On device that logged
 //
-// **That pair is safe to import.** The WP8.1 kit's own `WindowsPhoneCore.lib` - which this DLL
-// already links - carries `__IMPORT_DESCRIPTOR_api-ms-win-core-libraryloader-l1-2-0` with exactly
-// `LoadLibraryExW` and `GetProcAddress`. That is the phone kit naming the API set that provides
-// them, so it is platform-guaranteed, not a desktop-only accident. `LoadLibraryExW` on a module
-// the process already has returns the existing handle, so this loads nothing new.
+//     interop-trace=winrt{h=0,exp=0} d3d11{h=1,exp=0}
 //
-// Signatures are from the interop header:
+// i.e. **`winrt.dll` cannot be loaded from an app container (handle 0), and `d3d11.dll` does not
+// export the helper (exp=0)**. A real PE import-table parse of Win2D's ARM DLL then showed Win2D
+// imports only `D3D11CreateDevice` from `d3d11.dll` plus `RoGetActivationFactory` from
+// `api-ms-win-core-winrt-l1-1-0.dll` — no `winrt.dll`, no interop helpers. Neither the WP8.1 kit's
+// ARM `d3d11.lib` nor any other kit lib carries those two helpers. So there is no app-accessible
+// export to find, and the API is simply not reachable that way.
 //
-//     HRESULT CreateDirect3D11DeviceFromDXGIDevice(IDXGIDevice* dxgiDevice, IInspectable** gfxDevice);
-//     HRESULT CreateDirect3D11SurfaceFromDXGISurface(IDXGISurface* dxgiSurface, IInspectable** gfxSurface);
+// ### What an app *can* do
+//
+// `runtimeobject.lib` **is** in the WP8.1 kit and is the sanctioned WinRT entry point. It imports
+// `RoGetActivationFactory` / `RoActivateInstance` from `api-ms-win-core-winrt-l1-1-0.dll` — the
+// very API set Win2D imports. That is the app-accessible path, and it is what `lib.rs` uses to
+// activate the `SurfaceImageSource` WinRT class and QI it for the native interface.
+//
+// The `LoadLibraryExW` declarations below are retained only so `INTEROP_SOURCE`/`INTEROP_TRACE`
+// still report the (failed) legacy probe in the on-device log; nothing calls them any more.
 
 extern "system" {
     fn LoadLibraryExW(lp_lib_file_name: *const u16, h_file: *mut c_void, flags: u32) -> *mut c_void;
@@ -533,7 +613,7 @@ const D3D11_DLL_W: [u16; 10] = [
     0x0064, 0x0033, 0x0064, 0x0031, 0x0031, 0x002E, 0x0064, 0x006C, 0x006C, 0x0000,
 ];
 
-/// `winrt.dll` as UTF-16LE, NUL-terminated. The phone's home for the D3D11/XAML interop helpers.
+/// `winrt.dll` as UTF-16LE, NUL-terminated. Kept only for the legacy trace probe.
 const WINRT_DLL_W: [u16; 10] = [
     0x0077, 0x0069, 0x006E, 0x0072, 0x0074, 0x002E, 0x0064, 0x006C, 0x006C, 0x0000,
 ];
@@ -547,11 +627,10 @@ pub unsafe fn d3d11_export(name: *const u8) -> *mut c_void {
     GetProcAddress(h, name)
 }
 
-/// Resolve a D3D11/XAML interop helper, preferring `winrt.dll` (the phone's implementation).
+/// **Legacy.** Record whether the Direct3D interop helpers are reachable via the loader.
 ///
-/// Tries `winrt.dll` first - that is where Win2D's ARM DLL imports these from on WP8.1 - then
-/// falls back to `d3d11.dll`, which is where they live on desktop Windows. Returns null if neither
-/// module exports the name, and records which one answered in [`INTEROP_SOURCE`].
+/// Returns null on WP8.1 by construction (see the block comment above). Kept so the on-device log
+/// keeps printing the proof that this route is dead, and so `hostcheck` on desktop still resolves.
 pub unsafe fn interop_export(name: *const u8) -> *mut c_void {
     let h = LoadLibraryExW(WINRT_DLL_W.as_ptr(), core::ptr::null_mut(), 0);
     INTEROP_TRACE[0] = if h.is_null() { 0 } else { 1 };
@@ -577,6 +656,10 @@ pub unsafe fn interop_export(name: *const u8) -> *mut c_void {
 }
 
 /// Wrap a DXGI device as the WinRT `IDirect3DDevice` the XAML compositor accepts.
+///
+/// **Not used by the `SurfaceImageSource` route** — that route hands `SetDevice` a plain
+/// `IDXGIDevice*` and needs no projection at all. Retained because `hostcheck` exercises it and it
+/// is the documented desktop path.
 pub unsafe fn create_direct3d11_device_from_dxgi_device(
     dxgi_device: *mut c_void,
     gfx_device: *mut *mut c_void,
@@ -590,6 +673,8 @@ pub unsafe fn create_direct3d11_device_from_dxgi_device(
 }
 
 /// Wrap an offscreen DXGI surface as the WinRT `IDirect3DSurface` the compositor can show.
+///
+/// **Not used by the `SurfaceImageSource` route** — see above.
 pub unsafe fn create_direct3d11_surface_from_dxgi_surface(
     dxgi_surface: *mut c_void,
     gfx_surface: *mut *mut c_void,
@@ -779,6 +864,79 @@ pub const IID_ISWAPCHAINBACKGROUNDPANELNATIVE: Guid = Guid {
 
 /// `ISwapChainBackgroundPanelNative::SetSwapChain`, also slot 3.
 pub const ISWAPCHAINBACKGROUNDPANELNATIVE_SETSWAPCHAIN: usize = 3;
+
+/// `ISurfaceImageSourceNative` (windows.ui.xaml.media.dxinterop.h) — **the WP8.1 phone present path**.
+///
+/// IID from the kit's own header: `f2e9edc1-d307-4525-9886-0fafaa44163c`. Derives straight from
+/// `IUnknown` and has exactly three methods, so the slots are 3, 4, 5:
+///
+///     HRESULT SetDevice(IDXGIDevice* device);                        // slot 3
+///     HRESULT BeginDraw(RECT updateRect, IDXGISurface** surface,
+///                       POINT* offset);                              // slot 4
+///     HRESULT EndDraw();                                             // slot 5
+///
+/// `BeginDraw` returns a surface that *is* inside the compositor's render target, which is why
+/// this route needs no swapchain and no interop helper: drawing into the returned `IDXGISurface`
+/// is presenting. The `RECT` is the update region in **source pixels**, and the returned `POINT`
+/// offset must be added to the viewport (XAML is free to hand back a sub-rectangle of its own
+/// atlas, so a renderer that ignores `offset` draws into the wrong place at some sizes).
+pub const IID_ISURFACEIMAGESOURCENATIVE: Guid = Guid {
+    data1: 0xf2e9_edc1,
+    data2: 0xd307,
+    data3: 0x4525,
+    data4: [0x98, 0x86, 0x0f, 0xaf, 0xaa, 0x44, 0x16, 0x3c],
+};
+
+/// `ISurfaceImageSourceNative::SetDevice` — first method past IUnknown.
+pub const ISURFACEIMAGESOURCENATIVE_SETDEVICE: usize = 3;
+/// `ISurfaceImageSourceNative::BeginDraw`.
+pub const ISURFACEIMAGESOURCENATIVE_BEGINDRAW: usize = 4;
+/// `ISurfaceImageSourceNative::EndDraw`.
+pub const ISURFACEIMAGESOURCENATIVE_ENDDRAW: usize = 5;
+
+/// `Windows.UI.Xaml.Media.Imaging.SurfaceImageSource` as a UTF-16 class name, no trailing NUL.
+///
+/// This is the *runtime class* name `RoGetActivationFactory` takes. It is deliberately a different
+/// string from the interface IID's name (`ISurfaceImageSourceFactory`); passing the interface name
+/// as the class name returns `E_INVALIDARG`.
+///
+/// **The array length is the string length, exactly 48.** [`with_hstring`] passes `literal.len()`
+/// as the `HSTRING` length, so an over-sized array silently asks WinRT for
+/// `"…SurfaceImageSource\0\0\0\0\0\0\0\0"` — which is a *different* class name and comes back
+/// `0x80040154` (class not registered). That is precisely what an early draft did by declaring
+/// `[u16; 56]`; `windows.ui.xaml.media.imaging.idl` line 310 names the class, and 48 is the count.
+pub const SURFACE_IMAGE_SOURCE_RUNTIME_CLASS: [u16; 48] = {
+    let mut a = [0u16; 48];
+    let s = *b"Windows.UI.Xaml.Media.Imaging.SurfaceImageSource";
+    let mut i = 0;
+    while i < s.len() {
+        a[i] = s[i] as u16;
+        i += 1;
+    }
+    a
+};
+
+/// `ISurfaceImageSourceFactory` — **the IID is read from the WP8.1 kit's own ABI IDL**, not
+/// remembered: `Include\abi\windows.ui.xaml.media.imaging.idl` declares
+/// `[uuid(3AB2212A-EF65-4A5F-BFAC-73993E8C12C9)] interface ISurfaceImageSourceFactory`.
+///
+/// This is the interface `RoGetActivationFactory` must be asked for. Its vtable is `IInspectable`
+/// (0..5) followed by the two factory methods, so the slots are 6 and 7:
+///
+///     CreateInstanceWithDimensions(pixelWidth, pixelHeight, outer, inner, out instance)  // 6
+///     CreateInstanceWithDimensionsAndOpacity(w, h, isOpaque, outer, inner, out instance) // 7
+pub const ISURFACEIMAGESOURCEFACTORY: Guid = Guid {
+    data1: 0x3ab2_212a,
+    data2: 0xef65,
+    data3: 0x4a5f,
+    data4: [0xbf, 0xac, 0x73, 0x99, 0x3e, 0x8c, 0x12, 0xc9],
+};
+
+/// `ISurfaceImageSourceFactory::CreateInstanceWithDimensions` — first method past `IInspectable`.
+pub const ISURFACEIMAGESOURCEFACTORY_CREATEINSTANCE: usize = 6;
+
+/// `ISurfaceImageSourceFactory::CreateInstanceWithDimensionsAndOpacity`.
+pub const ISURFACEIMAGESOURCEFACTORY_CREATEINSTANCEOPAQUE: usize = 7;
 
 // ===========================================================================
 // vtable slots (already offset past IUnknown - a real method starts at 3)

@@ -14,20 +14,19 @@
         This is the ONLY thing the plan requires before Stage 3 may start: a textured quad drawn
         by *Rust* into a real D3D11 render target on the phone.
 
-        ROUND 45 - the host element changed from SwapChainPanel to Image, because a WP8.1 *phone*
-        app cannot create a swapchain at all: CreateSwapChainForCoreWindow and
-        CreateSwapChainForComposition both return DXGI_ERROR_INVALID_CALL on this Adreno 225 /
-        WDDM 1.2 / FL 9.3 driver, and Win2D's own ARM DLL (which renders fine here) imports no
-        swapchain entry points.
-
-        The phone path is: Rust renders into an offscreen ID3D11Texture2D and hands back a WinRT
-        IDirect3DSurface + IDirect3DDevice; C# projects those through Win2D's interop statics into
-        a CanvasImageSource and sets it as this Image's Source. The XAML compositor then displays
-        Rust's pixels. Rust still owns the device, the texture, the pipeline and the draw calls -
-        C# creates nothing but the ImageSource wrapper.
+        ROUND 48 - the present path is XAML SurfaceImageSource. A WP8.1 *phone* app cannot create a
+        swapchain (CreateSwapChainForCoreWindow and CreateSwapChainForComposition both return
+        DXGI_ERROR_INVALID_CALL on this Adreno 225 / WDDM 1.2 / FL 9.3 driver), and the D3D/WinRT
+        interop helpers are unreachable from an app container (the on-device loader probe logged
+        `interop-trace=winrt{h=0,exp=0} d3d11{h=1,exp=0}`). What IS reachable is WinRT activation
+        (runtimeobject.lib -> RoGetActivationFactory), which is enough for SurfaceImageSource: Rust
+        activates it, QIs ISurfaceImageSourceNative with a plain QueryInterface, and draws into the
+        IDXGISurface that BeginDraw hands back - a surface inside the compositor's own render target,
+        so drawing into it *is* presenting. C# only assigns the SurfaceImageSource to this Image's
+        Source. Rust still owns the device, the surface, the pipeline and every draw call.
     -->
     <Grid x:Name="RootGrid" Background="#FF07070B">
-        <!-- Rust's render target, composited by XAML. Stretch=None keeps it 1:1 at 96 dpi. -->
+        <!-- Rust's render target, composited by XAML. Stretch=Fill keeps it 1:1 with the source. -->
         <Image x:Name="RustImage" Stretch="Fill" Visibility="Collapsed"
                HorizontalAlignment="Stretch" VerticalAlignment="Stretch" />
 
