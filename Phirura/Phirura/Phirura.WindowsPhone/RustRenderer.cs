@@ -331,6 +331,27 @@ namespace Phirura
             }
         }
 
+        /// <summary>
+        /// The interop-resolution trace, as a compact string, e.g.
+        /// <c>winrt{h=1,exp=1} d3d11{h=1,exp=0}</c>.
+        ///
+        /// <c>h</c> = the module loaded, <c>exp</c> = it exported the helper name. This is what
+        /// distinguishes "the DLL isn't there" from "the DLL is there but does not export it" -
+        /// both of which currently surface as the same <c>E_NOINTERFACE</c>.
+        /// </summary>
+        public static string InteropTrace
+        {
+            get
+            {
+                try
+                {
+                    return "winrt{h=" + wp81_rs_interop_trace(0) + ",exp=" + wp81_rs_interop_trace(1)
+                        + "} d3d11{h=" + wp81_rs_interop_trace(2) + ",exp=" + wp81_rs_interop_trace(3) + "}";
+                }
+                catch (Exception) { return "(unavailable)"; }
+            }
+        }
+
         /// <summary>The failing offscreen call by name, e.g. "offscreen: CreateTexture2D".</summary>
         public static string OtStepName
         {

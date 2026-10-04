@@ -175,6 +175,7 @@ namespace Phirura
                     + " ot-step=" + RustRenderer.OtStep
                     + " surface-kind=" + RustRenderer.OtSurfaceKindName
                     + " interop-src=" + RustRenderer.InteropSourceName
+                    + " interop-trace=" + RustRenderer.InteropTrace
                     + " surface=0x" + RustRenderer.GfxSurface.ToInt32().ToString("X8")
                     + " device=0x" + RustRenderer.GfxDevice.ToInt32().ToString("X8")
                     + " " + RustRenderer.Diagnose());
