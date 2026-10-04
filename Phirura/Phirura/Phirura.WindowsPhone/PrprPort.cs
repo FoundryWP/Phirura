@@ -107,6 +107,9 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern void wp81_game_set_screen(float width, float height);
 
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint wp81_game_progress();
+
         // --- the Rust -> C# direction -------------------------------------
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -396,6 +399,31 @@ namespace Phirura
             wp81_game_set_screen(width, height);
         }
 
+        /// <summary>
+        /// Which step <see cref="GameCreate"/> is on, named.
+        ///
+        /// Sampled from a timer on a thread that is <em>not</em> the one creating, and read for one
+        /// reason: when a create takes the process down there is no return code to inspect and no
+        /// line after the last, so the last step published is the whole evidence. The numbers mirror
+        /// `host::progress` in Rust - neither side restates the other's, both spell them out.
+        /// </summary>
+        public static string GameProgressText()
+        {
+            uint p = wp81_game_progress();
+            string name;
+            switch (p)
+            {
+                case 0: name = "idle"; break;
+                case 1: name = "entered"; break;
+                case 2: name = "fs ready"; break;
+                case 3: name = "loading info.yml"; break;
+                case 4: name = "info ready"; break;
+                case 5: name = "building scene"; break;
+                default: name = "step " + p; break;
+            }
+            return p + " (" + name + ")";
+        }
+
         // --- the texture registry's managed surface -----------------------
 
         /// <summary>One registered texture: its Rust id and its RGBA pixels.</summary>
@@ -473,6 +501,20 @@ namespace Phirura
                     + " texture(s); some sprites will not draw");
             }
             return list;
+        }
+
+        /// <summary>
+        /// Registry summary - <c>"N registered, M dropped"</c> - without copying a single pixel.
+        ///
+        /// <see cref="ReadTextures"/> allocates every texture's RGBA into managed memory, which is
+        /// precisely what a boot log must not do on a 512 MB phone, and there is no reason to: the
+        /// question a boot log asks is only whether the chart's textures all fitted, and those two
+        /// counters answer it. They are also the number the 32 MiB budget was sized from on the
+        /// desktop, so this is what says whether that measurement transfers to the device.
+        /// </summary>
+        public static string TextureSummary()
+        {
+            return wp81_texture_count() + " registered, " + wp81_texture_overflow() + " dropped";
         }
 
         private static PortCmd ReadCmd(IntPtr basePtr, int index)
@@ -570,6 +612,13 @@ namespace Phirura
         private static bool _installed;
 
         /// <summary>
+        /// How many times Rust has asked for a file this session. Read from a sequence number
+        /// rather than a count of successes, because the question it answers is "did the engine get
+        /// as far as asking" - a request that fails still advances it.
+        /// </summary>
+        private static int _loadSeq;
+
+        /// <summary>
         /// True when the managed <see cref="HostCallbacks"/> has the size the Rust struct expects.
         ///
         /// The struct is all function pointers, so on ARM its size *is* the field count times four.
@@ -631,6 +680,15 @@ namespace Phirura
 
             wp81_install_callbacks(ref cb);
             _installed = true;
+
+            // The struct's size is the one thing that turns "Rust called a callback" into "Rust
+            // called the *right* callback": it is all function pointers, so a one-field drift means
+            // Rust dereferences a garbage address the moment the first callback fires - on the phone
+            // that looks like the process simply disappearing, with no managed exception anywhere.
+            // Worth one line at startup, before anything has a chance to call through it.
+            AppLog.WriteSync("PrprPort: callbacks=" + Marshal.SizeOf<HostCallbacks>()
+                + " bytes expected=" + (ExpectedCallbackCount * IntPtr.Size)
+                + " layoutOk=" + CallbacksLayoutOk());
         }
 
         // ===========================================================================
@@ -751,16 +809,39 @@ namespace Phirura
 
         private static int OnLoadAsset(IntPtr name, IntPtr outBytes, IntPtr cap)
         {
+            // Logged before anything can refuse.
+            //
+            // The first device run produced *no* asset lines at all while `GameCreate` never
+            // returned, and the emptiness was ambiguous: several of the early returns below used to
+            // bail silently, so "Rust never asked for anything" and "Rust asked and the pointer was
+            // turned away" were byte-for-byte the same empty log. This line separates them, and the
+            // sequence number records how far a load got even when the next call never comes back -
+            // which is exactly what happened on the phone.
+            try
+            {
+                int seq = System.Threading.Interlocked.Increment(ref _loadSeq);
+                string nm = name == IntPtr.Zero
+                    ? "(null)"
+                    : (Marshal.PtrToStringUni(name) ?? "(not utf16)");
+                AppLog.WriteSync("PrprPort: load_asset#" + seq + " " + nm + " cap=" + cap.ToInt64());
+            }
+            catch (Exception ex)
+            {
+                AppLog.WriteSync("PrprPort: load_asset entry unreadable", ex);
+            }
+
             try
             {
                 if (name == IntPtr.Zero || outBytes == IntPtr.Zero)
                 {
+                    AppLog.WriteSync("PrprPort: load_asset refused: null name or buffer");
                     return -1;
                 }
 
                 string relative = Marshal.PtrToStringUni(name);
                 if (string.IsNullOrEmpty(relative))
                 {
+                    AppLog.WriteSync("PrprPort: load_asset refused: empty name");
                     return -1;
                 }
 
@@ -774,6 +855,21 @@ namespace Phirura
                         return -1;
                     }
                     _assetCache[relative] = data;
+
+                    // Progress, not just success.
+                    //
+                    // On the first device run `GameCreate` never returned and there was no way to
+                    // tell "still working" from "died in the next step": every launch ended at the
+                    // same `engine create` line with nothing after it. The last asset named here is
+                    // the one whose bytes the engine had just been handed, which narrows "it never
+                    // came back" to one file - a JSON that fails to parse, a PNG that dies in the
+                    // decoder, a texture upload that trips the GPU - instead of to the whole load.
+                    // Zero of these lines is itself an answer: it means the engine never got as far
+                    // as asking for anything.
+                    //
+                    // First read only. The engine re-requests images on every scene entry, and
+                    // logging those would bury the one that matters.
+                    AppLog.WriteSync("PrprPort: asset " + relative + " -> " + data.Length + " bytes");
                 }
 
                 int want = cap.ToInt32();
@@ -814,10 +910,31 @@ namespace Phirura
             }
 
             string normalised = relative.Replace('/', '\\').TrimStart('\\');
+            if (normalised.Length == 0)
+            {
+                return null;
+            }
 
-            Windows.Storage.StorageFile file =
-                Windows.Storage.StorageFolder.GetFolderFromPathAsync(root).AsTask().Result
-                    .GetFileAsync(normalised).AsTask().Result;
+            // One segment at a time.
+            //
+            // The engine asks for the *whole* path - `190/info.yml`, `rank/phi.png` - relative to
+            // the charts root, so the name handed to WinRT is usually a sub-path. Asking WinRT for
+            // that in one call does not resolve the intermediate folder: it reports the file as
+            // missing, and because the engine treats any negative result as "absent" that would
+            // present as every chart failing to load rather than as an IO error. Walking the
+            // segments is the form that works, and it is what `ChartLibrary` does for the same
+            // reason. The whole-file cache above means this walk happens once per distinct asset,
+            // not once per frame.
+            Windows.Storage.StorageFolder folder =
+                Windows.Storage.StorageFolder.GetFolderFromPathAsync(root).AsTask().Result;
+
+            string[] parts = normalised.Split(new char[] { '\\' },
+                StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i + 1 < parts.Length; i++)
+            {
+                folder = folder.GetFolderAsync(parts[i]).AsTask().Result;
+            }
+            Windows.Storage.StorageFile file = folder.GetFileAsync(parts[parts.Length - 1]).AsTask().Result;
 
             Windows.Storage.Streams.IBuffer buffer =
                 Windows.Storage.FileIO.ReadBufferAsync(file).AsTask().Result;

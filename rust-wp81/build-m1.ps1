@@ -58,4 +58,18 @@ if ($BuildOnly) {
 
 & $cargo run -q -p prpr-port --bin host_m1 -- $ChartsDir $Folder $Chart $Frames *> $log
 "EXIT=$LASTEXITCODE"
-Get-Content $log
+
+# Print everything except tracing's `DEBUG` spam.
+#
+# Not `Select-Object -Last N` instead: a failed build writes its `error[...]` blocks at the *end*
+# so those survive either way, but the `[m1]` asset-request log runs the whole length of a
+# successful one and truncating would hide exactly the early misses that matter. Filtering on the
+# level keeps both and drops only detail lines - the first run produced 34334 of them from a single
+# loop (`creating cache texture: 0x0`), 5.4 MB of log to find two lines in.
+$lines  = Get-Content $log
+$hidden = 0
+$shown  = foreach ($l in $lines) {
+    if ($l -match ' DEBUG ') { $hidden++ } else { $l }
+}
+if ($hidden -gt 0) { "... ($hidden DEBUG lines hidden)" }
+$shown

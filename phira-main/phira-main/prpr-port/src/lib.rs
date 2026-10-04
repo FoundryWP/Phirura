@@ -522,6 +522,20 @@ pub extern "C" fn wp81_game_destroy() {
     host::destroy()
 }
 
+/// How far `wp81_game_create` has progressed, for the shell to sample while it runs.
+///
+/// This export exists because of one specific failure mode: `create` stops and the process goes with
+/// it, leaving no return code and no log line after the last one the shell wrote. The shell polls
+/// this from a timer that does not share `create`'s thread and prints the step whenever it changes,
+/// so the final line before silence names what was executing. It is the same instrument as the
+/// renderer's `SampleTick`, which is what localised the earlier bring-up hangs.
+///
+/// The step numbers themselves live in `host::progress`, so neither side restates them.
+#[no_mangle]
+pub extern "C" fn wp81_game_progress() -> u32 {
+    host::progress_now()
+}
+
 /// Frames rendered so far, or -1 when no game is running.
 #[no_mangle]
 pub extern "C" fn wp81_game_frames() -> i64 {

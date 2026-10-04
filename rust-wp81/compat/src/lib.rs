@@ -800,6 +800,11 @@ pub unsafe extern "system" fn CreatePipe(_read: *mut HANDLE, _write: *mut HANDLE
 /// must NOT be pre-assigned or overwritten: a fresh `TlsAlloc()` index is a different slot from
 /// the one `#[thread_local]` accesses are compiled against. Measured: overwriting it moved the
 /// crash from step 2 to step 1, i.e. made it worse.
+///
+/// On its own it is never written. `_tls_used` is what makes the directory that points here exist;
+/// without it this stays 0 and the whole point of having it is lost. That half lives in
+/// `rust-wp81/tlsdir_start.rs` rather than here, because the object defining it has to be the
+/// FIRST input on the link line for its marker to sit at offset 0 of `.tls` - see that file.
 #[no_mangle]
 pub static mut _tls_index: u32 = 0;
 

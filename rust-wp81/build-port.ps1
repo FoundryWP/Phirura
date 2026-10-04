@@ -53,9 +53,12 @@ $ws      = "E:/Users/admin/Documents/visual studio 2013/Phirura/phira-main/phira
 $target  = Join-Path $here "targets\thumbv7a-pc-windows-msvc.json"
 $outDir  = Join-Path $here "port-out"
 $dll     = Join-Path $outDir "wp81prpr.dll"
+# The TLS template markers, compiled separately and linked first/last - see step 1b.
+$tlsStartSrc = Join-Path $here "tlsdir_start.rs"
+$tlsEndSrc   = Join-Path $here "tlsdir_end.rs"
 $deploy  = "E:/Users/admin/Documents/visual studio 2013/Phirura/Phirura/Phirura/Phirura.WindowsPhone/wp81prpr.dll"
 
-foreach ($p in @($cargo, $armLink, $vcLibArm, $wpLibArm, $chkstk, $target, $ws)) {
+foreach ($p in @($cargo, $armLink, $vcLibArm, $wpLibArm, $chkstk, $target, $ws, $tlsStartSrc, $tlsEndSrc)) {
     if (-not (Test-Path $p)) { throw "missing: $p" }
 }
 
@@ -78,8 +81,12 @@ if ($LASTEXITCODE -ne 0) { throw "registry patch failed ($LASTEXITCODE)" }
 Write-Host "`n=== 1. cargo build -p prpr-port (staticlib) ==="
 # Every -Z argument containing a comma MUST be quoted: unquoted, the shell parses `std,panic_abort`
 # as an array literal and fails to parse the whole script, so nothing runs at all.
+# `--lib`, and it must stay: the package's bins are desktop-only. `host_m1` calls
+# `tracing_subscriber`, which is a `cfg(not(target_arch = "arm"))` dependency, so building the whole
+# package for ARM fails on a bin that could never link here. This is the same reason
+# d3d11-rs-probe\build.ps1 passes `--lib`.
 $cargoArgs = @(
-    "build", "-p", "prpr-port",
+    "build", "-p", "prpr-port", "--lib",
     "--target", $target,
     "-Zjson-target-spec",
     "-Zbuild-std=std,panic_abort",
@@ -99,6 +106,86 @@ if ($code -ne 0) { throw "cargo build failed ($code) - see port-cargo.log" }
 $staticlib = Join-Path $ws "target\thumbv7a-pc-windows-msvc\release\prpr_port.lib"
 if (-not (Test-Path $staticlib)) { throw "no staticlib at $staticlib" }
 Write-Host "staticlib = $((Get-Item $staticlib).Length) bytes"
+
+# --- 1b. compile the two TLS template markers as standalone objects -------------------------
+#
+# `_tls_used` cannot live in `prpr-port` or in `wp81-compat`. Both are archives, and a member of an
+# archive is only added when something references it - so its contribution to `.tls$` lands wherever
+# the resolution order happens to put it, which on the device-shaped build was offset 776 of 2572.
+# Since offsets are computed relative to the start of the section holding the variable, a marker
+# that is not at offset 0 makes `StartAddressOfRawData` disagree with every `#[thread_local]` in the
+# image, and nothing faults: the values are just shifted.
+#
+# A *direct* object is not resolved, it is included outright, and it contributes before any library
+# named after it. So: one object first on the link line (the start marker), one last (the end
+# marker), each compiled from a file whose whole contents are those markers. `check_tls.py` reads
+# both bytes back out of the finished PE, so if link.exe ever stops ordering them this way the build
+# fails here rather than as garbage on the phone.
+Write-Host "`n=== 1b. compile TLS markers (rustc --emit=obj) ==="
+New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+$rustc = Join-Path $env:CARGO_HOME "bin\rustc.exe"
+if (-not (Test-Path $rustc)) { throw "missing: $rustc" }
+
+# `--emit=obj` still has to type-check `#![no_std]`, which means loading `core` and
+# `compiler_builtins`. cargo normally passes them, built by `-Zbuild-std` in step 1, from here -
+# they are not in the sysroot for this target.
+#
+# `--target` must be the same JSON spec cargo used, not the built-in name: the rlib records its
+# triple as `thumbv7a-pc-windows-msvc-<hash of the spec>`, and asking for the bare builtin triple
+# makes rustc report E0461 "couldn't find crate core with expected target triple" while printing
+# the very file it was handed. A JSON spec is itself unstable, so it needs `-Zunstable-options`
+# too - cargo hides that behind `-Zjson-target-spec` in step 1.
+#
+# The `.rlib` beside each is only a *stub*; rustc says so outright ("only metadata stub found ...
+# please provide path to the corresponding .rmeta"). Type-checking needs the `.rmeta`.
+$tlsDepDir = Join-Path $ws "target\thumbv7a-pc-windows-msvc\release\build"
+$coreRmeta = Get-ChildItem (Join-Path $tlsDepDir "core") -Recurse -Filter "libcore-*.rmeta" `
+    -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $coreRmeta) { throw "no built libcore metadata for thumbv7a - step 1 must have run first" }
+$builtinRmeta = Get-ChildItem (Join-Path $tlsDepDir "compiler_builtins") -Recurse `
+    -Filter "libcompiler_builtins-*.rmeta" -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $builtinRmeta) { throw "no built compiler_builtins metadata for thumbv7a - step 1 must have run first" }
+Write-Host "core = $($coreRmeta.FullName)"
+Write-Host "builtins = $($builtinRmeta.FullName)"
+
+$tlsStartObj = Join-Path $outDir "tlsdir_start.obj"
+$tlsEndObj   = Join-Path $outDir "tlsdir_end.obj"
+$tlsEndLib   = Join-Path $outDir "tlsdir_end.lib"
+$tlsLog      = Join-Path $here "port-tlsdir.log"
+$libExe      = Join-Path $vs11 "VC\bin\x86_arm\lib.exe"
+$tlsRustcArgs = @("-Zunstable-options", "--target", $target, "--emit=obj", "--crate-type=lib",
+                  "--extern", "core=$($coreRmeta.FullName)",
+                  "--extern", "compiler_builtins=$($builtinRmeta.FullName)")
+foreach ($m in @(@($tlsStartSrc, $tlsStartObj), @($tlsEndSrc, $tlsEndObj))) {
+    $src, $objPath = $m
+    $tlsArgs = $tlsRustcArgs + @("-o", $objPath, $src)
+    $saved2 = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & $rustc @tlsArgs 2>&1 | Out-File -FilePath $tlsLog -Encoding utf8
+    $tlsCode = $LASTEXITCODE
+    $ErrorActionPreference = $saved2
+    Get-Content $tlsLog -ErrorAction SilentlyContinue | Select-Object -Last 30
+    if ($tlsCode -ne 0) { throw "rustc --emit=obj failed ($tlsCode) for $src - see port-tlsdir.log" }
+    if (-not (Test-Path $objPath)) { throw "rustc produced no object for $src" }
+    Write-Host ("  {0} = {1} bytes" -f (Split-Path -Leaf $objPath), (Get-Item $objPath).Length)
+}
+
+# `_tls_end` goes into an ARCHIVE, not onto the command line as an object, and the difference is
+# the whole point. link.exe takes every direct object first, in the order they are listed, and only
+# then searches libraries - so an object named last on the line still contributed at offset 1 of
+# `.tls`, immediately after `_tls_start`, giving a two-byte template. An archive member is pulled
+# only when something needs it and nobody does until the libraries are being scanned, which puts it
+# after `prpr_port.lib`'s own `.tls$` contributions and therefore at the far end.
+#
+# `check_tls.py` is what says whether that actually happened.
+if (-not (Test-Path $libExe)) { throw "missing: $libExe" }
+$saved3 = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $libExe "/OUT:$tlsEndLib" $tlsEndObj 2>&1 | Out-File -FilePath $tlsLog -Encoding utf8 -Append
+$libCode = $LASTEXITCODE
+$ErrorActionPreference = $saved3
+if ($libCode -ne 0) { throw "lib failed ($libCode) for $tlsEndObj - see port-tlsdir.log" }
+Write-Host ("  {0} = {1} bytes" -f (Split-Path -Leaf $tlsEndLib), (Get-Item $tlsEndLib).Length)
 
 Write-Host "`n=== 2. link ARMNT DLL (VC11 x86_arm, CRT-free) ==="
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
@@ -137,7 +224,10 @@ $exports = @(
     "wp81_game_destroy",
     "wp81_game_frames",
     "wp81_game_running",
-    "wp81_game_set_screen"
+    "wp81_game_set_screen",
+    # Sampled from a timer while `wp81_game_create` runs - see the note on the export. Without it a
+    # create that takes the process down leaves nothing to read afterwards.
+    "wp81_game_progress"
 )
 
 # /FORCE:MULTIPLE is load-bearing, and the reason is not obvious from the log.
@@ -173,13 +263,34 @@ $linkArgs = @(
     "/DLL", "/NODEFAULTLIB", "/MACHINE:ARM", "/SUBSYSTEM:WINDOWS",
     "/ENTRY:_DllMainCRTStartup",
     "/FORCE:MULTIPLE",
+    # Symbol map, kept as a build artifact.
+    #
+    # The device reports `GameCreate -> AlreadyRunning` on a brand-new process and a frame count of
+    # 325577230000753816, which is thread-local storage reading someone else's block: the ARM DLL has
+    # a `.tls` section but NO TLS data directory (index 9 is zero), so the loader never assigns it an
+    # index and `__tls_index` stays 0. The desktop build has the directory because its CRT supplies
+    # `_tls_used`, and there is no CRT here.
+    #
+    # Fixing that means defining `_tls_used` ourselves, which means knowing exactly which symbols the
+    # linker already resolved and from which object - not guessing from memory. `/MAP` is how we find
+    # out, and it costs nothing but a file.
+    "/MAP:$here\port-out\wp81prpr.map",
     "/OUT:$dll",
     "/LIBPATH:$vcLibArm",
     "/LIBPATH:$wpLibArm",
+    # Input order below is load-bearing for TLS - see step 1b and the header of tlsdir_start.rs.
+    # A direct object is included rather than resolved, so it contributes to `.tls$` ahead of the
+    # archive members named after it, which is what puts `_tls_start` at offset 0 of `.tls`.
+    $tlsStartObj,
     $staticlib,
     $chkstk,
     "WindowsPhoneCore.lib",
-    "ws2_32.lib"
+    "ws2_32.lib",
+    # LAST, and as an archive rather than an object - see step 1b. link.exe takes all direct objects
+    # first, so naming the object here would still put `_tls_end` at offset 1 of `.tls`. Pulling it
+    # from a library named after `prpr_port.lib` is what places it at the far end of the template.
+    # `check_tls.py` fails the build if link.exe orders it anywhere else.
+    $tlsEndLib
 ) + ($exports | ForEach-Object { "/EXPORT:$_" })
 
 $linkLog = Join-Path $here "port-link.log"
@@ -196,6 +307,18 @@ Write-Host "`n=== 3. verify every import is a WP8.1 API set ==="
 if ($LASTEXITCODE -ne 0) {
     throw "import check failed ($LASTEXITCODE) - the DLL imports a library WP8.1 does not have. " +
           "compat must define the missing symbol, or the crate needs a shim."
+}
+
+# A passing link is not evidence about TLS either. The `.tls` section was present and correct in
+# every image that still failed on the phone, because what the loader needs is data directory 9 and
+# that comes from `_tls_used`, which /NODEFAULTLIB leaves out. Only reading the finished PE can tell
+# the two apart, and getting it wrong does not fault - `#[thread_local]` just reads another module's
+# block, which surfaced as `GameCreate -> AlreadyRunning` on a process that had created nothing.
+Write-Host "`n=== 4. verify the TLS directory describes .tls ==="
+& $py (Join-Path $here "tools\check_tls.py") $dll
+if ($LASTEXITCODE -ne 0) {
+    throw "TLS check failed ($LASTEXITCODE) - the image has no usable thread-local storage, so " +
+          "`thread_local!` reads a foreign block. See tools/check_tls.py."
 }
 
 Write-Host "`nwp81prpr.dll = $((Get-Item $dll).Length) bytes"

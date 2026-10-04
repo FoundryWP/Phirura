@@ -55,10 +55,18 @@ param(
 
     [string]$Device = "de",
 
-    [switch]$Deploy,   # uninstall + installlaunch  (wipes LocalFolder - must come first)
+    [switch]$Deploy,   # uninstall + install  (no launch - see the note at the switch itself)
     [switch]$Push,     # ISETool rs  (also wipes LocalFolder - must come after -Deploy)
     [switch]$Launch,   # AppDeployCmd /launch  (must come after -Push)
-    [switch]$PullLog   # ISETool ts into a fresh dir, then print the tail of phirura.log
+    [switch]$PullLog,  # ISETool ts into a fresh dir, then print the tail of phirura.log
+
+    # Seconds to let the app run before pulling the log.
+    #
+    # Without this the pull lands a moment after `launch` and reads back a log written by a
+    # process that has not done anything yet - which reads exactly like "the engine never ran",
+    # the one conclusion the whole round exists to avoid. GameCreate alone parses an 8.8 MB chart
+    # and decodes 75 textures before its first line, so the default is generous rather than tight.
+    [int]$WaitSeconds = 15
 )
 
 $ErrorActionPreference = "Continue"   # native tools report through stderr; Stop would mask their exit codes
@@ -90,7 +98,23 @@ if (Test-Path $Out) {
     else { throw "refusing to clear an unexpected -Out: $resolved" }
 }
 New-Item -ItemType Directory -Path $Out -Force | Out-Null
-Copy-Item "$Source\*" -Destination $Out -Recurse -Force
+
+# The source is copied AS `charts`, not unpacked into LocalFolder's root.
+#
+# `$Source` defaults to `E:\_phirura_m1\charts`, and `rs` pushes the CONTENTS of `$Out` to
+# LocalFolder. The engine reads from `<LocalFolder>\charts` - `RustStage1Page` builds exactly
+# `LocalFolder.Path + "\charts"`, which is also the desktop layout, since `E:\_phirura_m1` holds
+# nothing but `charts`. So copying `$Source\*` straight into `$Out` put `190`, `demo`, `respack`
+# and every shared png/ogg at LocalFolder's root instead, and `GetFolderFromPathAsync(<LocalState>\charts)`
+# had nothing to open.
+#
+# That is what `GameCreate -> -2 (ParseFailed)` was on the phone: not a parser, not IO permissions,
+# and not TLS - all ten asset requests failed in ~80 ms each with the charts folder absent, so the
+# engine fell through every `info.yml`/`info.txt`/`info.csv` candidate and gave up. The comment on
+# `$Out` above had it right; this line did not.
+$dest = Join-Path $Out "charts"
+New-Item -ItemType Directory -Path $dest -Force | Out-Null
+Copy-Item "$Source\*" -Destination $dest -Recurse -Force
 
 $staged = Get-ChildItem $Out -Recurse -File
 "staged: {0} files, {1} MB -> {2}" -f $staged.Count,
@@ -102,8 +126,19 @@ $staged = Get-ChildItem $Out -Recurse -File
 # ---------------------------------------------------------------------------
 if ($Deploy) {
     & $adp /uninstall $ProductId /targetdevice:$Device 2>&1 | Out-Null
-    & $adp /installlaunch $Appx /targetdevice:$Device 2>&1 | Out-Null
-    "deployed (appx = $(Split-Path $Appx -Leaf))"
+    # `/install`, NOT `/installlaunch`.
+    #
+    # `installlaunch` starts the app before the charts are pushed, and `-Push` below REPLACES
+    # LocalFolder - including `phirura.log`. So the lines this whole script exists to collect (the
+    # launch, `GameCreate`'s result, the last asset read) were written by that first process and
+    # then deleted by the push, while the relaunch that follows merely *activates* the still-living
+    # process and therefore writes no new launch line at all. The result reads as a log that starts
+    # mid-run with no explanation, which is exactly what the first three device runs produced.
+    #
+    # Installing without launching means there is no process alive across the push, and `-Launch`
+    # then starts the one process whose whole log is ours to keep.
+    & $adp /install $Appx /targetdevice:$Device 2>&1 | Out-Null
+    "installed (appx = $(Split-Path $Appx -Leaf))"
 }
 
 # ---------------------------------------------------------------------------
@@ -128,6 +163,10 @@ if ($Launch) {
 #    level down under IsolatedStore\, which is the opposite of what `rs` expects.
 # ---------------------------------------------------------------------------
 if ($PullLog) {
+    if ($Launch -and $WaitSeconds -gt 0) {
+        "waiting $WaitSeconds s for the app to get past GameCreate"
+        Start-Sleep -Seconds $WaitSeconds
+    }
     $logdir = "E:\_phirura_log_pull_{0:HHmmss}" -f (Get-Date)
     & $ise ts $Device $ProductId $logdir 2>&1 | Out-Null
     $logfile = Join-Path $logdir "IsolatedStore\phirura.log"

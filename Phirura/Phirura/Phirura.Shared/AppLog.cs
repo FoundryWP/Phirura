@@ -84,8 +84,7 @@ namespace Phirura
                 Write(context);
                 return;
             }
-            Write(context + " :: " + ex.GetType().Name + ": " + ex.Message
-                + Environment.NewLine + ex.StackTrace);
+            Write(context + " :: " + Describe(ex));
         }
 
         /// <summary>Synchronous counterpart of <see cref="Write(string, Exception)"/>.</summary>
@@ -96,8 +95,48 @@ namespace Phirura
                 WriteSync(context);
                 return;
             }
-            WriteSync(context + " :: " + ex.GetType().Name + ": " + ex.Message
-                + Environment.NewLine + ex.StackTrace);
+            WriteSync(context + " :: " + Describe(ex));
+        }
+
+        /// <summary>
+        /// The exception, then everything it wraps, then the stack of the one that actually failed.
+        ///
+        /// Every `.Result` in this app throws `AggregateException`, whose message is the fixed
+        /// string "One or more errors occurred." - so the old `Type + Message + StackTrace` form
+        /// printed a stack through `ReadAsset` pointing at four different calls and a message that
+        /// could have been any of them. Ten asset requests failed that way on the device and the log
+        /// could not say whether the charts folder was absent, a file was missing, or the broker had
+        /// refused the path. The chain is the whole content of the line; the stack only says which
+        /// `.Result` rethrew it, which the innermost one does better.
+        /// </summary>
+        private static string Describe(Exception ex)
+        {
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            Exception deepest = ex;
+            for (Exception e = ex; e != null; )
+            {
+                if (sb.Length > 0)
+                {
+                    sb.Append(" -> ");
+                }
+                sb.Append(e.GetType().Name).Append(": ").Append(e.Message);
+                deepest = e;
+
+                AggregateException agg = e as AggregateException;
+                if (agg != null && agg.InnerExceptions.Count > 0)
+                {
+                    e = agg.InnerExceptions[0];
+                    continue;
+                }
+                e = e.InnerException;
+            }
+
+            string stack = deepest.StackTrace;
+            if (string.IsNullOrEmpty(stack))
+            {
+                stack = ex.StackTrace;
+            }
+            return sb.ToString() + Environment.NewLine + stack;
         }
 
         /// <summary>Runs on a thread-pool thread; the WinRT I/O is awaited there, never on the UI thread.</summary>

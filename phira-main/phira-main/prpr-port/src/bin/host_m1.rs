@@ -497,10 +497,26 @@ fn drain_stats(
 /// the engine actually asked for is to ask the registry. `out == null` is the size query.
 fn dump_textures() {
     let n = prpr_port::wp81_texture_count();
-    eprintln!(
-        "[m1] {n} textures registered, {} dropped for room",
-        prpr_port::wp81_texture_overflow()
-    );
+    let dropped = prpr_port::wp81_texture_overflow();
+    eprintln!("[m1] {n} textures registered, {dropped} dropped for room");
+    if dropped > 0 {
+        // A count on its own cannot say whether the budget, the slot count or the chart is at
+        // fault - the refused texture's size is what separates those.
+        let (id, w, h, bytes) = macroquad::draw::texture_drop_last();
+        eprintln!(
+            "       last drop: id={id} {w}x{h} {bytes} bytes, reason={}",
+            macroquad::draw::texture_drop_reason()
+        );
+        eprintln!(
+            "       registry holds {} bytes of {}",
+            macroquad::draw::texture_used_bytes(),
+            macroquad::draw::texture_capacity()
+        );
+        let (demand, aliased) = macroquad::draw::texture_demand();
+        eprintln!(
+            "       unique demand = {demand} bytes; {aliased} registrations aliased instead of copied"
+        );
+    }
     for i in 0..n {
         let id = prpr_port::wp81_texture_id_at(i);
         let (mut w, mut h) = (0u32, 0u32);

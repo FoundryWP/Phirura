@@ -939,14 +939,33 @@ pub mod draw {
     // texture per session, not per frame.
     //
     // A fixed arena rather than a Vec for the same reason as the draw buffers: this runs on a phone
-    // and a texture set is bounded by the chart. The budget is deliberately generous - a chart's
+    // and a texture set is bounded by the chart. The budget is generous because a chart's
     // illustration can be a full-screen PNG - and overflow is reported rather than silently
     // truncating, because a half-copied texture would render as garbled pixels with no clue why.
+    //
+    // Measured, not guessed. The 190 chart asks for **24,943,416** bytes of unique texture content
+    // (54 distinct images after 21 duplicate registrations were aliased), so the original 8 MiB
+    // refused 28 of them and doubling to 16 MiB refused 24 more - both budgets ended the run pinned
+    // within 25 KB of their ceiling, which is the tell that the limit is what is binding and not
+    // the chart. 32 MiB is the first value that holds the measured demand with room for a larger
+    // illustration.
+    //
+    // The duplicates `prpr` builds were real - it makes a second `Texture2D` for images it already
+    // made, and the asset log requests all 23 chart PNGs twice - but aliasing them (21 of them, see
+    // `TEX_ALIAS`) was never going to be enough on its own: the demand figure above is what is left
+    // *after* that collapse.
+    //
+    // This is a staging area, not the final home: the shell reads each texture once and keeps its
+    // own copy (see the header note), so bytes could be released after that fetch. They are not
+    // released yet, and on a 512 MB phone that is the follow-up worth doing before the device round
+    // rather than after it.
     // =======================================================================
 
-    /// Largest single texture the registry will hold, and the total across all of them.
-    const TEX_MAX_BYTES: usize = 8 * 1024 * 1024;
-    const TEX_SLOTS: usize = 64;
+    /// Largest total the registry will hold across all textures.
+    const TEX_MAX_BYTES: usize = 32 * 1024 * 1024;
+    // 75 registrations were attempted on that chart; entries are 28 bytes, so this costs 3.5 KB and
+    // only exists because the byte budget used to be the binding constraint and hid it.
+    const TEX_SLOTS: usize = 128;
 
     #[derive(Copy, Clone)]
     struct TexEntry {
@@ -967,11 +986,34 @@ pub mod draw {
     static mut TEX_COUNT: usize = 0;
     static mut TEX_BYTES: Vec<u8> = Vec::new();
     static mut TEX_OVERFLOW: u32 = 0;
+    /// The last texture that did not fit: `(id, width, height, bytes)`.
+    ///
+    /// Kept as *one* record rather than a list because a run that overflows usually overflows
+    /// everything after the budget is spent - a count alone cannot distinguish "28 big textures were
+    /// refused" from "one texture was refused 28 times", and those have different fixes.
+    static mut TEX_DROP: (u32, u32, u32, usize) = (0, 0, 0, 0);
+    /// Why: 1 = out of slots, 2 = this one texture alone exceeds the budget, 3 = the running total
+    /// would exceed it.
+    static mut TEX_DROP_REASON: u8 = 0;
+    /// Bytes of *unique* content the engine asked the registry to hold, whether or not they fit.
+    ///
+    /// `texture_used_bytes` is what actually fitted, which is capped at the budget - so it can never
+    /// answer "how big should the budget be". This counts every request that was not aliased to
+    /// bytes already stored, and it is the number that decides.
+    static mut TEX_DEMAND: usize = 0;
+    /// Registrations satisfied by pointing at bytes already stored instead of copying them again.
+    static mut TEX_ALIAS: u32 = 0;
 
     /// Records a texture's pixels so the shell can rebuild it. Called from `from_rgba8`.
     ///
     /// Silently ignoring an already-known id is correct: `prpr` re-creates the same texture on scene
     /// re-entry, and the pixels are identical, so the older copy is as good.
+    ///
+    /// Identical *content* under a different id is also not stored twice. `prpr` asks for the same
+    /// images more than once while building a scene (all 23 chart PNGs arrive twice on the 190
+    /// chart), and on the old 8 MiB budget those duplicate copies - not any single large image -
+    /// were what pushed 28 later textures out. Aliasing keeps a second id pointing at bytes that are
+    /// already there, so it costs one entry and no pixels.
     pub fn register_texture(id: u32, width: u32, height: u32, bytes: &[u8]) {
         unsafe {
             let count = TEX_COUNT;
@@ -980,14 +1022,39 @@ pub mod draw {
                     return;
                 }
             }
-            if count >= TEX_SLOTS || bytes.len() > TEX_MAX_BYTES {
-                TEX_OVERFLOW = TEX_OVERFLOW.wrapping_add(1);
+            if count >= TEX_SLOTS {
+                note_drop(id, width, height, bytes.len(), 1);
                 return;
             }
+
+            // Shape first. A byte-for-byte compare against every stored texture would be
+            // O(entries x pixels) on a phone, and shape alone rules out almost all of them.
+            for i in 0..count {
+                let e = TEX_ENTRIES[i];
+                if e.width != width || e.height != height || e.len != bytes.len() {
+                    continue;
+                }
+                let stored = core::slice::from_raw_parts(TEX_BYTES.as_ptr().add(e.offset), e.len);
+                if stored == bytes {
+                    TEX_ENTRIES[count] = TexEntry {
+                        id,
+                        width,
+                        height,
+                        offset: e.offset,
+                        len: e.len,
+                    };
+                    TEX_COUNT = count + 1;
+                    TEX_ALIAS = TEX_ALIAS.wrapping_add(1);
+                    return;
+                }
+            }
+
             let offset = (&TEX_BYTES).len();
             let end = offset + bytes.len();
+            // Counted from here, so an aliased request adds nothing - it is the same bytes again.
+            TEX_DEMAND += bytes.len();
             if end > TEX_MAX_BYTES {
-                TEX_OVERFLOW = TEX_OVERFLOW.wrapping_add(1);
+                note_drop(id, width, height, bytes.len(), 3);
                 return;
             }
             TEX_BYTES.extend_from_slice(bytes);
@@ -1000,6 +1067,54 @@ pub mod draw {
             };
             TEX_COUNT = count + 1;
         }
+    }
+
+    /// Count, then the most recent refusal as `(id, width, height, bytes)`.
+    ///
+    /// `texture_overflow` already returns the count; this says *what* was lost, which is the part
+    /// that decides whether the budget, the slot count, or the chart is at fault.
+    pub fn texture_drop_last() -> (u32, u32, u32, usize) {
+        unsafe { TEX_DROP }
+    }
+
+    /// Why the last one was refused: `"slots"`, `"single too large"`, or `"budget"`.
+    ///
+    /// Returned as a string rather than a code because its only caller is in-process (`host_m1`);
+    /// the FFI surface keeps the numeric `texture_overflow` count.
+    pub fn texture_drop_reason() -> &'static str {
+        unsafe {
+            match TEX_DROP_REASON {
+                1 => "slots",
+                2 => "single too large",
+                3 => "budget",
+                _ => "-",
+            }
+        }
+    }
+
+    /// Bytes currently held, and the budget they are counted against.
+    pub fn texture_used_bytes() -> usize {
+        unsafe { TEX_BYTES.len() }
+    }
+
+    /// The budget `texture_used_bytes` is counted against. Exposed so no caller has to restate
+    /// `TEX_MAX_BYTES` as a literal and drift from it.
+    pub fn texture_capacity() -> usize {
+        TEX_MAX_BYTES
+    }
+
+    /// Unique bytes requested, and how many registrations were satisfied by aliasing.
+    ///
+    /// The pair answers the question `texture_used_bytes` cannot: a held total pinned at the budget
+    /// says nothing about how much *more* the chart wanted.
+    pub fn texture_demand() -> (usize, u32) {
+        unsafe { (TEX_DEMAND, TEX_ALIAS) }
+    }
+
+    unsafe fn note_drop(id: u32, width: u32, height: u32, bytes: usize, reason: u8) {
+        TEX_OVERFLOW = TEX_OVERFLOW.wrapping_add(1);
+        TEX_DROP = (id, width, height, bytes);
+        TEX_DROP_REASON = reason;
     }
 
     /// Looks a texture up. Returns its byte length and writes its metadata, or -1 when unknown.

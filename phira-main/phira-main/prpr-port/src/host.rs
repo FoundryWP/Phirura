@@ -194,12 +194,98 @@ thread_local! {
     static INFO: RefCell<Option<ChartInfo>> = const { RefCell::new(None) };
 }
 
+/// How far `create` has got, so the shell can sample it *while* it runs.
+///
+/// `GameCreate` is slow enough on a phone to be worth watching, and its failure mode is the worst
+/// kind: the process stops without returning an error code and without writing a line, so after the
+/// fact the only question left is "where". The shell polls this from a timer that is independent of
+/// the thread `create` runs on and logs every change - so when the log's last line says step N, step
+/// N is what was executing. The renderer already does exactly this (`SampleTick`), and it is what
+/// localised the earlier bring-up hangs, which is the only reason it works.
+///
+/// `Relaxed` because this is a diagnostic, not a synchronisation point: the reader only needs a
+/// value that was true at some recent moment, and the process dying is precisely the event that
+/// makes that distinction irrelevant.
+pub static PROGRESS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Step numbers. Named rather than bare so the shell can print something readable without either
+/// side restating the other's constants in its own words.
+pub mod progress {
+    pub const IDLE: u32 = 0;
+    /// Inside `create`, before anything has been built.
+    pub const ENTERED: u32 = 1;
+    /// The filesystem wrapper exists.
+    pub const FS_READY: u32 = 2;
+    /// Reading `info.yml` (or inferring it) - this is where the first asset request happens.
+    pub const INFO_LOADING: u32 = 3;
+    /// Chart metadata resolved.
+    pub const INFO_READY: u32 = 4;
+    /// `GameScene::new` - chart parse, every texture, the whole respack.
+    pub const SCENE_BUILDING: u32 = 5;
+}
+
+#[inline]
+fn step(n: u32) {
+    PROGRESS.store(n, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Current step, for `wp81_game_progress`.
+#[inline]
+pub fn progress_now() -> u32 {
+    PROGRESS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Result codes shared with the shell. Keep in step with `PrprPort.cs`.
 pub const GAME_OK: i32 = 0;
 pub const GAME_ERR_NO_CHART: i32 = -1;
 pub const GAME_ERR_PARSE: i32 = -2;
 pub const GAME_ERR_ALREADY: i32 = -3;
 pub const GAME_ERR_PANIC: i32 = -100;
+
+/// Why the most recent attempt failed, so the shell can read it back after a negative return.
+///
+/// Every failure in `create` is reported with `tracing::error!`, and on the phone there is no
+/// subscriber: the event is dropped and `GameCreate -> -2` is the whole diagnosis. That one code
+/// covered three unrelated causes - a chart the parser rejects, a `GameScene::new` that fails
+/// mid-texture, and a `Main::new` that never gets a font - and on the device it was whichever of
+/// them happened, with nothing to tell them apart. Parking the message here costs one uncontended
+/// lock per failure and makes the difference between "something failed" and "this failed".
+///
+/// `Mutex` rather than `static mut` is what keeps this free of `unsafe`: `Option<String>` is `Send`,
+/// so the lock is `Sync` and the static needs no `impl` and no wrapper. The shell reads it only in
+/// the turn right after the call that produced it, so a writer and a reader never overlap.
+static LAST_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Record `msg` as the reason the current attempt failed.
+fn set_error(msg: String) {
+    if let Ok(mut slot) = LAST_ERROR.lock() {
+        *slot = Some(msg);
+    }
+}
+
+/// Drop any previous reason.
+///
+/// Called on entry to `create`, after the already-running check, so a stale message can never be
+/// reported against a later attempt that failed for a different reason.
+fn clear_error() {
+    if let Ok(mut slot) = LAST_ERROR.lock() {
+        *slot = None;
+    }
+}
+
+/// Hand the last failure message to `f`, or `-1` if there is none.
+///
+/// The message goes out through a closure rather than as a reference or a guard, so the borrow ends
+/// here and nothing outside can hold it past the next `set_error`.
+pub fn with_last_error<F: FnOnce(&str) -> i32>(f: F) -> i32 {
+    match LAST_ERROR.lock() {
+        Ok(slot) => match slot.as_deref() {
+            Some(msg) => f(msg),
+            None => -1,
+        },
+        Err(_) => -1,
+    }
+}
 
 /// Build a game from a chart the shell has already located.
 ///
@@ -209,12 +295,15 @@ pub const GAME_ERR_PANIC: i32 = -100;
 ///
 /// Returns [`GAME_OK`] or one of the negative codes above.
 pub fn create(folder: &str, chart_name: &str) -> i32 {
+    step(progress::ENTERED);
     if GAME.with(|g| g.borrow().is_some()) {
         return GAME_ERR_ALREADY;
     }
+    clear_error();
 
     let res = std::panic::catch_unwind(|| {
         let mut fs: Box<dyn FileSystem> = Box::new(HostFileSystem::new(folder));
+        step(progress::FS_READY);
 
         // Chart metadata, read the way Phira reads it: an explicit manifest (`:info`, `info.yml`,
         // `info.txt`, `info.csv`) when the folder has one, otherwise the fields are inferred from
@@ -230,6 +319,7 @@ pub fn create(folder: &str, chart_name: &str) -> i32 {
         // Seeding `chart` before inferring is what makes it work. `fix_info_with` bails with
         // "cannot find chart" unless it already knows the name, and `list_root` deliberately
         // returns nothing (the shell has no listing callback), so nothing else would supply it.
+        step(progress::INFO_LOADING);
         let info = match pollster::block_on(prpr::fs::load_info(&mut *fs)) {
             Ok(i) => i,
             Err(e) => {
@@ -242,6 +332,7 @@ pub fn create(folder: &str, chart_name: &str) -> i32 {
                 if let Err(e) = pollster::block_on(prpr::fs::fix_info_with(&mut *fs, &mut seed, true))
                 {
                     tracing::error!("chart metadata: {e:#}");
+                    set_error(format!("chart metadata: {e:#}"));
                     return GAME_ERR_PARSE;
                 }
                 seed
@@ -255,6 +346,8 @@ pub fn create(folder: &str, chart_name: &str) -> i32 {
             info.illustration
         );
 
+        step(progress::INFO_READY);
+
         // Autoplay by default. The judge needs a music clock it can trust, and the shell has not
         // wired its audio position back yet - autoplay is what lets the scene run and render
         // without one, which is the whole point of this milestone.
@@ -265,6 +358,9 @@ pub fn create(folder: &str, chart_name: &str) -> i32 {
         // black handle is enough here because all `prpr` does with it is measure and tint.
         let placeholder: SafeTexture = macroquad::Texture2D::from_rgba8(1, 1, &[0, 0, 0, 255]).into();
 
+        // The expensive step: chart parse, every texture in the respack, the judge. On a phone this
+        // is where the run either takes seconds or stops, so it gets a step of its own.
+        step(progress::SCENE_BUILDING);
         let scene = pollster::block_on(GameScene::new(
             GameMode::Normal,
             info.clone(),
@@ -282,6 +378,7 @@ pub fn create(folder: &str, chart_name: &str) -> i32 {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!("GameScene::new failed: {e:?}");
+                set_error(format!("GameScene::new failed: {e:#}"));
                 return GAME_ERR_PARSE;
             }
         };
