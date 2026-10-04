@@ -846,6 +846,27 @@ pub const IID_ID3D11TEXTURE2D: Guid = Guid {
     data4: [0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c],
 };
 
+/// `ID3D11VertexShader` / `ID3D11PixelShader`.
+///
+/// Both extracted from the `MIDL_INTERFACE` line that precedes each declaration in the kit's
+/// `d3d11.h`, not from memory: `ID3D11VertexShader = 3B301D64-D678-4289-8897-22F8928B72F3`,
+/// `ID3D11PixelShader = EA82E40D-51DC-4F33-93D4-DB7C9125AE8C`. `ID3D11VertexShader` and
+/// `ID3D11PixelShader` both derive straight from `ID3D11DeviceChild` and add no methods, so a
+/// vtable walk cannot tell a vertex shader from a pixel shader - only `QueryInterface` can, which
+/// is what makes these the way to ask an object what it actually is.
+pub const IID_ID3D11VERTEXSHADER: Guid = Guid {
+    data1: 0x3b30_1d64,
+    data2: 0xd678,
+    data3: 0x4289,
+    data4: [0x88, 0x97, 0x22, 0xf8, 0x92, 0x8b, 0x72, 0xf3],
+};
+pub const IID_ID3D11PIXELSHADER: Guid = Guid {
+    data1: 0xea82_e40d,
+    data2: 0x51dc,
+    data3: 0x4f33,
+    data4: [0x93, 0xd4, 0xdb, 0x7c, 0x91, 0x25, 0xae, 0x8c],
+};
+
 /// `ISwapChainPanelNative` (windows.ui.xaml.media.dxinterop.h) - the XAML side of composition.
 ///
 /// The kit's own header gives the IID: `F92F19D2-3ADE-45A6-A20C-F6F1EA90554B`. It derives from

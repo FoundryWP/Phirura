@@ -464,6 +464,170 @@ fn main() {
         let set_raster: extern "system" fn(*mut c_void, *mut c_void) =
             context.method(D3D11CONTEXT_RSSETSTATE);
         set_raster(context.vtbl as *mut c_void, p.raster.vtbl as *mut c_void);
+
+        // Read the bound state back instead of trusting the setters.
+        //
+        // Every setter in this path returns void, so a wrong slot, a dropped call and a correct
+        // call are indistinguishable up to the moment the draw quietly produces nothing - which is
+        // exactly what happened, the counters below reporting zero input-assembler vertices. The
+        // getters ask the context what it thinks is bound, which turns "the draw did nothing" into
+        // a specific missing or wrong piece of state. (Each getter addrefs what it returns; this
+        // harness exits immediately, so the references are left to the process teardown.)
+        let get_topo: extern "system" fn(*mut c_void, *mut u32) = context.method(83);
+        let mut topo = 0u32;
+        get_topo(context.vtbl as *mut c_void, &mut topo);
+        let get_layout: extern "system" fn(*mut c_void, *mut *mut c_void) = context.method(78);
+        let mut layout_out = core::ptr::null_mut();
+        get_layout(context.vtbl as *mut c_void, &mut layout_out);
+        let get_vb: extern "system" fn(
+            *mut c_void,
+            UINT,
+            UINT,
+            *mut *mut c_void,
+            *mut UINT,
+            *mut UINT,
+        ) = context.method(79);
+        let mut vb_out = core::ptr::null_mut();
+        let mut stride_out = 0u32;
+        let mut off_out = 0u32;
+        get_vb(
+            context.vtbl as *mut c_void,
+            0,
+            1,
+            &mut vb_out,
+            &mut stride_out,
+            &mut off_out,
+        );
+        let get_rt: extern "system" fn(*mut c_void, UINT, *mut *mut c_void, *mut *mut c_void) =
+            context.method(89);
+        let mut rtv_out = core::ptr::null_mut();
+        let mut dsv_out = core::ptr::null_mut();
+        get_rt(
+            context.vtbl as *mut c_void,
+            1,
+            &mut rtv_out,
+            &mut dsv_out,
+        );
+        let get_vp: extern "system" fn(*mut c_void, *mut UINT, *mut D3D11_VIEWPORT) =
+            context.method(95);
+        let mut nvp = 1u32;
+        let mut vp2 = D3D11_VIEWPORT {
+            TopLeftX: -1.0,
+            TopLeftY: -1.0,
+            Width: 0.0,
+            Height: 0.0,
+            MinDepth: 0.0,
+            MaxDepth: 0.0,
+        };
+        get_vp(context.vtbl as *mut c_void, &mut nvp, &mut vp2);
+        let get_vs: extern "system" fn(*mut c_void, *mut *mut c_void, *mut *mut c_void, *mut UINT) =
+            context.method(76);
+        let mut vs_out = core::ptr::null_mut();
+        // Canonical usage: a one-slot class-instance array alongside the count. Passing a null
+        // array with a non-null count is the form the runtime can reject, and a rejected getter
+        // would leave `vs_out` untouched - reporting an unbound shader that is in fact bound.
+        let mut ci = core::ptr::null_mut();
+        let mut nci = 1u32;
+        get_vs(
+            context.vtbl as *mut c_void,
+            &mut vs_out,
+            &mut ci,
+            &mut nci,
+        );
+        if !ci.is_null() {
+            let rel_ci: extern "system" fn(*mut c_void) -> u32 = unsafe {
+                core::mem::transmute(*(ci as *mut *const usize).offset(2))
+            };
+            rel_ci(ci);
+        }
+        let get_ps: extern "system" fn(*mut c_void, *mut *mut c_void, *mut *mut c_void, *mut UINT) =
+            context.method(74);
+        let mut ps_out = core::ptr::null_mut();
+        let mut ci2 = core::ptr::null_mut();
+        let mut nci2 = 1u32;
+        get_ps(
+            context.vtbl as *mut c_void,
+            &mut ps_out,
+            &mut ci2,
+            &mut nci2,
+        );
+        if !ci2.is_null() {
+            let rel_ci: extern "system" fn(*mut c_void) -> u32 = unsafe {
+                core::mem::transmute(*(ci2 as *mut *const usize).offset(2))
+            };
+            rel_ci(ci2);
+        }
+        let get_vscb: extern "system" fn(*mut c_void, UINT, UINT, *mut *mut c_void) =
+            context.method(72);
+        let mut cb_out = core::ptr::null_mut();
+        get_vscb(context.vtbl as *mut c_void, 0, 1, &mut cb_out);
+        let get_srv: extern "system" fn(*mut c_void, UINT, UINT, *mut *mut c_void) =
+            context.method(73);
+        let mut srv_out = core::ptr::null_mut();
+        get_srv(context.vtbl as *mut c_void, 0, 1, &mut srv_out);
+        println!(
+            "[hostcheck] 7d bound: topo={} layout={:p} vs={:p} (classes={}) ps={:p} cb={:p} \
+             vb={:p} stride={} off={} rtv={:p} (set={:p}) dsv={:p} vp={}x{}@{},{} srv={:p} | \
+             pipeline: vs={:p} ps={:p} layout={:p}",
+            topo, layout_out, vs_out, nci, ps_out, cb_out, vb_out, stride_out, off_out,
+            rtv_out, rt, dsv_out, vp2.Width, vp2.Height, vp2.TopLeftX, vp2.TopLeftY, srv_out,
+            p.vs.vtbl, p.ps.vtbl, p.input_layout.vtbl
+        );
+        // Isolate the setter from the object.
+        //
+        // `VSGetShader` reports nothing bound while every other state - including the pixel
+        // shader, bound through the identical call - reads back correctly. Feeding the *pixel*
+        // shader to `VSSetShader` splits the two remaining explanations: if the getter then
+        // reports the PS, the setter works and the fault is in `p.vs` itself; if it still reports
+        // nothing, the setter call is the broken link. Both results are followed by restoring the
+        // real vertex shader so the draw below stays comparable.
+        set_vs(context.vtbl as *mut c_void, p.ps.vtbl as *mut c_void, 0);
+        let mut vs_probe = core::ptr::null_mut();
+        get_vs(context.vtbl as *mut c_void, &mut vs_probe, &mut ci, &mut nci);
+        println!(
+            "[hostcheck] 7e VSSetShader(p.ps={:p}) -> VSGetShader={:p} (setter works if equal)",
+            p.ps.vtbl, vs_probe
+        );
+        set_vs(context.vtbl as *mut c_void, p.vs.vtbl as *mut c_void, 0);
+        let mut vs_again = core::ptr::null_mut();
+        get_vs(context.vtbl as *mut c_void, &mut vs_again, &mut ci, &mut nci);
+        println!(
+            "[hostcheck] 7e VSSetShader(p.vs={:p}) -> VSGetShader={:p}",
+            p.vs.vtbl, vs_again
+        );
+
+        // What *is* `p.vs`? `ID3D11VertexShader` and `ID3D11PixelShader` both derive straight
+        // from `ID3D11DeviceChild` and declare no methods of their own, so no vtable walk can
+        // tell them apart - only `QueryInterface` with the IID read from the kit's header can.
+        // This is the question 7e left open: a vertex shader object that `VSSetShader` refuses,
+        // and a pixel shader object that `PSSetShader` accepts, is not the same kind of object.
+        let qi: extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> HRESULT =
+            p.vs.method(0);
+        let mut as_vs = core::ptr::null_mut();
+        let hr_v = qi(
+            p.vs.vtbl as *mut c_void,
+            &IID_ID3D11VERTEXSHADER,
+            &mut as_vs,
+        );
+        let mut as_ps = core::ptr::null_mut();
+        let hr_v2 = qi(
+            p.vs.vtbl as *mut c_void,
+            &IID_ID3D11PIXELSHADER,
+            &mut as_ps,
+        );
+        let qi_ps: extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> HRESULT =
+            p.ps.method(0);
+        let mut ps_as_ps = core::ptr::null_mut();
+        let hr_p = qi_ps(
+            p.ps.vtbl as *mut c_void,
+            &IID_ID3D11PIXELSHADER,
+            &mut ps_as_ps,
+        );
+        println!(
+            "[hostcheck] 7f QI(p.vs): as_VS=0x{:08X}->{:p} as_PS=0x{:08X}->{:p} | QI(p.ps): as_PS=0x{:08X}->{:p}",
+            hr_v as u32, as_vs, hr_v2 as u32, as_ps, hr_p as u32, ps_as_ps
+        );
+
         // The GPU's own account of what this draw does. `Draw` returns void, so an HRESULT can
         // never say whether it rasterized anything; these counters split "nothing happened" into
         // the three different failures it could be: no vertices entered the input assembler, the
