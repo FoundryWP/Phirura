@@ -129,6 +129,9 @@ $linkArgs = @(
     "/EXPORT:wp81_rs_start_upto",
     "/EXPORT:wp81_rs_clear",
     "/EXPORT:wp81_rs_draw_test_quad",
+    # Pointer input, one import for all three pointer states (down / up / reset - see the export's
+    # own doc). Feeds the follow-finger quad, which is the interaction half of Stage 1.
+    "/EXPORT:wp81_rs_set_touch",
     "/EXPORT:wp81_rs_present",
     "/EXPORT:wp81_rs_stop",
     "/EXPORT:wp81_rs_stage",

@@ -63,6 +63,45 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_rs_draw_test_quad();
 
+        /// <summary>Pointer input for the follow-finger quad, in **viewport** pixels.
+        /// `down` is tri-state: `1` down, `0` lifted, `-1` reset to never-touched.</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void wp81_rs_set_touch(float x, float y, int down);
+
+        private static bool _touchImportMissing;
+
+        /// <summary>
+        /// Hand Rust a pointer position, in viewport pixels (layout units x the display scale).
+        ///
+        /// <paramref name="down"/> is tri-state because one import is easier to keep honest than
+        /// three: `1` = the finger is down and the quad follows every move, `0` = it was lifted and
+        /// the quad stays where the finger left it (Rust arms a readback on that edge, which is how
+        /// the log proves the quad arrived), `-1` = forget the touch, so a restart recentres.
+        ///
+        /// A missing export is reported exactly once: an appx deployed before the DLL grew this
+        /// symbol would otherwise write a line per pointer event, and the interesting part of the
+        /// log would be that spam.
+        /// </summary>
+        public static bool SetTouch(float x, float y, int down)
+        {
+            try
+            {
+                wp81_rs_set_touch(x, y, down);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (!_touchImportMissing)
+                {
+                    _touchImportMissing = true;
+                    AppLog.WriteSync("RustRenderer.SetTouch: import failed ("
+                        + ex.GetType().Name + " " + ex.Message
+                        + ") - the DLL predates wp81_rs_set_touch?");
+                }
+                return false;
+            }
+        }
+
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_rs_present();
 
@@ -223,7 +262,8 @@ namespace Phirura
 
         /// <summary>
         /// One pixel read back out of the finished frame, packed AARRGGBB (see
-        /// <c>wp81_rs_sis_pixel</c>). Index 0..3 selects the probe point.
+        /// <c>wp81_rs_sis_pixel</c>). Index 0..3 selects a startup probe point, index 4 the touch
+        /// probe (where a finger left the quad).
         ///
         /// Read it only after <c>wp81_rs_sis_pxseq</c> says a readback completed: a returned zero
         /// is a measured black, and is otherwise indistinguishable from "no measurement ran".
@@ -477,6 +517,11 @@ namespace Phirura
                         + " st=" + Vd(7)
                         + " | top=" + PxHex(0) + " mid=" + PxHex(1)
                         + " mid2=" + PxHex(2) + " bot=" + PxHex(3)
+                        // The touch probe point, present only in probes taken after a finger moved
+                        // the quad (`probes` >= 5). `FFFF6633` here means the quad arrived where the
+                        // finger left it; `mid` going clear in the same line is the other half of
+                        // that proof - it can only be clear at the centre if the quad *left*.
+                        + (Vd(6) >= 5 ? " tk=" + PxHex(4) : "")
                         + " | vp=(" + (Vd(0) / 100.0) + "," + (Vd(1) / 100.0) + ") "
                         + (Vd(2) / 100.0) + "x" + (Vd(3) / 100.0)
                         + " depth=(" + (Vd(4) / 1000.0) + "," + (Vd(5) / 1000.0) + ")"

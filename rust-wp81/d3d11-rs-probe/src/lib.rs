@@ -166,6 +166,142 @@ pub(crate) unsafe fn set_tick(n: i32) {
 }
 
 // ===========================================================================
+// touch: the follow-finger quad (Stage 1's interaction test)
+// ===========================================================================
+
+/// Where the finger last was, in **viewport** pixels, plus the flags the effect needs.
+///
+/// A plain `static mut` rather than atomics, for the same reason `STATE` is one: every access is
+/// on the UI thread. Route 3 must call `BeginDraw`/`EndDraw` on the thread that owns the
+/// `SurfaceImageSource`, and that is the same thread XAML raises `PointerMoved` on, so writer and
+/// reader are one thread and there is nothing to make atomic.
+struct Touch {
+    /// Last position in viewport pixels - the space `State::width`/`State::height` size.
+    x: f32,
+    y: f32,
+    /// Set by the first finger-down, so the quad stays dead centre until the test really touches.
+    seen: bool,
+    /// Whether a finger is down *now*; its falling edge arms the verification readback.
+    down: bool,
+    /// One-shot: read the surface back where the quad came to rest, which is the only evidence
+    /// that it *arrived* there rather than merely leaving the centre.
+    probe: bool,
+    /// Frames drawn so far, and the frame the last readback was armed on - the rate limit.
+    ///
+    /// A readback is a `CopyResource` of the whole surface followed by a *blocking* `Map`, and on
+    /// the Adreno 225 that costs roughly 50 ms of the next frame's budget: the 5-second FPS line
+    /// measured 60.0 with none running, 54.6 with seven, and 50.0 with seventeen. A probe that is
+    /// there to make the measurement trustworthy must not be the thing that makes it look bad, so
+    /// arming is limited to one per 60 frames - about one per second at the phone's own rate, which
+    /// still leaves a `px seq=` line per second of tapping while costing ~1% of frames.
+    frames: u32,
+    last_probe: u32,
+}
+
+static mut TOUCH: Touch = Touch {
+    x: 0.0,
+    y: 0.0,
+    seen: false,
+    down: false,
+    probe: false,
+    frames: 0,
+    last_probe: 0,
+};
+
+/// Record a pointer position in viewport pixels. `down` is tri-state:
+///
+/// * `> 0` - finger down: the quad follows every move;
+/// * `= 0` - finger lifted: the quad stays where the finger left it, and one readback is armed;
+/// * `< 0` - reset to "never touched", so a restart brings the quad back to the centre.
+///
+/// Deliberately a single import taking all three: C# has one `Pointer*` handler and one place to
+/// get the position from, and there is no second entry point whose `down` default could disagree
+/// with the first.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_rs_set_touch(x: f32, y: f32, down: i32) {
+    let t = &mut *core::ptr::addr_of_mut!(TOUCH);
+    if down < 0 {
+        t.x = 0.0;
+        t.y = 0.0;
+        t.seen = false;
+        t.down = false;
+        t.probe = false;
+        t.frames = 0;
+        // Not 0: the limit is a *distance*, and the first gesture must be able to pass it. With
+        // this the distance at reset is exactly `TOUCH_PROBE_INTERVAL`, so one probe is owed.
+        t.last_probe = 0u32.wrapping_sub(TOUCH_PROBE_INTERVAL);
+        return;
+    }
+    t.x = x;
+    t.y = y;
+    if down > 0 {
+        t.seen = true;
+        t.down = true;
+        return;
+    }
+    if t.down {
+        t.down = false;
+        // Armed on the falling edge, and only then: the position a finger *leaves* the screen at
+        // is where the quad comes to rest, so this is one probe per gesture rather than one per
+        // pointer event. Two more conditions gate it —
+        //
+        //  * `pixel_seq >= 4`: a readback inside the five-frame startup window would bump the
+        //    sequence and shift the variant numbers the table maps, so the log would describe
+        //    experiments that never ran;
+        //  * the frame distance: see `Touch::frames`, the ~50 ms-per-probe cost that shows up in
+        //    the FPS line as a renderer that looks slower than it is.
+        if st().surface.pixel_seq >= 4
+            && t.frames.wrapping_sub(t.last_probe) >= TOUCH_PROBE_INTERVAL
+        {
+            t.probe = true;
+            t.last_probe = t.frames;
+        }
+    }
+}
+
+/// Frames between two touch readbacks. 60 is about a second at the phone's own frame rate.
+const TOUCH_PROBE_INTERVAL: u32 = 60;
+
+/// Count one drawn frame, for [`Touch::frames`]. Called once per `wp81_rs_draw_test_quad`, so the
+/// rate limit above is measured in *frames* and not in wall time - it needs no timer import, and
+/// it stays correct if the frame rate itself is what dropped.
+#[inline]
+pub(crate) unsafe fn touch_frame() {
+    let t = &mut *core::ptr::addr_of_mut!(TOUCH);
+    t.frames = t.frames.wrapping_add(1);
+}
+
+/// Where the quad should sit, in viewport pixels, or `None` while no finger has ever touched the
+/// screen - which is what keeps the first five frames byte-identical to the run that proved the draw.
+#[inline]
+pub(crate) unsafe fn touch_rest() -> Option<(f32, f32)> {
+    let t = &*core::ptr::addr_of!(TOUCH);
+    if t.seen {
+        Some((t.x, t.y))
+    } else {
+        None
+    }
+}
+
+/// Take the armed readback request. One-shot, so consuming it here means one probe per gesture
+/// rather than one per pointer event, and the arming side additionally holds it to one per
+/// [`TOUCH_PROBE_INTERVAL`] frames - dragging therefore costs at most one `CopyResource` of the
+/// whole surface per second instead of one per event.
+#[inline]
+pub(crate) unsafe fn touch_probe_armed() -> bool {
+    let t = &mut *core::ptr::addr_of_mut!(TOUCH);
+    let armed = t.probe;
+    t.probe = false;
+    armed
+}
+
+/// Forget any touch. Called from `release_all` so a stopped or restarted run cannot present the
+/// old run's finger position as its own - the same rule the readback texture is released under.
+unsafe fn touch_reset() {
+    wp81_rs_set_touch(0.0, 0.0, -1);
+}
+
+// ===========================================================================
 // vtable snapshot (diagnostic for the composition-swapchain hard fault)
 // ===========================================================================
 
@@ -725,10 +861,11 @@ pub unsafe extern "C" fn wp81_rs_sis_diag(index: i32) -> i32 {
 
 /// One pixel read back out of the frame the driver actually rasterized, packed `0xAARRGGBB`.
 ///
-/// Index 0..3 selects a probe point (see `SurfaceChain::probe_pixels`); anything else returns
-/// `0xFF00FFFF`. Check [`wp81_rs_sis_pxseq`] first — it is `-1` until a probe has run, and that is
-/// the difference between "the readback reported black" and "no readback ran", which the pixel
-/// value alone cannot show.
+/// Index 0..3 selects a startup probe point, index 4 the touch probe (where a finger left the quad)
+/// — see `SurfaceChain::probe_pixels`; anything out of range returns `0xFF00FFFF`. Check
+/// [`wp81_rs_sis_pxseq`] first — it is `-1` until a probe has run, and that is the difference
+/// between "the readback reported black" and "no readback ran", which the pixel value alone cannot
+/// show.
 #[no_mangle]
 pub unsafe extern "C" fn wp81_rs_sis_pixel(index: i32) -> u32 {
     let s = st();
@@ -1364,6 +1501,9 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
     let ctx = s.context;
     // `set_tick` (not `bump(s, ..)`) because `p` holds an immutable borrow of `s.pipeline` here.
     set_tick(60); // frame: Map(constant buffer) + Map(vertex buffer) + bind + Draw(6)
+    // Rate-limit the gesture readback (see `Touch::frames`). Counted here, with the pipeline
+    // already known to be bound, so a failed frame does not spend a probe slot.
+    touch_frame();
 
     // ---- which experiment this frame runs -------------------------------------------------
     //
@@ -1498,11 +1638,27 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
         0.0, 0.0, 1.0, 0.0, //
         0.0, 0.0, 0.0, 1.0,
     ];
-    let proj = if variant == 2 || variant == 3 {
+    let mut proj = if variant == 2 || variant == 3 {
         WIDE_PROJ
     } else {
         projection(aspect)
     };
+    // Follow the finger by shifting the quad in clip space: put the translation into the two
+    // constant terms of the same matrix. `mul(float4(i.pos, 1.0), u_proj)` evaluates row k as
+    // `x*mem[k*4] + y*mem[k*4+1] + z*mem[k*4+2] + mem[k*4+3]`, so index 3 is what is *added* to
+    // clip.x and index 7 what is added to clip.y - which makes this a CPU-side translate with no
+    // second constant buffer, no shader edit and no extra upload. Both terms are exactly 0 until
+    // a finger has been seen, so the startup probes are untouched.
+    //
+    // Gated on the probe window for the same reason the arm in `wp81_rs_set_touch` is: a quad
+    // that moved during those five frames would turn `mid=FFFF6633` into `mid=FF4C8CE5` and read
+    // as a regression in the very log that proves the draw works.
+    if s.surface.pixel_seq >= 4 {
+        if let Some((tx, ty)) = touch_rest() {
+            proj[3] += 2.0 * tx / s.width as f32 - 1.0;
+            proj[7] += 1.0 - 2.0 * ty / s.height as f32;
+        }
+    }
     core::ptr::copy_nonoverlapping(
         proj.as_ptr() as *const u8,
         mapped.pData as *mut u8,
@@ -1685,7 +1841,12 @@ pub unsafe extern "C" fn wp81_rs_draw_test_quad() -> i32 {
     // pixels and the viewport that produced them turn "the screen is blue" into a log line that
     // says *where* the drawing stopped. Gated on `pixel_seq` so the copy and the map run for the
     // first few frames and then stop costing ~4 MB of traffic every frame.
-    if s.route == 3 && s.surface.pixel_seq < 4 {
+    //
+    // The `||` arm is the touch gesture's own readback: one probe at the position the quad came to
+    // rest in, taken the moment the finger lifts. `touch_probe_armed()` must sit second - it is
+    // one-shot, so evaluating it first would spend the request on frames where the probe does not
+    // run, and the gesture would leave no trace in the log at all.
+    if s.route == 3 && (s.surface.pixel_seq < 4 || touch_probe_armed()) {
         s.surface.vdbg[0] = (viewport.TopLeftX * 100.0) as i32;
         s.surface.vdbg[1] = (viewport.TopLeftY * 100.0) as i32;
         s.surface.vdbg[2] = (viewport.Width * 100.0) as i32;
@@ -1746,6 +1907,9 @@ pub unsafe extern "C" fn wp81_rs_present() -> i32 {
 /// Called by [`wp81_rs_stop`] and at the top of a limited [`wp81_rs_start_upto`] run, so eight
 /// bisect steps do not leak eight devices on a 512 MB phone.
 unsafe fn release_all(s: &mut State) {
+    // Forget the finger along with the device: `wp81_rs_stop()` runs between bisect steps, and a
+    // quad left where the last run's finger was would make the next run's first frames unexplained.
+    touch_reset();
     if let Some(p) = s.pipeline.take() {
         p.vs.release();
         p.ps.release();

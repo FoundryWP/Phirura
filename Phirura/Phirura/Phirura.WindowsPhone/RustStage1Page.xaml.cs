@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
+using Windows.UI.Xaml.Input;
 using Windows.UI.Xaml.Media;
 using Windows.UI.Xaml.Navigation;
 
@@ -27,6 +28,28 @@ namespace Phirura
     {
         private readonly Stopwatch _clock = new Stopwatch();
         private int _frames;
+        /// <summary>
+        /// The 5-second average the log carries, kept separate from <see cref="_clock"/> (1 s, the
+        /// HUD) because they answer different questions: the HUD tells the person holding the phone
+        /// what it is doing *now*, the log line tells whoever reads it later whether the renderer
+        /// was ever competing with something else on the device.
+        /// </summary>
+        private readonly Stopwatch _clock5 = new Stopwatch();
+        private int _frames5;
+        /// <summary>
+        /// Layout units to viewport pixels, captured from <c>RawPixelsPerViewPixel</c> during bring-up
+        /// and used for every pointer position afterwards.
+        ///
+        /// Rust's projection is expressed in viewport pixels (it sizes the viewport from
+        /// <c>width x height</c>), while XAML reports pointer positions in layout units - so this
+        /// factor is the only thing standing between "the quad is under the finger" and "the quad is
+        /// somewhere on the screen". A stale value of 1.0 would put everything in the top-left
+        /// quarter, which is why it is written on every bring-up rather than once.
+        /// </summary>
+        private double _scale = 1.0;
+        /// <summary>True while a finger is down, so press/release can be logged and moves cannot.</summary>
+        private bool _touchDown;
+        private bool _touchHooked;
         private bool _hookAttached;
         /// <summary>
         /// Set once the first frame's outcome has been logged. That line is the only place the phone
@@ -169,6 +192,19 @@ namespace Phirura
             this.Loaded -= OnPageLoaded;
             AppLog.WriteSync("RustStage1: OnPageLoaded; RootGrid=" + RootGrid.ActualWidth
                 + "x" + RootGrid.ActualHeight);
+            // Pointer input. Hooked once, here, rather than in StartRenderer: a gesture that lands
+            // before the renderer is up should still be reported, because "the touch did nothing" and
+            // "the touch never reached the page" are otherwise the same line in the log. The HUD
+            // overlay is not hit-test visible and the buttons handle their own clicks, but both
+            // bubble, so a press anywhere on this grid arrives here.
+            if (!_touchHooked)
+            {
+                _touchHooked = true;
+                RootGrid.PointerPressed += OnPointerPressed;
+                RootGrid.PointerMoved += OnPointerMoved;
+                RootGrid.PointerReleased += OnPointerReleased;
+                RootGrid.PointerCaptureLost += OnPointerCaptureLost;
+            }
             // The panel must be laid out before its pixel size is meaningful.
             // On WP8.1 CoreDispatcher has RunAsync, not BeginInvoke.
             var ignore = this.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal,
@@ -204,6 +240,9 @@ namespace Phirura
                 uint h = (uint)Math.Max(1.0, Math.Round(RootGrid.ActualHeight * scale));
                 AppLog.WriteSync("RustStage1: viewport " + RootGrid.ActualWidth + "x" + RootGrid.ActualHeight
                     + " -> " + w + "x" + h + " px @ " + scale.ToString("0.0"));
+                // Pointer positions are in layout units; Rust's projection is in the pixel viewport
+                // above. Same number, taken at the same moment as the size it describes.
+                _scale = scale;
 
                 // The bring-up is split in two because the two halves have different thread
                 // requirements, and both requirements were measured on the device:
@@ -307,8 +346,15 @@ namespace Phirura
 
                 _clock.Start();
                 _frames = 0;
+                _clock5.Restart();
+                _frames5 = 0;
                 _firstFrameLogged = false;
                 _lastPxText = null;
+                // Recentre. Rust already forgets the touch inside `release_all`, which ran during
+                // prepare; doing it here too makes the *page* the one that decided where the quad
+                // starts, and gives the missing-import case a line of its own instead of a silent
+                // quad that never comes back to the middle.
+                RustRenderer.SetTouch(0, 0, -1);
                 if (!_hookAttached)
                 {
                     CompositionTarget.Rendering += OnFrame;
@@ -440,6 +486,91 @@ namespace Phirura
                 FpsText.Text = fps.ToString("0.0") + " fps";
                 _clock.Restart();
                 _frames = 0;
+            }
+
+            // The 5-second average, into the log rather than the HUD.
+            //
+            // One line every 5 s whether the number is good or bad, and *not* deduplicated: a
+            // renderer holding 60 fps while the phone does something else behind it looks identical
+            // to one that is simply idle until the samples are spread over time. Cheap enough to
+            // keep (one string and one file append), which is the whole reason it is a fixed window
+            // and not a profiler.
+            _frames5++;
+            if (_clock5.ElapsedMilliseconds >= 5000)
+            {
+                long ms = _clock5.ElapsedMilliseconds;
+                AppLog.WriteSync("RustStage1: fps avg=" + (_frames5 * 1000.0 / ms).ToString("0.0")
+                    + " over " + ms + " ms (" + _frames5 + " frames)"
+                    + " verts=" + RustRenderer.LastVertexCount
+                    + " stage=" + RustRenderer.Stage
+                    + " pxseq=" + RustRenderer.PxSeq);
+                _clock5.Restart();
+                _frames5 = 0;
+            }
+        }
+
+        // ---- pointer input ------------------------------------------------------------------------
+        //
+        // Everything below converts one thing and hands it to Rust: where the finger is, in the
+        // pixel viewport. There is no managed rendering state to keep in sync - the quad's position
+        // *is* Rust's projection matrix - so a missed move costs a frame of lag and nothing else.
+
+        /// <summary>
+        /// Forward a pointer position to Rust, in viewport pixels.
+        ///
+        /// <paramref name="down"/> is the tri-state Rust's single import takes: 1 down (the quad
+        /// follows), 0 lifted (it stays, and Rust arms one readback there), -1 never-touched.
+        /// Only presses and lifts are logged - a move is up to 60 a second, and the interesting
+        /// question is not where the finger was but that the gesture started and ended.
+        /// </summary>
+        private void ReportTouch(PointerRoutedEventArgs e, int down)
+        {
+            var pt = e.GetCurrentPoint(RootGrid);
+            float x = (float)(pt.Position.X * _scale);
+            float y = (float)(pt.Position.Y * _scale);
+            bool edge = (down == 1) != _touchDown;
+            _touchDown = down == 1;
+            RustRenderer.SetTouch(x, y, down);
+            // Only the edges. A hover-style move (no button) would otherwise log on every event,
+            // and moves during a drag are exactly the traffic the 5-second FPS line exists to keep
+            // the log readable against.
+            if (edge)
+            {
+                AppLog.WriteSync("RustStage1: touch " + (down == 1 ? "down" : "up")
+                    + " @(" + x.ToString("0") + "," + y.ToString("0") + ") vp"
+                    + " scale=" + _scale.ToString("0.0")
+                    + " started=" + RustRenderer.Started);
+            }
+        }
+
+        private void OnPointerPressed(object sender, PointerRoutedEventArgs e)
+        {
+            ReportTouch(e, 1);
+        }
+
+        private void OnPointerMoved(object sender, PointerRoutedEventArgs e)
+        {
+            // `IsLeftButtonPressed` rather than an unconditional 1: a move with no button is the
+            // hover/second-finger case, and telling Rust "down" for it would leave `down` stuck on
+            // after the real finger lifts, so the readback would never be armed.
+            ReportTouch(e, e.GetCurrentPoint(RootGrid).Properties.IsLeftButtonPressed ? 1 : 0);
+        }
+
+        private void OnPointerReleased(object sender, PointerRoutedEventArgs e)
+        {
+            ReportTouch(e, 0);
+        }
+
+        /// <summary>
+        /// The finger is gone without a `PointerReleased` - the usual reason a XAML app sees one is
+        /// another element taking capture. Lift anyway, or `down` stays set in Rust and the quad
+        /// would follow a finger that is no longer there, with the readback never armed to say so.
+        /// </summary>
+        private void OnPointerCaptureLost(object sender, PointerRoutedEventArgs e)
+        {
+            if (_touchDown)
+            {
+                ReportTouch(e, 0);
             }
         }
 

@@ -201,12 +201,17 @@ pub struct SurfaceChain {
     pub stage_tex: ComPtr,
     /// `stage_tex`'s `[width, height, format]`.
     pub stage_key: [i32; 3],
-    /// Four pixels read back out of the frame, packed `0xAARRGGBB`.
+    /// Four pixels read back out of the frame, packed `0xAARRGGBB`, plus a fifth under the finger.
     ///
     /// Nothing in a `draw` call reports whether anything rasterized — `Draw` returns `void`, and
     /// `ClearRenderTargetView` succeeding says nothing about the fragments after it. These values
     /// are the only evidence the phone log can carry about what the driver actually painted.
-    pub pixels: [u32; 4],
+    ///
+    /// The fifth slot exists only once a touch has moved the quad, and is all zero until then: the
+    /// four original points answer "did the draw happen", this one answers "did it follow the
+    /// finger" — `vdbg[6]` says how many were actually read, so a `00000000` there is never
+    /// mistaken for a measured zero.
+    pub pixels: [u32; 5],
     /// The probe's sequence number from 0, or `-1` while nothing has ever been measured — which
     /// is what separates "measured a zero" from "measured nothing", the two a default value
     /// would merge.
@@ -241,7 +246,7 @@ impl SurfaceChain {
         diag: DIAG_INIT,
         stage_tex: ComPtr::NULL,
         stage_key: [0; 3],
-        pixels: [0; 4],
+        pixels: [0; 5],
         pixel_seq: -1,
         vdbg: [0; 8],
     };
@@ -348,7 +353,7 @@ impl SurfaceChain {
             need_copy: false,
             stage_tex: ComPtr::NULL,
             stage_key: [0; 3],
-            pixels: [0; 4],
+            pixels: [0; 5],
             pixel_seq: -1,
             vdbg: [0; 8],
         })
@@ -760,18 +765,24 @@ impl SurfaceChain {
     /// Copy the finished frame into a CPU-readable texture and read four pixels out of it.
     ///
     /// Nothing above this call can fail *visibly*: `Draw` returns `void`, and a clear that lands
-    /// proves only that the view is bound — not that a single fragment was rasterized. Two rounds
-    /// of static analysis have not found why the Lumia paints the clear colour and no quad, and
-    /// each further guess costs the user another look at the device, so the frame is measured
-    /// instead of reasoned about.
+    /// proves only that the view is bound — not that a single fragment was rasterized. Static
+    /// analysis did eventually name the two faults (`VSSetShader` called with the wrong arity, and
+    /// `Draw(4, 0)` over a triangle list forming a single triangle), but the readback stays: it is
+    /// what turned each of them from a guess into a line the phone could print, and it is the only
+    /// thing that can say a *later* change broke the draw.
     ///
     /// The four points separate the explanations that are still open:
     ///
     ///   * `(2, 0)` — the top row, *outside* the viewport. `ClearRenderTargetView` ignores the
     ///     viewport, so this says whether the clear reached the surface the compositor shows.
-    ///   * `(w/2, h/2)` — the centre of the viewport, where the quad is: did the draw rasterize?
+    ///   * `(w/2, h/2)` — the centre of the viewport, where the quad is at rest: did the draw
+    ///     rasterize?
     ///   * `(w/2, h/4)`, `(w/2, h-8)` — inside the viewport, away from the quad: the clear colour
     ///     itself, so a centre pixel matching them means something rather than merely being blue.
+    ///
+    /// A fifth point is read only once a finger has moved the quad: the spot the quad came to rest
+    /// in. `vdbg[6]` reports how many were actually read, so the empty fifth slot of the startup
+    /// window can never be read as a measured zero.
     ///
     /// `pixels` is packed `0xAARRGGBB`; `pixel_seq` numbers the completed probes from 0 (and stays
     /// at `-1` until one succeeds, which is what separates "measured a zero" from "measured
@@ -898,19 +909,32 @@ impl SurfaceChain {
         // ---- the four points ---------------------------------------------------------------
         let w = d.Width as i32;
         let h = d.Height as i32;
-        let pts: [(i32, i32); 4] = [
-            (2, 0),         // above the viewport: the clear, unconstrained by the viewport
-            (w / 2, h / 2), // viewport centre: the quad
-            (w / 2, h / 4), // viewport, away from the quad: the clear colour
-            (w / 2, h - 8), // viewport bottom
-        ];
+        // Four fixed points, plus a fifth once the quad has been moved by a finger. `pts[1]` is
+        // where the quad sits *at rest*, so a touch probe reading the clear colour there and
+        // `FFFF6633` at `pts[4]` is the log's proof that the draw followed the finger rather than
+        // merely disappearing from the middle of the screen.
+        let mut pts: [(i32, i32); 5] = [(0, 0); 5];
+        pts[0] = (2, 0); // above the viewport: the clear, unconstrained by the viewport
+        pts[1] = (w / 2, h / 2); // viewport centre: the quad at rest
+        pts[2] = (w / 2, h / 4); // viewport, away from the quad: the clear colour
+        pts[3] = (w / 2, h - 8); // viewport bottom
+        let mut n = 4;
+        if let Some((tx, ty)) = crate::touch_rest() {
+            // The touch is in *viewport* pixels; these coordinates are in the surface, which the
+            // compositor may have parked a couple of pixels down (`frame_offset`).
+            pts[4] = (
+                (tx + self.frame_offset.x as f32) as i32,
+                (ty + self.frame_offset.y as f32) as i32,
+            );
+            n = 5;
+        }
         let base = mapped.pData as *const u8;
         let pitch = mapped.RowPitch as usize;
         // `DXGI_FORMAT_R8G8B8A8_UNORM` (28) is R,G,B,A; BGRA8 is the other way round, and reading
         // a BGRA surface as RGBA reports the clear colour's blue in the red channel — a wrong
         // answer with every field populated, which is worse than no answer.
         let rgba = d.Format == 28;
-        for (i, &(x, y)) in pts.iter().enumerate() {
+        for (i, &(x, y)) in pts[..n].iter().enumerate() {
             let x = x.max(0).min(w - 1);
             let y = y.max(0).min(h - 1);
             let p = base.add(y as usize * pitch + x as usize * 4);
@@ -930,7 +954,7 @@ impl SurfaceChain {
         } else {
             self.pixel_seq + 1
         };
-        self.vdbg[6] = 4;
+        self.vdbg[6] = n as i32;
         self.vdbg[7] = 0;
         0
     }
@@ -969,7 +993,7 @@ impl SurfaceChain {
         self.stage_tex.release();
         self.stage_tex = ComPtr::NULL;
         self.stage_key = [0; 3];
-        self.pixels = [0; 4];
+        self.pixels = [0; 5];
         self.pixel_seq = -1;
         self.vdbg = [0, 0, 0, 0, 0, 0, 0, -1];
         self.native.release();
