@@ -450,9 +450,14 @@ fn main() {
         set_samp(context.vtbl as *mut c_void, 0, 1, &smp);
         let set_blend: extern "system" fn(*mut c_void, *mut c_void, *const FLOAT, UINT) =
             context.method(D3D11CONTEXT_OMSETBLENDSTATE);
+        // EXPERIMENT: bind *no* blend state, which is D3D11's default opaque copy. It splits the
+        // two ways the centre can come back as the clear colour: with alpha blending on, a pixel
+        // shader that outputs zero leaves the destination untouched exactly as a rasterizer that
+        // never fired does, while opaque writes the shader's result outright — black means the
+        // texture path is broken, clear means no fragments were produced at all.
         set_blend(
             context.vtbl as *mut c_void,
-            p.blend.vtbl as *mut c_void,
+            core::ptr::null_mut(),
             core::ptr::null(),
             0xffff_ffff,
         );
@@ -462,6 +467,124 @@ fn main() {
         let draw: extern "system" fn(*mut c_void, UINT, UINT) = context.method(D3D11CONTEXT_DRAW);
         draw(context.vtbl as *mut c_void, 4, 0);
         println!("[hostcheck] 7 draw ok (Draw(4,0) through every bound slot)");
+
+        // ---- 7b. read the pixels back: the only check that says the quad *rasterized* --------
+        //
+        // Every check above answers an HRESULT, and `Draw` returns `void`, so this harness could
+        // print "ALL STAGE 1 CHECKS PASSED" over a frame that produced no fragments at all — which
+        // is how the Lumia spent several rounds showing a perfect clear colour and no quad while
+        // every gate stayed green. Reading the backbuffer turns the acceptance test into a pixel:
+        // the centre must be the quad (white test texture x vertex colour) and a corner must still
+        // be the clear colour. The draw path here is the same code the phone runs — same shaders,
+        // same vertices, same projection, same bind order — so a failure is reproducible without a
+        // deploy, and a pass moves the suspicion to what route 3 does differently.
+        let get_buffer2: extern "system" fn(
+            *mut c_void,
+            UINT,
+            *const Guid,
+            *mut *mut c_void,
+        ) -> HRESULT = swapchain.method(IDXGISWAPCHAIN_GETBUFFER);
+        let mut bb2 = ComPtr::NULL;
+        if get_buffer2(
+            swapchain.vtbl as *mut c_void,
+            0,
+            &IID_ID3D11TEXTURE2D as *const Guid,
+            &mut bb2.vtbl as *mut _ as *mut *mut c_void,
+        ) < 0
+            || bb2.is_null()
+        {
+            fail(9, "GetBuffer (readback)");
+        }
+        let get_desc: extern "system" fn(*mut c_void, *mut D3D11_TEXTURE2D_DESC) =
+            bb2.method(ID3D11TEXTURE2D_GETDESC);
+        let mut d = D3D11_TEXTURE2D_DESC::default();
+        get_desc(bb2.vtbl as *mut c_void, &mut d);
+        // Identical size and format, everything else stripped: a staging resource binds nothing
+        // and is the only usage a CPU read is allowed from.
+        let sd = D3D11_TEXTURE2D_DESC {
+            Width: d.Width,
+            Height: d.Height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: d.Format,
+            SampleDesc: d.SampleDesc,
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ,
+            MiscFlags: 0,
+        };
+        let create_tex: extern "system" fn(
+            *mut c_void,
+            *const D3D11_TEXTURE2D_DESC,
+            *const c_void,
+            *mut *mut c_void,
+        ) -> HRESULT = device.method(D3D11DEVICE_CREATETEXTURE2D);
+        let mut staging = ComPtr::NULL;
+        if create_tex(
+            device.vtbl as *mut c_void,
+            &sd,
+            core::ptr::null(),
+            &mut staging.vtbl as *mut _ as *mut *mut c_void,
+        ) < 0
+            || staging.is_null()
+        {
+            fail(9, "CreateTexture2D staging (readback)");
+        }
+        let copy: extern "system" fn(*mut c_void, *mut c_void, *mut c_void) =
+            context.method(D3D11CONTEXT_COPYRESOURCE);
+        copy(
+            context.vtbl as *mut c_void,
+            staging.vtbl as *mut c_void,
+            bb2.vtbl as *mut c_void,
+        );
+        let mut m2 = D3D11_MAPPED_SUBRESOURCE {
+            pData: core::ptr::null_mut(),
+            RowPitch: 0,
+            DepthPitch: 0,
+        };
+        // `D3D11_MAP_READ` is 1, not 3 — 3 is `READ_WRITE`, which a read-only staging texture
+        // refuses with `E_INVALIDARG`. That single digit cost a deploy to find on the phone.
+        if map(
+            context.vtbl as *mut c_void,
+            staging.vtbl as *mut c_void,
+            0,
+            D3D11_MAP_READ,
+            0,
+            &mut m2,
+        ) < 0
+        {
+            fail(9, "Map staging (readback)");
+        }
+        let rgba = d.Format == 28; // R8G8B8A8_UNORM is R,G,B,A; BGRA8 is the other way round
+        let read = |x: u32, y: u32| -> u32 {
+            let base = m2.pData as *const u8;
+            let p = base.add(y as usize * m2.RowPitch as usize + x as usize * 4);
+            let (r, g, b, a) = if rgba {
+                (*p, *p.add(1), *p.add(2), *p.add(3))
+            } else {
+                (*p.add(2), *p.add(1), *p, *p.add(3))
+            };
+            ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+        };
+        let center = read(w / 2, h / 2);
+        let corner = read(4, 4);
+        unmap(context.vtbl as *mut c_void, staging.vtbl as *mut c_void, 0);
+        staging.release();
+        bb2.release();
+        // The quad is white texture x (1.0, 0.4, 0.2, 1.0) alpha-blended over a clear of
+        // (0.05, 0.05, 0.1) — opaque, so 0xFFFF6633 exactly.
+        println!(
+            "[hostcheck] 7b readback center=0x{:08X} corner=0x{:08X} (want center=0xFFFF6633)",
+            center, corner
+        );
+        let (cr, cg, cb_) = (
+            (center >> 16) & 0xff,
+            (center >> 8) & 0xff,
+            center & 0xff,
+        );
+        if cr < 251 || !(94..=110).contains(&cg) || !(43..=59).contains(&cb_) {
+            fail(9, "quad did not rasterize: centre pixel is not the quad colour");
+        }
 
         // ---- 8. present ----
         let present: extern "system" fn(*mut c_void, UINT, UINT) -> HRESULT =

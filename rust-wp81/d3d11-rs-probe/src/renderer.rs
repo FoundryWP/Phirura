@@ -78,6 +78,10 @@ struct VSIn
     float3 pos : POSITION;
     float2 uv  : TEXCOORD0;
     float4 col : COLOR0;
+    // EXPERIMENT: the vertex id comes from the input assembler itself rather than from the vertex
+    // buffer, so this input needs no `D3D11_INPUT_ELEMENT_DESC`. It is how the shader can prove it
+    // ran without a single byte of uploaded vertex data.
+    uint   vid : SV_VertexID;
 };
 
 struct VSOut
@@ -90,9 +94,20 @@ struct VSOut
 VSOut vs_main(VSIn i)
 {
     VSOut o;
-    o.pos = mul(float4(i.pos, 1.0), u_proj);
-    o.uv  = i.uv;
-    o.col = i.col;
+    // EXPERIMENT: build the position from `SV_VertexID`, ignoring the vertex buffer entirely.
+    //
+    // The constant buffer has already been ruled out by the same trick (the screen stayed clear
+    // when `u_proj` was bypassed), and binding alpha was ruled out by an opaque blend, so what is
+    // left is either a vertex buffer that never reaches the shader, or a draw that never
+    // rasterizes. A triangle whose corners the shader invents itself survives the first of those;
+    // if this one is invisible too, the fault is downstream of the vertices and in the draw
+    // plumbing.
+    float2 xy = float2(-0.9, -0.9);
+    if (i.vid == 1) xy = float2(0.9, -0.9);
+    if (i.vid >= 2) xy = float2(0.0, 0.9);
+    o.pos = float4(xy, 0.0, 1.0);
+    o.uv  = float2(0.5, 0.5);
+    o.col = float4(1.0, 0.4, 0.2, 1.0);   // constant: keeps the texture path the only variable
     return o;
 }
 
