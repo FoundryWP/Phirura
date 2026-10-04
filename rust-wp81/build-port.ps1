@@ -227,7 +227,10 @@ $exports = @(
     "wp81_game_set_screen",
     # Sampled from a timer while `wp81_game_create` runs - see the note on the export. Without it a
     # create that takes the process down leaves nothing to read afterwards.
-    "wp81_game_progress"
+    "wp81_game_progress",
+    # Read in the turn after a failed create. `tracing` has no subscriber on the phone, so this is
+    # the only place the reason for `-1`/`-2`/`-100` survives at all.
+    "wp81_game_last_error"
 )
 
 # /FORCE:MULTIPLE is load-bearing, and the reason is not obvious from the log.

@@ -25,6 +25,10 @@ use core::ffi::c_void;
 /// surface stays readable.
 pub mod host;
 
+/// Container header walks for `wp81_audio_decode`, shared with the desktop M1 harness so the two
+/// cannot drift into disagreeing about what a file's length is.
+pub mod audio_info;
+
 // ===========================================================================
 // the shell callback table
 // ===========================================================================
@@ -131,8 +135,29 @@ fn cb() -> &'static HostCallbacks {
 // here rather than in the shims so that the shims stay independent of the shell.
 // ===========================================================================
 
+/// Decode enough of a buffer to answer `sample_rate` and `frame_count`.
+///
+/// The header walk runs *here*, in Rust, and the shell's `audio_decode` callback is only reached
+/// when this module does not recognise the container. That order is the whole point: the callback
+/// is a C# stub returning `1`, so before this existed the first resource-pack sound the engine
+/// asked for - `respack/click.ogg`, 10380 bytes - came back as
+/// `GameScene::new failed: ... audio decode failed (rc=1, 10380 bytes)`, which surfaced on the phone
+/// as nothing more than `GameCreate -> -2`. The walk needs no shell state: it reads bytes that are
+/// already in memory and writes two integers.
 #[no_mangle]
 pub unsafe extern "C" fn wp81_audio_decode(data: *const u8, len: usize, out: *mut DecodedAudio) -> i32 {
+    if data.is_null() || out.is_null() || len < 16 {
+        return 1;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(data, len) };
+    if let Some((rate, frames)) = audio_info::audio_info(bytes) {
+        let out = unsafe { &mut *out };
+        out.sample_rate = rate;
+        out.frame_count = frames;
+        return 0;
+    }
+    // Not a container we know. Ask the shell - it may be a format only it can read, and it is the
+    // side that will eventually play this anyway.
     match cb().audio_decode {
         Some(f) => f(data, len, out),
         None => 1,
@@ -534,6 +559,39 @@ pub extern "C" fn wp81_game_destroy() {
 #[no_mangle]
 pub extern "C" fn wp81_game_progress() -> u32 {
     host::progress_now()
+}
+
+/// Copy why the most recent `wp81_game_create` failed into `buf` as a NUL-terminated UTF-8 string.
+///
+/// Returns the bytes written excluding the NUL, `-1` when nothing has failed (or the last attempt
+/// succeeded), and `-2` when `cap` is too small for the message, in which case nothing is written.
+///
+/// This is what turns `GameCreate -> -2` into a sentence. `create` reports every failure through
+/// `tracing::error!` and there is no subscriber on the phone, so the event is dropped - the shell
+/// was left with one code standing for three unrelated causes (a chart the parser rejects, a
+/// `GameScene::new` that dies mid-texture, a `Main::new` with no font) and no way to tell them
+/// apart. The message must be read in the turn right after the call: it describes the last failure
+/// and is cleared by the next attempt.
+///
+/// # Safety
+/// `buf` must be writable for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_game_last_error(buf: *mut u8, cap: usize) -> i32 {
+    if buf.is_null() {
+        return -1;
+    }
+    host::with_last_error(|msg| {
+        let bytes = msg.as_bytes();
+        if bytes.len() + 1 > cap {
+            return -2;
+        }
+        // The single unsafe act in this function: handing a `&str` to a caller means writing
+        // through a raw pointer. The `bytes.len() + 1 > cap` check above is the whole safety
+        // argument, and the trailing NUL is what makes it a C string on the other side.
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+        *buf.add(bytes.len()) = 0;
+        bytes.len() as i32
+    })
 }
 
 /// Frames rendered so far, or -1 when no game is running.

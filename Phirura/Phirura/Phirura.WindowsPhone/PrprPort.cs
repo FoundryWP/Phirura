@@ -110,6 +110,11 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern uint wp81_game_progress();
 
+        // `cap` is `usize`, which is 4 bytes on the only target this DLL is ever loaded into - the
+        // same `uint` the texture path already uses for it.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_game_last_error(IntPtr buf, uint cap);
+
         // --- the Rust -> C# direction -------------------------------------
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -422,6 +427,48 @@ namespace Phirura
                 default: name = "step " + p; break;
             }
             return p + " (" + name + ")";
+        }
+
+        /// <summary>
+        /// Why the most recent <see cref="GameCreate"/> failed, or null when it has not.
+        ///
+        /// Read in the turn immediately after a non-zero return: it describes the <em>last</em>
+        /// failure and the next attempt overwrites it.
+        ///
+        /// This exists because Rust reports every construction failure with `tracing::error!` and
+        /// there is no tracing subscriber on the phone, so the event is dropped on the floor. The
+        /// shell was therefore left holding `-2` and nothing else, while `-2` stood for three
+        /// unrelated things - a chart the parser rejects, a `GameScene::new` that dies part-way
+        /// through its textures, and a `Main::new` that never got a font. Ten asset requests and a
+        /// six-second build looked identical to a missing file.
+        /// </summary>
+        public static string GameLastError()
+        {
+            // One message, not a stream: `create` records a single `String`. 4 KiB is well past the
+            // longest of the ones seen and keeps this a single fixed allocation.
+            const int cap = 4096;
+            IntPtr buffer = Marshal.AllocHGlobal(cap);
+            try
+            {
+                int len = wp81_game_last_error(buffer, (uint)cap);
+                if (len <= 0)
+                {
+                    // -1: nothing has failed, or the last attempt succeeded.
+                    // -2: would not fit; unreachable at this capacity, but not worth a silent 0 for.
+                    return null;
+                }
+                byte[] bytes = new byte[len];
+                Marshal.Copy(buffer, bytes, 0, len);
+                return System.Text.Encoding.UTF8.GetString(bytes, 0, len);
+            }
+            catch (Exception ex)
+            {
+                return "(reading the error back failed: " + ex.Message + ")";
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
         }
 
         // --- the texture registry's managed surface -----------------------

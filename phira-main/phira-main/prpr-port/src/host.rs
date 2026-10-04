@@ -402,6 +402,7 @@ pub fn create(folder: &str, chart_name: &str) -> i32 {
             Ok(m) => m,
             Err(e) => {
                 tracing::error!("Main::new failed: {e:?}");
+                set_error(format!("Main::new failed: {e:?}"));
                 return GAME_ERR_PARSE;
             }
         };
@@ -422,9 +423,16 @@ pub fn create(folder: &str, chart_name: &str) -> i32 {
     match res {
         Ok(code) => code,
         // A panic in the scene constructor must not take the process down: the shell reports the
-        // code and the log has the message.
-        Err(_) => {
-            tracing::error!("panic in wp81_game_create");
+        // code, and the message is taken off the payload because there is no stderr on the phone -
+        // this string is the only trace such a panic leaves anywhere.
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panic with a non-string payload".to_string());
+            tracing::error!("panic in wp81_game_create: {msg}");
+            set_error(format!("panic in wp81_game_create: {msg}"));
             GAME_ERR_PANIC
         }
     }

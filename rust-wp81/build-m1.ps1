@@ -22,6 +22,11 @@ param(
     [string]$Folder = "demo",
     [string]$Chart  = "chart.json",
     [int]$Frames    = 120,
+
+    # Where to write one drained frame as a fixture for the Stage 3 replay (`scene.rs`) to read
+    # back. Empty writes nothing. The bytes and why they are the right ones are in `dump_fixture`.
+    [string]$Fixture = "",
+
     [switch]$BuildOnly
 )
 
@@ -56,7 +61,10 @@ if ($BuildOnly) {
     return
 }
 
-& $cargo run -q -p prpr-port --bin host_m1 -- $ChartsDir $Folder $Chart $Frames *> $log
+$runArgs = @($ChartsDir, $Folder, $Chart, "$Frames")
+if ($Fixture) { $runArgs += $Fixture }
+
+& $cargo run -q -p prpr-port --bin host_m1 -- @runArgs *> $log
 "EXIT=$LASTEXITCODE"
 
 # Print everything except tracing's `DEBUG` spam.

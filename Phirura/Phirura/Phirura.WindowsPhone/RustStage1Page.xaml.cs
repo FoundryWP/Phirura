@@ -646,6 +646,27 @@ namespace Phirura
                 + (threw == null ? "" : " THREW " + threw)
                 + " | " + status);
 
+            // The reason, on its own line and only when there is something to say. The return code
+            // by itself was worth very little: `-2` covered a chart the parser rejects, a
+            // `GameScene::new` dying part-way through its textures and a `Main::new` with no font,
+            // and on the phone the `tracing` event carrying the message has no subscriber to give
+            // it to. This read-back in the same turn is the whole diagnosis, so it is logged
+            // separately rather than folded into the line above - a failure here must not be able
+            // to lose the line that carries the actual result.
+            if (result != PrprPort.GameResult.Ok || threw != null)
+            {
+                try
+                {
+                    string why = PrprPort.GameLastError();
+                    AppLog.WriteSync("RustStage1: GameCreate reason: "
+                        + (why ?? "(none recorded)"));
+                }
+                catch (Exception ex)
+                {
+                    AppLog.WriteSync("RustStage1: GameCreate reason unavailable: " + ex.Message);
+                }
+            }
+
             bool ready = result == PrprPort.GameResult.Ok && threw == null;
             System.Threading.Interlocked.Exchange(ref _engineState, ready ? 2 : 3);
             AppLog.WriteSync(ready
