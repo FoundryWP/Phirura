@@ -666,9 +666,22 @@ namespace Phirura
         /// Must be called once after the drawing surface is measured and before the first frame:
         /// <c>prpr</c> projects through statics that default to 0x0, and at 0x0 the aspect ratio is
         /// degenerate so the whole chart collapses to a single point.
+        ///
+        /// The size is also kept here, because it is the one figure the renderer needs to convert
+        /// those pixels into the DIPs a <see cref="Microsoft.Graphics.Canvas.CanvasDrawingSession"/>
+        /// actually works in - and the two only agree at dpi == 96. Re-deriving it on the drawing
+        /// side would mean asking the canvas how big it is and hoping it still matches what Rust
+        /// was told; recording it where it is decided removes the hope from the calculation.
         /// </summary>
+        public static float ScreenPixelWidth { get; private set; }
+
+        /// <summary>See <see cref="ScreenPixelWidth"/>.</summary>
+        public static float ScreenPixelHeight { get; private set; }
+
         public static void GameSetScreen(float width, float height)
         {
+            ScreenPixelWidth = width;
+            ScreenPixelHeight = height;
             wp81_game_set_screen(width, height);
         }
 

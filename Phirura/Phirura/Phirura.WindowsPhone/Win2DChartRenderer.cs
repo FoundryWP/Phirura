@@ -913,6 +913,25 @@ namespace Phirura.Game
             // Geometry census, throttled to ~1 Hz - see the method below.
             PortFrameStats(frame, cmds);
 
+            // px -> DIP, the one conversion nobody notices until it is missing.
+            //
+            // Rust projects in the device pixels `GameSetScreen` handed it; a Win2D drawing session
+            // is in DIPs. Measured on the Lumia: `screen 1280x768 px @ 2.0` against a
+            // `draw canvas=640x384 DIP` surface, so without this the whole frame landed at exactly
+            // twice its intended size - the visible part was the top-left quarter, and the judge
+            // line, which sits below the middle of the screen, was never on the canvas at all.
+            // That is the "resolution is wrong" symptom, and it is also why no note was ever seen.
+            float pxToDip = 1f;
+            if (PrprPort.ScreenPixelWidth > 0f && _canvas != null && _canvas.ActualWidth > 0.0)
+            {
+                pxToDip = (float)(_canvas.ActualWidth / PrprPort.ScreenPixelWidth);
+            }
+
+            // Composed rather than assigned so an inherited transform still applies afterwards; see
+            // `DrawPortTexture`, which puts the result back when it is done.
+            Matrix3x2 portTransform = ds.Transform;
+            ds.Transform = Matrix3x2.CreateScale(pxToDip) * portTransform;
+
             for (int i = 0; i < frame.Count; i++)
             {
                 PrprPort.PortCmd c = cmds[i];
@@ -949,6 +968,8 @@ namespace Phirura.Game
                         break;
                 }
             }
+
+            ds.Transform = portTransform;
         }
 
         /// <summary>Rate gate for <see cref="PortFrameStats"/>.</summary>
@@ -962,11 +983,16 @@ namespace Phirura.Game
         ///
         /// * `geo=0` while the chart should be on screen: the geometry was never emitted, so no
         ///   amount of fixing the renderer would help;
-        /// * a `rectBbox` lying far outside the canvas: the projection is scaled or shifted, which
-        ///   is the "wrong resolution" symptom rather than a missing picture;
-        /// * sane `firstGeo` numbers while the screen shows nothing: the transform is right and the
-        ///   fault is in the texture content instead - which is what a white sprite looks like from
-        ///   the outside, because it has the correct geometry and the wrong pixels.
+        /// * a `rectBbox` far larger than the canvas while the screen shows a cropped picture: the
+        ///   px -> DIP scale is missing, which is the "wrong resolution" symptom rather than a
+        ///   missing picture - it also hides whatever sits below or right of the middle;
+        /// * a sane `vertBbox` while the screen shows nothing: the transform is right and the fault
+        ///   is in the texture content instead - which is what a white sprite looks like from the
+        ///   outside, because it has the correct geometry and the wrong pixels.
+        ///
+        /// The `canvasDip`/`pxToDip` pair is printed with it because those two are the whole
+        /// calculation: the projection is in pixels, the canvas is in DIPs, and a mismatch between
+        /// them is invisible until the numbers are side by side.
         ///
         /// Walked once a second rather than per frame: a busy chart has a few hundred commands and
         /// this reads all of them, which is real work to do sixty times over.
@@ -983,7 +1009,9 @@ namespace Phirura.Game
             int nTex = 0, nRect = 0, nLine = 0, nCircle = 0, nGeo = 0;
             double minX = double.MaxValue, minY = double.MaxValue;
             double maxX = double.MinValue, maxY = double.MinValue;
-            string firstGeo = "-";
+            double vx0 = double.MaxValue, vy0 = double.MaxValue;
+            double vx1 = double.MinValue, vy1 = double.MinValue;
+            int nVert = 0;
 
             for (int i = 0; i < frame.Count; i++)
             {
@@ -1012,11 +1040,30 @@ namespace Phirura.Game
 
                     case 4:
                         nGeo++;
-                        if (firstGeo == "-")
+                        // The positions live in the vertex arena, not in `c.f0..f5`: for kind 4
+                        // `f0` is the draw mode (0 = triangles, 1 = lines) and f1..f5 are unused.
+                        // The first version of this logged those fields and duly reported
+                        // `firstGeo=0,0,0,0,0,0` for every frame ever drawn, which said nothing
+                        // except that triangles are triangles. Where the geometry lands is the
+                        // question worth asking, and only the vertices answer it.
                         {
-                            firstGeo = c.f0.ToString("0.##") + "," + c.f1.ToString("0.##")
-                                + "," + c.f2.ToString("0.##") + "," + c.f3.ToString("0.##")
-                                + "," + c.f4.ToString("0.##") + "," + c.f5.ToString("0.##");
+                            int vs = (int)c.vstart;
+                            int ve = vs + (int)c.vcount;
+                            if (vs < 0) vs = 0;
+                            if (frame.Vertices != null && ve > frame.Vertices.Length)
+                            {
+                                ve = frame.Vertices.Length;
+                            }
+                            for (int vi = vs; vi < ve; vi++)
+                            {
+                                float gx = frame.Vertices[vi].x;
+                                float gy = frame.Vertices[vi].y;
+                                if (gx < vx0) vx0 = gx;
+                                if (gy < vy0) vy0 = gy;
+                                if (gx > vx1) vx1 = gx;
+                                if (gy > vy1) vy1 = gy;
+                            }
+                            nVert += ve - vs;
                         }
                         break;
                 }
@@ -1027,10 +1074,25 @@ namespace Phirura.Game
                 : "(" + minX.ToString("0.#") + "," + minY.ToString("0.#") + ","
                     + (maxX - minX).ToString("0.#") + "x" + (maxY - minY).ToString("0.#") + ")";
 
+            // The vertex span is what the px -> DIP scale is judged against: it is in Rust pixels,
+            // and the canvas figure right beside it is the DIPs those pixels have to fit inside.
+            string vertBbox = nVert == 0
+                ? "-"
+                : "(" + vx0.ToString("0.#") + "," + vy0.ToString("0.#") + ")-("
+                    + vx1.ToString("0.#") + "," + vy1.ToString("0.#") + ")n=" + nVert;
+
+            double dipW = _canvas == null ? 0.0 : _canvas.ActualWidth;
+            double dipH = _canvas == null ? 0.0 : _canvas.ActualHeight;
+            string pxToDip = (PrprPort.ScreenPixelWidth > 0f && dipW > 0.0)
+                ? (dipW / PrprPort.ScreenPixelWidth).ToString("0.###")
+                : "?";
+
             AppLog.WriteSync("Win2D: port frame n=" + frame.Count
                 + " tex=" + nTex + " rect=" + nRect + " line=" + nLine
                 + " circ=" + nCircle + " geo=" + nGeo
-                + " rectBbox=" + bbox + " firstGeo=" + firstGeo);
+                + " rectBbox=" + bbox + " vertBbox=" + vertBbox
+                + " canvasDip=" + dipW.ToString("0.##") + "x" + dipH.ToString("0.##")
+                + " pxToDip=" + pxToDip);
         }
 
         private void DrawPortTexture(CanvasDrawingSession ds, PrprPort.PortCmd c)
@@ -1064,8 +1126,13 @@ namespace Phirura.Game
             {
                 float cx = dx + dw / 2f;
                 float cy = dy + dh / 2f;
+                // `* saved` is what keeps the px -> DIP scale installed by `OnPortDraw` in force:
+                // the mirror and the centring are both expressed in Rust pixels, and `saved` is the
+                // thing that turns those pixels into DIPs. Dropping it put flipped sprites at twice
+                // their intended position on a 2x screen, i.e. half of them off the canvas.
                 ds.Transform = Matrix3x2.CreateScale(flipX ? -1f : 1f, flipY ? -1f : 1f)
-                             * Matrix3x2.CreateTranslation(cx, cy);
+                             * Matrix3x2.CreateTranslation(cx, cy)
+                             * saved;
                 ds.DrawImage(image, new Rect(-dw / 2f, -dh / 2f, dw, dh), source, 1f, CanvasImageInterpolation.Linear);
                 ds.Transform = saved;
             }
@@ -1519,23 +1586,45 @@ namespace Phirura.Game
         /// this needs to settle. `first` catches a source that was never written (all-zero or
         /// all-0xFF at the very start); the percentages catch the case the first pixel cannot -
         /// a sprite that is genuinely uniform, and a glyph atlas that is all background.
+        ///
+        /// `white` counts pixels whose *colour* is 255,255,255 whatever the alpha says, because
+        /// that is the shape "renders white" actually takes: an RGB channel that went to full
+        /// white while alpha still varies draws as an opaque white blob with the right silhouette.
+        ///
+        /// Sampled with a stride across the whole band rather than over its first 4096 bytes. The
+        /// head-only version reported `zero=100%` for eight 256x256 note atlases - four rows of a
+        /// sprite whose content starts below a padded top - so it read as proof of empty textures
+        /// while describing only the padding. Coverage is the point of this call; the sample count
+        /// is already bounded, and a stride keeps it that way.
         /// </summary>
         private static string BandSummary(byte[] px)
         {
-            int n = px.Length < 4096 ? px.Length : 4096;
-            n &= ~3;
-            if (n < 4)
+            int pixels = px.Length >> 2;
+            if (pixels < 1)
             {
                 return "band too short (" + px.Length + " bytes)";
             }
-            int ff = 0, z = 0;
-            for (int i = 0; i < n; i++)
+
+            int step = pixels / 4096;
+            if (step < 1) step = 1;
+
+            int taken = 0, ff = 0, z = 0, white = 0;
+            for (int p = 0; p < pixels; p += step)
             {
-                if (px[i] == 0xFF) ff++;
-                else if (px[i] == 0) z++;
+                int i = p << 2;
+                byte r = px[i], g = px[i + 1], b = px[i + 2], a = px[i + 3];
+                taken++;
+                if (r == 0xFF && g == 0xFF && b == 0xFF) white++;
+                if (r == 0xFF) ff++; else if (r == 0) z++;
+                if (g == 0xFF) ff++; else if (g == 0) z++;
+                if (b == 0xFF) ff++; else if (b == 0) z++;
+                if (a == 0xFF) ff++; else if (a == 0) z++;
             }
+
+            int sampled = taken * 4;
             return "first=" + px[0] + "," + px[1] + "," + px[2] + "," + px[3]
-                + " ff=" + (ff * 100 / n) + "% zero=" + (z * 100 / n) + "%";
+                + " ff=" + (ff * 100 / sampled) + "% zero=" + (z * 100 / sampled) + "%"
+                + " white=" + (white * 100 / taken) + "%";
         }
 
         /// <summary>How many rows a band may hold so it stays inside <see cref="MaxSyncBandPixels"/>.</summary>
