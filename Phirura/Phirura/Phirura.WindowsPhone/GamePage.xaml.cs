@@ -43,6 +43,23 @@ namespace Phirura
         // shell - so the one thing a MediaElement needs, a source, has to be waiting here.
         private static string PhiraMusicUri;
 
+        // ms-appdata URI of the res pack's `ending` clip - what prpr asks for once the chart is
+        // over (`ending.rs:90`, created with `loop_mix_time: 0.`). Null when no such file was
+        // shipped, in which case the result page stays silent instead of replaying the chart.
+        private static string PhiraEndingMusicUri;
+
+        // The source handed to the player by the most recent `MusicNew`, so `OnMediaOpened` can
+        // tell which of the two URIs just produced a duration.
+        private static string ActiveMusicUri;
+
+        // Seconds of whatever `PhiraMusicUri` points at, taken from the first MediaOpened that
+        // was opened *for the chart*. This is the only handle the shell has on clip identity:
+        // `AudioClip` hands every clip id 0, so the only way to tell the chart's own music from
+        // the res pack's `ending` is to ask for a clip of a different length. 0 means nothing
+        // has opened yet - which is the very first music_new, the song page's preview - and is
+        // therefore read as the chart.
+        private static double PhiraMusicSeconds;
+
         private readonly List<BadNote> _badNotes = new List<BadNote>();
         private readonly List<Judge.JudgementEvent> _events = new List<Judge.JudgementEvent>();
         private readonly Dictionary<uint, TouchInput> _active = new Dictionary<uint, TouchInput>();
@@ -1499,6 +1516,7 @@ namespace Phirura
         private static async Task ResolvePhiraMusicAsync()
         {
             PhiraMusicUri = null;
+            PhiraMusicSeconds = 0.0;
             try
             {
                 Windows.Storage.CreationCollisionOption open =
@@ -1550,6 +1568,53 @@ namespace Phirura
             {
                 AppLog.Write("GamePage.ResolvePhiraMusic", ex);
             }
+            await ResolvePhiraEndingMusicAsync();
+        }
+
+        /// <summary>
+        /// Locates the res pack's `ending` clip, the music prpr wants once the chart is over.
+        ///
+        /// Rust resolves that clip for itself - `resource.rs:296` runs `load_clip!`, which walks
+        /// `.wav`, `.mp3`, `.ogg` inside the pack's own fs - and the shell never sees the bytes,
+        /// so the only way to play it is to know where the file landed. The pack is phira's own
+        /// `assets` folder, pushed into `LocalFolder\charts` beside `font.ttf` and therefore under
+        /// the same root <see cref="PrprPort.AssetRoot"/> already serves; `ending.ogg` sits at
+        /// that root and `respack/ending.ogg` under the sub-folder, so both are tried before
+        /// giving up. Failing is silent by design: a missing BGM is a quieter result page, while
+        /// falling back to the chart music is the bug being removed.
+        /// </summary>
+        private static async Task ResolvePhiraEndingMusicAsync()
+        {
+            PhiraEndingMusicUri = null;
+            string[] roots = { "", "respack\\" };
+            string[] exts = { ".ogg", ".mp3", ".wav" };
+            foreach (string root in roots)
+            {
+                foreach (string ext in exts)
+                {
+                    try
+                    {
+                        Windows.Storage.StorageFolder charts =
+                            await Windows.Storage.ApplicationData.Current.LocalFolder
+                                .GetFolderAsync("charts");
+                        string name = "ending" + ext;
+                        if (!string.IsNullOrEmpty(root))
+                        {
+                            charts = await charts.GetFolderAsync("respack");
+                        }
+                        await charts.GetFileAsync(name);
+                        PhiraEndingMusicUri = "ms-appdata:///local/charts/"
+                            + (root.Length == 0 ? "" : "respack/") + name;
+                        AppLog.Write("GamePage: phira ending music = " + PhiraEndingMusicUri);
+                        return;
+                    }
+                    catch (Exception)
+                    {
+                        // Not this root/extension pair - keep going, same order `load_clip!` uses.
+                    }
+                }
+            }
+            AppLog.Write("GamePage: no res-pack ending clip; the result page will be silent");
         }
 
         /// <summary>
@@ -1588,7 +1653,7 @@ namespace Phirura
         }
 
         /// <summary>Opens the chart's music on the shell's `Player`. See <see cref="PrprPort.IMusicSink"/>.</summary>
-        public void MusicNew(double rate, float amp, double loopMix)
+        public void MusicNew(double rate, float amp, double loopMix, double clipSecs)
         {
             if (_clock == null)
             {
@@ -1602,27 +1667,52 @@ namespace Phirura
             _clock.Offset = 0.0;
             MusicAmplifier(amp);
 
-            if (string.IsNullOrEmpty(PhiraMusicUri))
+            // Which audio this is, answered by duration. `AudioClip` reports id 0 for every clip,
+            // so without this the request is ambiguous between the chart's own track and the res
+            // pack's `ending` clip - and the shell owns exactly one player, which it used to point
+            // back at `PhiraMusicUri` no matter what was asked for. That is what played the song
+            // a second time over the result page, right after it had finished.
+            //
+            // The tolerance is deliberately wide (1 s) and one-sided in effect: a *miss* here
+            // costs the whole soundtrack, whereas a hit on a clip that happens to be a second
+            // long only plays the wrong BGM. `NaturalDuration` and Rust's `frame_count /
+            // sample_rate` come from different readings of the same file and routinely disagree
+            // by the encoder padding, so anything tighter would misclassify the chart itself.
+            string uri = PhiraMusicUri;
+            bool isChart = true;
+            if (PhiraMusicSeconds > 0.05 && clipSecs > 0.05
+                && Math.Abs(clipSecs - PhiraMusicSeconds) > 1.0)
+            {
+                isChart = false;
+                uri = PhiraEndingMusicUri;
+            }
+
+            if (string.IsNullOrEmpty(uri))
             {
                 // Still free-run. A chart that plays in silence is a diagnosable state; one pinned
                 // at zero - which is what `music_position -> 0.0` meant every second - is not.
                 _clock.StartFree();
-                AppLog.Write("GamePage: music_new with no URI, running a silent clock");
+                AppLog.Write("GamePage: music_new secs=" + clipSecs.ToString("0.###")
+                    + (isChart ? " chart but no music file" : " not the chart, no ending clip")
+                    + " -> silent clock");
                 return;
             }
 
             try
             {
-                Player.Source = new Uri(PhiraMusicUri);
+                Player.Source = new Uri(uri);
             }
             catch (Exception ex)
             {
-                AppLog.Write("GamePage.MusicNew.Source(" + PhiraMusicUri + ")", ex);
+                AppLog.Write("GamePage.MusicNew.Source(" + uri + ")", ex);
             }
 
+            ActiveMusicUri = uri;
             _mediaReady = false;
             _clock.StartFree();
-            AppLog.Write("GamePage: music_new -> " + PhiraMusicUri
+            AppLog.Write("GamePage: music_new -> " + uri
+                + (isChart ? " (chart)" : " (res-pack ending)")
+                + " secs=" + clipSecs.ToString("0.###")
                 + " rate=" + rate.ToString("0.###")
                 + " amp=" + amp.ToString("0.###")
                 + " loop=" + loopMix.ToString("0.###"));
@@ -1759,6 +1849,17 @@ namespace Phirura
             // and this is the first moment that number is real, so anchor onto it now.
             if (_phiraMode && _clock != null)
             {
+                // Record the chart track's real length the first time its own file opens. This is
+                // the only number the C# side can compare a `music_new` request against, because
+                // `AudioClip` reports id 0 for every clip; without it `MusicNew` cannot tell the
+                // chart song from the res pack's `ending` clip and the whole clip check is a
+                // no-op. Guarded on the URI so the later `ending.ogg` open does not overwrite the
+                // chart's length - if it did, the next real chart `music_new` would be classified
+                // as a non-chart clip and the soundtrack would be dropped.
+                if (ActiveMusicUri == PhiraMusicUri && Player.NaturalDuration.HasTimeSpan)
+                {
+                    PhiraMusicSeconds = Player.NaturalDuration.TimeSpan.TotalSeconds;
+                }
                 _clock.Reanchor();
                 if (_clock.IsRunning)
                 {
@@ -1775,6 +1876,7 @@ namespace Phirura
                     + " dur=" + (Player.NaturalDuration.HasTimeSpan
                         ? Player.NaturalDuration.TimeSpan.TotalSeconds.ToString("0.###")
                         : "?")
+                    + " chartSecs=" + PhiraMusicSeconds.ToString("0.###")
                     + " clock=" + _clock.Now.ToString("0.###"));
                 return;
             }

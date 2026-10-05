@@ -50,7 +50,15 @@ pub struct DecodedAudio {
 pub struct HostCallbacks {
     pub audio_decode:
         Option<unsafe extern "C" fn(data: *const u8, len: usize, out: *mut DecodedAudio) -> i32>,
-    pub audio_music_new: Option<unsafe extern "C" fn(clip: u32, rate: f64, amp: f32, loop_mix: f64) -> u32>,
+    pub audio_music_new: Option<
+        unsafe extern "C" fn(
+            clip: u32,
+            rate: f64,
+            amp: f32,
+            loop_mix: f64,
+            clip_secs: f64,
+        ) -> u32,
+    >,
     pub audio_music_play: Option<unsafe extern "C" fn(id: u32)>,
     pub audio_music_pause: Option<unsafe extern "C" fn(id: u32)>,
     pub audio_music_seek: Option<unsafe extern "C" fn(id: u32, position: f64)>,
@@ -187,10 +195,25 @@ pub unsafe extern "C" fn wp81_audio_decode(data: *const u8, len: usize, out: *mu
     }
 }
 
+/// Create a music stream.
+///
+/// `clip_secs` is the requested clip's duration, and it is the only thing on this boundary that
+/// says *which* audio is wanted: `AudioClip` carries no identity (every constructor hands back
+/// id 0), so without it the shell cannot tell the chart's own music apart from the res pack's
+/// `ending` clip - and it has exactly one player, which it would then point back at the chart
+/// song. That is what played the track a second time over the result page. `prpr` builds the
+/// duration into `Music::length` from the same `frame_count` on every path, so it is available
+/// whether the clip came from file bytes or from `from_raw`.
 #[no_mangle]
-pub unsafe extern "C" fn wp81_audio_music_new(clip: u32, rate: f64, amp: f32, loop_mix: f64) -> u32 {
+pub unsafe extern "C" fn wp81_audio_music_new(
+    clip: u32,
+    rate: f64,
+    amp: f32,
+    loop_mix: f64,
+    clip_secs: f64,
+) -> u32 {
     match cb().audio_music_new {
-        Some(f) => f(clip, rate, amp, loop_mix),
+        Some(f) => f(clip, rate, amp, loop_mix, clip_secs),
         None => 0,
     }
 }

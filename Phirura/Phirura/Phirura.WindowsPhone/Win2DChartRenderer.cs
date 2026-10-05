@@ -1666,16 +1666,42 @@ namespace Phirura.Game
                 {
                     break;
                 }
-                pixels[p] = Color.FromArgb(rgba[o + 3], rgba[o + 0], rgba[o + 1], rgba[o + 2]);
+
+                // Premultiply, because that is the format CreateFromColors stores: it hands the
+                // bytes straight to a premultiplied bitmap and D2D converts nothing. Rust sends
+                // straight alpha - a white glyph is 255,255,255,a - so feeding it in untouched
+                // wrote an impossible premultiplied pixel: RGB at full strength underneath a
+                // partial alpha. Compositing that gives ~white however thin the coverage, so
+                // every half-covered pixel became opaque and each glyph on the loading screen
+                // rendered as a solid white block. It is the same defect as "some images render
+                // white", and it only ever touched pixels whose alpha is neither 0 nor 255.
+                byte a = rgba[o + 3];
+                pixels[p] = Color.FromArgb(a,
+                    (byte)((rgba[o + 0] * a + 127) / 255),
+                    (byte)((rgba[o + 1] * a + 127) / 255),
+                    (byte)((rgba[o + 2] * a + 127) / 255));
             }
 
             using (CanvasBitmap patch = CanvasBitmap.CreateFromColors(dev, pixels, (int)w, (int)h))
             {
+                // Replace rather than composite. This is an upload, not a draw: source-over would
+                // blend the band into whatever is underneath, and bands are written whole - the
+                // glyph atlas re-emits its top rows every time it grows - so every pixel the new
+                // band leaves transparent would keep the stale glyph that was there before it.
+                //
+                // Copy is the blend that means "the destination region becomes exactly this
+                // source", transparent pixels included, and it is the only way to do it here: this
+                // Win2D fork exposes only Clear(Color)/Clear(Vector4), with no rectangle overload,
+                // so clearing the band first would wipe the whole carrier - atlas and every port
+                // texture on it. The session is created per upload and its blend defaults to
+                // SourceOver, which is restored below.
+                target.Blend = CanvasBlend.Copy;
                 target.DrawImage(patch,
                     new Rect(x, y, w, h),
                     patch.Bounds,
                     1f,
                     CanvasImageInterpolation.NearestNeighbor);
+                target.Blend = CanvasBlend.SourceOver;
             }
         }
 

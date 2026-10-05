@@ -1318,17 +1318,31 @@ pub mod transform {
         }
     }
 
-    /// Start of every frame.
+    /// Start of every frame: undo whatever the previous frame left open, and nothing more.
     ///
-    /// macroquad begins with no camera (`lib.rs:299`) and `Resource` with an identity model
-    /// (`resource.rs:569`), so both return to their initial state here. That also caps a bracket
-    /// left open by a `render` that bailed out mid-pass: without it, one failing frame would
-    /// indent every frame after it.
+    /// Two jobs, and overwriting served only one of them. The stacks must return to empty -
+    /// `Main::render` propagates an error from between a `push_camera_state` and its
+    /// `pop_camera_state`, and a stack that kept that indent would misplace every frame after
+    /// it. But the camera is *not* part of a frame's initial state: macroquad's no-camera view
+    /// (`lib.rs:299`) is what a program starts with, and prpr draws the chart with a camera it
+    /// sets once in `GameScene::enter` (`game.rs:851`) and re-sets in `render` only when
+    /// `Resource::update_size` sees the viewport actually change (`game.rs:1162`). Wiping to
+    /// `CAM_OFF` here ran every frame after the first with no camera: `project` then returned
+    /// world coordinates untouched, `vertBbox` logged as `(-1,-0.6)-(1,0.6)` instead of pixels,
+    /// and the shell drew judge lines and notes into a half-DIP box in the top-left corner -
+    /// nothing visible on the phone. It also contradicted `pop_camera`, whose entire contract is
+    /// restoring the value in force *below* the bracket.
+    ///
+    /// Draining by popping undoes a leaked bracket while restoring exactly that value, so a
+    /// camera set outside every bracket - which is where `enter` puts it, and what the chart
+    /// draws under on every frame where `update_size` returns false - survives.
     pub fn reset_frame() {
-        CAM.with(|cur| cur.set(CAM_OFF));
-        CAM_STACK.with(|s| s.borrow_mut().1 = 0);
-        MODEL.with(|c| c.set(Mat4::IDENTITY));
-        MODEL_STACK.with(|s| s.borrow_mut().clear());
+        while CAM_STACK.with(|s| s.borrow().1 > 0) {
+            pop_camera();
+        }
+        while MODEL_STACK.with(|s| !s.borrow().is_empty()) {
+            pop_model();
+        }
     }
 
     // -------------------------------------------------------------- projecting
@@ -2085,10 +2099,11 @@ pub mod draw {
         // stop drawing after a few seconds of play.
         VLEN.store(0, Ordering::Relaxed);
         ILEN.store(0, Ordering::Relaxed);
-        // Camera and model go back to their start-of-frame state for the same reason. macroquad
-        // opens a frame with no camera and an identity model; just as important, `Main::render`
-        // can propagate an error from between a `push_camera_state` and its `pop_camera_state`
-        // (`scene.rs:520`), and a stack that kept that indent would misplace every frame after.
+        // The camera and model stacks are balanced here too, because `Main::render` can leave one
+        // open when it propagates an error out of the middle of a pass - see `reset_frame` for
+        // why they are balanced by *popping* rather than reset: the camera prpr draws the chart
+        // under is set once, in `GameScene::enter`, and wiping it every frame is what made the
+        // whole gameplay pass land in world coordinates instead of pixels.
         crate::transform::reset_frame();
     }
 

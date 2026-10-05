@@ -78,8 +78,16 @@ mod shell {
         /// the audio itself is played by the shell from the same buffer.
         pub fn wp81_audio_decode(data: *const u8, len: usize, out: *mut DecodedInfo) -> i32;
 
-        /// Create a music stream. `rate` is `playback_rate`, `amp` the amplifier.
-        pub fn wp81_audio_music_new(clip_id: u32, rate: f64, amp: f32, loop_mix_time: f64) -> u32;
+        /// Create a music stream. `rate` is `playback_rate`, `amp` the amplifier, `clip_secs` the
+        /// clip's duration in seconds - the shell's one identifier for *which* clip this is, since
+        /// `clip_id` is 0 for every clip. Kept in step with `prpr_port::wp81_audio_music_new`.
+        pub fn wp81_audio_music_new(
+            clip_id: u32,
+            rate: f64,
+            amp: f32,
+            loop_mix_time: f64,
+            clip_secs: f64,
+        ) -> u32;
         pub fn wp81_audio_music_play(id: u32);
         pub fn wp81_audio_music_pause(id: u32);
         pub fn wp81_audio_music_seek(id: u32, position: f64);
@@ -507,6 +515,7 @@ impl AudioManager {
                 settings.playback_rate,
                 settings.amplifier,
                 settings.loop_mix_time,
+                clip.length(),
             )
         };
         Ok(Music {

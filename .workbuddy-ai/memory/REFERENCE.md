@@ -341,3 +341,36 @@ use PowerShell with variables.
 Rust: `C:\Users\admin\.workbuddy-ai\binaries\rust\` (stable + nightly w/ `rust-src`; `RUSTUP_HOME`/
 `CARGO_HOME` under it). CRT-free link stubs: `E:\_phirura_stub\`. Managed Python:
 `C:\Users\admin\.workbuddy-ai\binaries\python\versions\3.13.12\python.exe`.
+
+## R54 — durable additions (things not spelled out elsewhere in this file)
+
+**Route-3 bring-up, exact split.** `SurfaceImageSource` is a XAML object, so
+`RoGetActivationFactory` + `CreateInstanceWithDimensionsAndOpacity` + `QI` + `SetDevice` from a pool
+thread answer **`RPC_E_WRONG_THREAD` = `0x8001010E`**. Therefore two exports, and both must stay in
+`build.ps1`'s `/EXPORT:` list:
+`wp81_rs_start_surface_prepare(w,h)` — device/pipeline, *any* thread (deliberately a pool thread, so
+a driver fault still leaves the UI thread free to flush AppLog);
+`wp81_rs_start_surface_attach()` — **UI thread only**.
+C# mirrors this with `StartSurfacePrepare`/`StartSurfaceAttach` + a `_prepared` flag so `Stop()` can
+release a prepare-only state.
+
+**`wp81_rs_sis_diag(index)`** reads `SurfaceChain::diag[]`; the page logs it once as
+`frame#1 rc=… | surf fmt=… bind=…`. `bind` missing `D3D11_BIND_RENDER_TARGET` (`0x20`) means no RTV
+is possible on that surface → fall back to rendering into our own texture + `CopyResource` (slot 47).
+
+**Win2D 1.21 (`Win2D.win81.1.21.0`) API surface — check before use.** `CanvasDrawingSession.Clear`
+has **only** `Clear(Color)` and `Clear(Vector4)`; there is **no rectangle overload**. For a true
+region replace (an upload, not a draw) set `target.Blend = CanvasBlend.Copy`, `DrawImage(...)`, then
+restore `CanvasBlend.SourceOver`. `CanvasBlend` = {SourceOver, Add, Min, Copy}. Authoritative overload
+list: `Phirura/packages/Win2D.win81.1.21.0/bin/Phone/arm/Microsoft.Graphics.Canvas.xml`.
+
+**`CanvasBitmap.CreateFromColors` stores premultiplied bytes and converts nothing** — straight-alpha
+input (a white glyph `255,255,255,a`) becomes an impossible premultiplied pixel and composites as
+opaque white. Premultiply RGB by A before handing colours in.
+
+**Audio clip identity.** `AudioClip` returns `id: 0` for every clip, so `music_new` carries
+`clip_secs` = `AudioClip.length()` across the ABI (`HostCallbacks.audio_music_new`,
+`wp81_audio_music_new`, `IMusicSink.MusicNew`, `AudioMusicNewFn` all take a trailing `f64`). C#
+classifies by duration with a **1.0 s** tolerance; `PhiraMusicSeconds` is recorded in
+`OnMediaOpened`'s phira branch **only when `ActiveMusicUri == PhiraMusicUri`** (the later `ending.ogg`
+open must not overwrite the chart length).

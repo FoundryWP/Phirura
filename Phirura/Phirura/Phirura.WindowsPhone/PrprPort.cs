@@ -269,7 +269,7 @@ namespace Phirura
         private delegate int AudioDecodeFn(IntPtr data, IntPtr len, IntPtr outInfo);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate uint AudioMusicNewFn(uint clip, double rate, float amp, double loopMix);
+        private delegate uint AudioMusicNewFn(uint clip, double rate, float amp, double loopMix, double clipSecs);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void AudioMusicIdFn(uint id);
@@ -1218,7 +1218,7 @@ namespace Phirura
         /// </summary>
         public interface IMusicSink
         {
-            void MusicNew(double rate, float amp, double loopMix);
+            void MusicNew(double rate, float amp, double loopMix, double clipSecs);
             void MusicPlay();
             void MusicPause();
             void MusicSeek(double seconds);
@@ -1277,9 +1277,10 @@ namespace Phirura
             return 1;
         }
 
-        private static uint OnMusicNew(uint clip, double rate, float amp, double loopMix)
+        private static uint OnMusicNew(uint clip, double rate, float amp, double loopMix, double clipSecs)
         {
             AppLog.WriteSync("PrprPort: audio music_new clip=" + clip
+                + " secs=" + clipSecs.ToString("0.###")
                 + " rate=" + rate.ToString("0.###")
                 + " amp=" + amp.ToString("0.###")
                 + " loop=" + loopMix.ToString("0.###")
@@ -1288,7 +1289,7 @@ namespace Phirura
             {
                 try
                 {
-                    MusicSink.MusicNew(rate, amp, loopMix);
+                    MusicSink.MusicNew(rate, amp, loopMix, clipSecs);
                 }
                 catch (Exception ex)
                 {

@@ -84,6 +84,11 @@ foreach ($exe in @($ise, $adp)) {
 #    than merged - a stale file from a previous chart would otherwise be served
 #    to `exists()` probes and silently change what the engine loads.
 # ---------------------------------------------------------------------------
+# Step 1 rebuilds the mirror that `rs` uploads, so it is only needed when actually pushing. The
+# required second `-PullLog` (see the .DESCRIPTION) otherwise re-copies 22 MB and, worse, trips the
+# harness's bulk safe-delete confirmation on the clear below once the mirror already holds its
+# ~114 files - which aborts the run before the log is ever read.
+if ($Push) {
 if (-not (Test-Path $Source)) { throw "source not found: $Source" }
 if (-not (Test-Path (Join-Path $Source $Folder))) { throw "chart folder not found: $Source\$Folder" }
 if (-not (Test-Path (Join-Path (Join-Path $Source $Folder) "info.yml"))) {
@@ -94,7 +99,11 @@ if (-not (Test-Path (Join-Path (Join-Path $Source $Folder) "info.yml"))) {
 
 if (Test-Path $Out) {
     $resolved = (Resolve-Path $Out).Path
-    if ($resolved -ieq "E:\_phirura_stage") { Get-ChildItem $resolved -Force | Remove-Item -Recurse -Force }
+    # `-LiteralPath`, not `Get-ChildItem | Remove-Item`. The harness overrides Remove-Item with a
+    # safe-delete wrapper that only reads an explicit path operand (or real pipeline input bound to
+    # a parameter), so the piped form throws "missing path operand" before anything is deleted - and
+    # that aborts the whole script at step 1, before -Deploy/-Push ever run.
+    if ($resolved -ieq "E:\_phirura_stage") { Remove-Item -LiteralPath $resolved -Recurse -Force }
     else { throw "refusing to clear an unexpected -Out: $resolved" }
 }
 New-Item -ItemType Directory -Path $Out -Force | Out-Null
@@ -119,6 +128,7 @@ Copy-Item "$Source\*" -Destination $dest -Recurse -Force
 $staged = Get-ChildItem $Out -Recurse -File
 "staged: {0} files, {1} MB -> {2}" -f $staged.Count,
     [math]::Round(($staged | Measure-Object Length -Sum).Sum / 1MB, 2), $Out
+}
 
 # ---------------------------------------------------------------------------
 # 2. Deploy. `update` fails 0x81030137 when the version is unchanged, so this is
@@ -178,11 +188,11 @@ if ($PullLog) {
     }
     $logdir = "E:\_phirura_log_pull_{0:HHmmss}" -f (Get-Date)
 
-    // The output used to be discarded (`| Out-Null`), which turned every failure into the same
-    // one line - "no log at ..." - regardless of cause. `ts` has at least three distinct
-    // outcomes (store not readable, wrong device, target dir already existing) and they need
-    // different fixes, so the message is kept and printed only when it produced nothing: the
-    // success path would otherwise be flooded with ISETool's progress text.
+    # The output used to be discarded (`| Out-Null`), which turned every failure into the same
+    # one line - "no log at ..." - regardless of cause. `ts` has at least three distinct
+    # outcomes (store not readable, wrong device, target dir already existing) and they need
+    # different fixes, so the message is kept and printed only when it produced nothing: the
+    # success path would otherwise be flooded with ISETool's progress text.
     $tsout = (& $ise ts $Device $ProductId $logdir 2>&1 | Out-String)
 
     $logfile = Join-Path $logdir "IsolatedStore\phirura.log"
