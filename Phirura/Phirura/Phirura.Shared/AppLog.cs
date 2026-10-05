@@ -173,9 +173,30 @@ namespace Phirura
                     file.GetBasicPropertiesAsync().AsTask().Result;
                 if (props != null && props.Size > MaxBytes)
                 {
-                    file.DeleteAsync().AsTask().Wait();
-                    file = folder.CreateFileAsync(
-                        FileName, CreationCollisionOption.ReplaceExisting).AsTask().Result;
+                    // Keep the tail; do not start over. This used to delete the file and recreate it
+                    // empty, which threw away the *beginning* of the run - and the beginning is
+                    // where the chart load, the texture registrations and the first gameplay frames
+                    // are. A ten-minute session therefore lost the whole playable part and left only
+                    // the result page, which reads as "the game never rendered anything" and sent a
+                    // whole round hunting a bug that had already been fixed. The per-frame lines
+                    // below are also rate-limited, so a rotation should now be rare rather than
+                    // routine.
+                    string all = Windows.Storage.FileIO.ReadTextAsync(file).AsTask().Result;
+                    int keep = all.Length / 2;
+                    if (keep > all.Length)
+                    {
+                        keep = all.Length;
+                    }
+                    string tail = all.Substring(all.Length - keep);
+                    // Start on a line boundary so the file never opens mid-sentence.
+                    int nl = tail.IndexOf('\n');
+                    if (nl >= 0 && nl + 1 < tail.Length)
+                    {
+                        tail = tail.Substring(nl + 1);
+                    }
+                    FileIO.WriteTextAsync(file,
+                        "...(log rotated; kept the last " + tail.Length + " of " + all.Length
+                        + " chars)...\r\n" + tail).AsTask().Wait();
                 }
 
                 StringBuilder sb = new StringBuilder(line.Length + 2);

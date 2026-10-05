@@ -542,6 +542,36 @@ pub extern "C" fn wp81_texture_overflow() -> u32 {
     macroquad::draw::texture_overflow()
 }
 
+/// Detail about the most recent refusal, indexed - `0` reason code, `1` id, `2` width, `3` height,
+/// `4` byte length, `5` bytes currently held, `6` the byte budget. `0` for any other index.
+///
+/// `wp81_texture_overflow` says *how many* were lost; a count alone cannot tell "the slot table
+/// filled up" from "one texture was bigger than the whole budget", and those need opposite fixes -
+/// so the reason has to cross the boundary too. Reason codes: `1` out of slots, `2` a single
+/// texture larger than the budget, `3` the running total would exceed it, `0` nothing dropped.
+///
+/// Follows `wp81_rs_sis_diag(index)` rather than returning a struct: one accessor keeps the C#
+/// side's `DllImport` list short and needs no marshaller.
+#[no_mangle]
+pub extern "C" fn wp81_texture_drop_info(index: u32) -> u32 {
+    let (id, width, height, bytes) = macroquad::draw::texture_drop_last();
+    match index {
+        0 => match macroquad::draw::texture_drop_reason() {
+            "slots" => 1,
+            "single too large" => 2,
+            "budget" => 3,
+            _ => 0,
+        },
+        1 => id,
+        2 => width,
+        3 => height,
+        4 => bytes as u32,
+        5 => macroquad::draw::texture_used_bytes() as u32,
+        6 => macroquad::draw::texture_capacity() as u32,
+        _ => 0,
+    }
+}
+
 /// The rectangle written since the shell last asked about one texture.
 ///
 /// Returns 1 with `out` filled and the pending area cleared, 0 when nothing changed, -1 for an

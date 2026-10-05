@@ -267,6 +267,9 @@ $exports = @(
     "wp81_texture_id_at",
     "wp81_texture_data",
     "wp81_texture_overflow",
+    # Why the last texture was refused - see the export. A dropped texture is invisible rather than
+    # an error, so the count alone has twice been read as "the chart is fine".
+    "wp81_texture_drop_info",
     "wp81_texture_dirty",
     "wp81_texture_rect_data",
     "wp81_texture_write_misses",

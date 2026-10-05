@@ -903,12 +903,21 @@ namespace Phirura
 
         private void OnPointerPressed(object sender, PointerRoutedEventArgs e)
         {
+            // Logged *before* the guard on purpose. A press that arrives and is dropped because the
+            // page is still loading looks identical, in every other line, to a press that never
+            // arrived at all - and that difference is the whole question behind "the screen does not
+            // respond to touch". Low volume (one line per finger down), so it is not rate-gated.
+            uint id = e.Pointer.PointerId;
+            Windows.Foundation.Point where = e.GetCurrentPoint(GameSurface).Position;
+            AppLog.Write("GamePage: touch down id=" + id + " at " + where.X.ToString("0.#")
+                + "," + where.Y.ToString("0.#") + " rust=" + UseRustEngine
+                + " started=" + _started + " paused=" + _paused + " finished=" + _finished);
+
             if (_paused || _finished || !_started)
             {
                 return;
             }
-            uint id = e.Pointer.PointerId;
-            _active[id] = MakeTouch(id, TouchPhase.Started, e.GetCurrentPoint(GameSurface).Position);
+            _active[id] = MakeTouch(id, TouchPhase.Started, where);
             _justStarted.Add(id);
             // The Rust path's press timestamp. Kept out of `TouchInput.Time` because the C# judge
             // reads that field and treats `NegativeInfinity` as "now" (`Judge.cs:368`) - writing a
@@ -1289,12 +1298,22 @@ namespace Phirura
             for (int i = 0; i < _toRemove.Count; i++)
             {
                 _active.Remove(_toRemove[i]);
+                // The press stamp has to go with the finger. It is keyed by pointer id and the OS
+                // reuses ids, so leaving it behind would hand the *next* press on that id the
+                // previous one's timestamp - and it is only ever read for a `Started` event, which
+                // is exactly what a fresh press is.
+                _rustPressTime.Remove(_toRemove[i]);
             }
             _toRemove.Clear();
 
-            PrprPort.DrainFrame frame = PrprPort.GameFrameSized(0.0);
-            _renderer.DrawPortFrame(frame);
-            _renderer.Present();
+            // Consumed once per frame, exactly as the C# judge path does it (see the clear at the
+            // end of that branch). Without this the set only ever grew: a pointer id stayed in it
+            // for the rest of the session, so every frame after a press re-sent that finger as
+            // `Started` carrying its *original* press time. `prpr` ages a touch with
+            // `t - (uptime - time) * speed`, so a pinned press time is not a cosmetic error - the
+            // touch stopped being a held finger and became a press that never ages, which is why
+            // the screen looked dead to input even though the events were arriving.
+            _justStarted.Clear();
         }
 
         /// <summary>

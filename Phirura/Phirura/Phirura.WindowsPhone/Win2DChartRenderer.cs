@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Geometry;
 using Microsoft.Graphics.Canvas.UI.Xaml;
@@ -950,10 +951,10 @@ namespace Phirura.Game
                             FloatColor(c.f4, c.f5, c.f6, c.f7));
                         break;
 
-                    case 2: // Line: x1/y1/x2/y2, thickness, then r/g/b
+                    case 2: // Line: x1/y1/x2/y2, thickness, then r/g/b, and the alpha in `vstart`
                         ds.DrawLine(
                             c.f0, c.f1, c.f2, c.f3,
-                            FloatColor(c.f5, c.f6, c.f7, 1f),
+                            FloatColor(c.f5, c.f6, c.f7, AsFloat(c.vstart)),
                             c.f4);
                         break;
 
@@ -1013,6 +1014,17 @@ namespace Phirura.Game
             double vx1 = double.MinValue, vy1 = double.MinValue;
             int nVert = 0;
 
+            // Texture coverage, which the command counts cannot show. A geometry batch whose texture
+            // the shell has no carrier for is *skipped*, so `geo` still counts it and the frame
+            // still looks busy while nothing appears - and "the notes and the UI are missing" is
+            // exactly that, seen from the outside. These two numbers name it.
+            int nGeoTex = 0, nGeoTexMissing = 0;
+            // The first geometry vertex's colour and how many of the frame's vertices are fully
+            // transparent. A stride mismatch between the shim's record and this reader shows up here
+            // as an all-zero colour long before it shows up as a blank screen.
+            string firstVtx = "-";
+            int nAlphaZero = 0;
+
             for (int i = 0; i < frame.Count; i++)
             {
                 PrprPort.PortCmd c = cmds[i];
@@ -1054,6 +1066,14 @@ namespace Phirura.Game
                             {
                                 ve = frame.Vertices.Length;
                             }
+                            if (c.flags != 0)
+                            {
+                                nGeoTex++;
+                                if (!_portTextures.ContainsKey(c.flags))
+                                {
+                                    nGeoTexMissing++;
+                                }
+                            }
                             for (int vi = vs; vi < ve; vi++)
                             {
                                 float gx = frame.Vertices[vi].x;
@@ -1062,6 +1082,16 @@ namespace Phirura.Game
                                 if (gy < vy0) vy0 = gy;
                                 if (gx > vx1) vx1 = gx;
                                 if (gy > vy1) vy1 = gy;
+                                if (frame.Vertices[vi].a <= 0.003f)
+                                {
+                                    nAlphaZero++;
+                                }
+                            }
+                            if (firstVtx == "-" && ve > vs)
+                            {
+                                PrprPort.PortVertex fv = frame.Vertices[vs];
+                                firstVtx = fv.r.ToString("0.##") + "," + fv.g.ToString("0.##")
+                                    + "," + fv.b.ToString("0.##") + "," + fv.a.ToString("0.##");
                             }
                             nVert += ve - vs;
                         }
@@ -1090,9 +1120,16 @@ namespace Phirura.Game
             AppLog.WriteSync("Win2D: port frame n=" + frame.Count
                 + " tex=" + nTex + " rect=" + nRect + " line=" + nLine
                 + " circ=" + nCircle + " geo=" + nGeo
+                + " geoTex=" + nGeoTex + " noCarrier=" + nGeoTexMissing
+                + " alpha0=" + nAlphaZero + "/" + nVert + " vtx0=" + firstVtx
                 + " rectBbox=" + bbox + " vertBbox=" + vertBbox
                 + " canvasDip=" + dipW.ToString("0.##") + "x" + dipH.ToString("0.##")
-                + " pxToDip=" + pxToDip);
+                + " pxToDip=" + pxToDip
+                // The registry state travels with the frame line because it is the other half of
+                // the same question: a texture the registry refused never becomes a carrier, and a
+                // carrier that is missing is what `noCarrier` above counts. Printing only the
+                // latter says a sprite is missing without saying why.
+                + " | " + PrprPort.TextureSummary());
         }
 
         private void DrawPortTexture(CanvasDrawingSession ds, PrprPort.PortCmd c)
@@ -1121,6 +1158,21 @@ namespace Phirura.Game
             Rect source = new Rect(sx, sy, sw, sh);
             ICanvasImage image = tex.Target;
 
+            // The tint's alpha, carried in `icount` - see the port's `PortCmd` doc. Only the alpha
+            // can be applied: Win2D.win81's `DrawImage` takes an opacity but no tint, and the
+            // tinted cases `prpr` actually uses (judge-line textures, the `hit_fx` judgement tint)
+            // are white-tinted in the common path. The RGB is decoded anyway so the gap is visible
+            // here rather than discovered as "the effect looks washed out".
+            float opacity = AsFloat(c.icount);
+            if (opacity <= 0.003f)
+            {
+                return;
+            }
+            if (opacity > 1f)
+            {
+                opacity = 1f;
+            }
+
             Matrix3x2 saved = ds.Transform;
             if (flipX || flipY)
             {
@@ -1133,12 +1185,12 @@ namespace Phirura.Game
                 ds.Transform = Matrix3x2.CreateScale(flipX ? -1f : 1f, flipY ? -1f : 1f)
                              * Matrix3x2.CreateTranslation(cx, cy)
                              * saved;
-                ds.DrawImage(image, new Rect(-dw / 2f, -dh / 2f, dw, dh), source, 1f, CanvasImageInterpolation.Linear);
+                ds.DrawImage(image, new Rect(-dw / 2f, -dh / 2f, dw, dh), source, opacity, CanvasImageInterpolation.Linear);
                 ds.Transform = saved;
             }
             else
             {
-                ds.DrawImage(image, new Rect(dx, dy, dw, dh), source, 1f, CanvasImageInterpolation.Linear);
+                ds.DrawImage(image, new Rect(dx, dy, dw, dh), source, opacity, CanvasImageInterpolation.Linear);
             }
         }
 
@@ -1152,6 +1204,11 @@ namespace Phirura.Game
 
             int mode = (int)c.f0;
             bool hasTex = _portTextures.ContainsKey(c.flags);
+
+            // The duplicate-quad memo is per command: it exists to fold the two triangles of one
+            // quad together, and carrying it across commands would drop a legitimately repeated
+            // sprite.
+            _hasLastQuad = false;
 
             // The vertices arrive as a flat array; the index list is re-based to `c.istart` already,
             // so the shell reads the shared arena through it.
@@ -1174,9 +1231,10 @@ namespace Phirura.Game
                 else
                 {
                     // Lines / line strips: the shim uses these for hold bodies, which are plain
-                    // strokes rather than filled geometry.
+                    // strokes rather than filled geometry. The vertex alpha is the hold's fade, so
+                    // it is carried rather than forced opaque.
                     ds.DrawLine(v0.x, v0.y, v1.x, v1.y,
-                        FloatColor(v0.r, v0.g, v0.b, 1f), 2f);
+                        FloatColor(v0.r, v0.g, v0.b, v0.a), 2f);
                 }
             }
         }
@@ -1205,6 +1263,21 @@ namespace Phirura.Game
                                       PrprPort.PortVertex b, PrprPort.PortVertex c,
                                       uint texId, bool hasTex)
         {
+            // The batch's alpha. `prpr` fades a note, a glyph or a particle by writing the same
+            // alpha into all four of its vertices, so the mean is that value; averaging rather than
+            // taking `a.a` only matters for a genuinely graded quad, where it is the closer answer.
+            float alpha = (a.a + b.a + c.a) / 3f;
+            if (alpha <= 0.003f)
+            {
+                // Fully transparent: the shape is emitted (prpr keeps it in the batch) but there is
+                // nothing to draw, and skipping is what keeps a fadeful of invisible quads cheap.
+                return;
+            }
+            if (alpha > 1f)
+            {
+                alpha = 1f;
+            }
+
             PortTexture tex;
             if (hasTex && _portTextures.TryGetValue(texId, out tex) && tex != null && tex.Target != null)
             {
@@ -1223,18 +1296,41 @@ namespace Phirura.Game
                 float v0 = Math.Min(a.v, Math.Min(b.v, c.v));
                 float u1 = Math.Max(a.u, Math.Max(b.u, c.u));
                 float v1 = Math.Max(a.v, Math.Max(b.v, c.v));
-                ICanvasImage image = tex.Target;
-                ds.DrawImage(image,
-                    new Rect(minX, minY, maxX - minX, maxY - minY),
-                    new Rect(u0 * tex.PixelWidth, v0 * tex.PixelHeight,
-                             (u1 - u0) * tex.PixelWidth, (v1 - v0) * tex.PixelHeight),
-                    1f, CanvasImageInterpolation.Linear);
+                Rect quad = new Rect(minX, minY, maxX - minX, maxY - minY);
+                Rect src = new Rect(u0 * tex.PixelWidth, v0 * tex.PixelHeight,
+                                    (u1 - u0) * tex.PixelWidth, (v1 - v0) * tex.PixelHeight);
+
+                // The two triangles of an axis-aligned quad give the same bounding rectangle and the
+                // same source rectangle, so the second draw simply repeats the first - and under
+                // alpha blending a repeat is not a no-op: it darkens every semi-transparent note and
+                // particle. Folding them halves the texture draws in a gameplay frame (which is most
+                // of that frame's cost) and is what lets a half-faded note be the colour it was
+                // meant to be rather than the square of it.
+                if (_hasLastQuad && quad == _lastQuad && src == _lastSrc)
+                {
+                    return;
+                }
+                _hasLastQuad = true;
+                _lastQuad = quad;
+                _lastSrc = src;
+
+                ds.DrawImage(tex.Target, quad, src, alpha, CanvasImageInterpolation.Linear);
                 return;
             }
 
             // Vertex colours are per-vertex in the shim; a flat fill uses the first. Averaging would
             // be closer to a gradient, but Win2D.win81 cannot interpolate across a triangle either.
-            ds.FillGeometry(PortTriangle(ds, a, b, c), FloatColor(a.r, a.g, a.b, 1f));
+            //
+            // Disposed, and that is not tidiness. This runs once per *untextured* triangle per
+            // frame - prpr draws most of a chart's note bodies and every judge-line stroke this way
+            // - and a CanvasGeometry owns a native D2D resource. Leaking one per triangle leaked
+            // thousands a second: frame time climbed steadily over a session (78 fps in the first
+            // minute, 26 by minute ten) until the render thread was saturated enough that touches
+            // were no longer serviced.
+            using (CanvasGeometry tri = PortTriangle(ds, a, b, c))
+            {
+                ds.FillGeometry(tri, FloatColor(a.r, a.g, a.b, alpha));
+            }
         }
 
         /// <summary>
@@ -1751,6 +1847,34 @@ namespace Phirura.Game
         {
             return Color.FromArgb(Channel(a), Channel(r), Channel(g), Channel(b));
         }
+
+        /// <summary>Reinterprets a raw bit pattern as a float.</summary>
+        ///
+        /// The port's `Line` and `Texture` records have no free `f` slot left for their missing
+        /// alpha, so it travels in an arena field the kind does not otherwise use - as `f32` bits,
+        /// because those fields are `u32`. An explicit-layout union rather than
+        /// `BitConverter.ToSingle(GetBytes(..))`: this runs per line per frame and that overload
+        /// allocates an array every call.
+        [StructLayout(LayoutKind.Explicit)]
+        private struct FloatBits
+        {
+            [FieldOffset(0)] public uint Bits;
+            [FieldOffset(0)] public float Value;
+        }
+
+        private static float AsFloat(uint bits)
+        {
+            FloatBits f = new FloatBits();
+            f.Bits = bits;
+            return f.Value;
+        }
+
+        // The previous textured triangle's destination and source rectangles, for folding the two
+        // triangles of one quad into a single draw. Reset per geometry command - see
+        // `DrawPortGeometry` - because across commands a repeated rectangle is legitimate.
+        private bool _hasLastQuad;
+        private Rect _lastQuad;
+        private Rect _lastSrc;
 
         // ------------------------------------------------------------------
         // Small helpers

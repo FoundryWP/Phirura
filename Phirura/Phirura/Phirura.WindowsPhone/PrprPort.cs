@@ -86,6 +86,11 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern uint wp81_texture_overflow();
 
+        // Detail about the last refusal: 0 reason (1 slots, 2 single-too-large, 3 budget), 1 id,
+        // 2 width, 3 height, 4 bytes, 5 bytes held, 6 the byte budget.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint wp81_texture_drop_info(uint index);
+
         // The incremental half of that same registry.
         //
         // The four calls above answer "what does this texture look like", which is all chart art
@@ -419,6 +424,12 @@ namespace Phirura
         public struct PortVertex
         {
             public float x, y, z, u, v, r, g, b;
+
+            // The vertex's alpha. It is a separate field rather than packed into `z` because the
+            // shim's own `Vertex` carries `rgba` and this is the channel that was lost translating
+            // it - notes, judge lines and particles all fade through it. Must stay last: the shim
+            // writes the same order (`PortVertex` in `shims/macroquad/src/lib.rs`).
+            public float a;
         }
 
         /// <summary>One frame of recorded draw calls, already flattened for replay.</summary>
@@ -449,23 +460,29 @@ namespace Phirura
                 // Nothing recorded this frame. Still reset so stale commands cannot leak into the
                 // next one if encode ever bails early on a full buffer.
                 wp81_draw_reset();
-                return new DrainFrame { Count = 0, Commands = new PortCmd[0], Vertices = new PortVertex[0], Indices = new ushort[0] };
+                return new DrainFrame { Count = 0, Commands = EmptyCmds, Vertices = EmptyVerts, Indices = EmptyIdx };
             }
 
-            PortCmd[] cmds = new PortCmd[n];
+            // Reused buffers, grown on demand, rather than `new` every frame. The old form
+            // allocated three arrays per frame - a command array plus a vertex array of a few
+            // thousand 36-byte structs - which is ~100 KB of garbage per frame at 30 fps, or 3 MB a
+            // second, for data that is consumed and discarded before the next frame exists. On this
+            // device that GC churn was a visible part of the stutter. The caller draws from the
+            // returned frame synchronously, so sharing the buffers across frames is safe.
+            PortCmd[] cmds = GrowCmds(n);
             IntPtr cmdPtr = wp81_draw_commands();
             // Copy by field rather than Marshal.PtrToStructure on the whole array: the latter
             // needs the exact managed size and is slower here than a manual loop over a known
-            // 32-byte record.
+            // record size.
             for (int i = 0; i < n; i++)
             {
                 cmds[i] = ReadCmd(cmdPtr, i);
             }
 
-            PortVertex[] verts = new PortVertex[0];
+            PortVertex[] verts = EmptyVerts;
             if (vertexCapacity > 0)
             {
-                verts = new PortVertex[vertexCapacity];
+                verts = GrowVerts((int)vertexCapacity);
                 IntPtr vptr = wp81_draw_vertices();
                 for (int i = 0; i < vertexCapacity; i++)
                 {
@@ -473,10 +490,10 @@ namespace Phirura
                 }
             }
 
-            ushort[] idx = new ushort[0];
+            ushort[] idx = EmptyIdx;
             if (indexCapacity > 0)
             {
-                idx = new ushort[indexCapacity];
+                idx = GrowIdx((int)indexCapacity);
                 IntPtr iptr = wp81_draw_indices();
                 for (int i = 0; i < indexCapacity; i++)
                 {
@@ -486,6 +503,41 @@ namespace Phirura
 
             wp81_draw_reset();
             return new DrainFrame { Count = n, Commands = cmds, Vertices = verts, Indices = idx };
+        }
+
+        private static readonly PortCmd[] EmptyCmds = new PortCmd[0];
+        private static readonly PortVertex[] EmptyVerts = new PortVertex[0];
+        private static readonly ushort[] EmptyIdx = new ushort[0];
+
+        private static PortCmd[] _cmdBuf = EmptyCmds;
+        private static PortVertex[] _vertBuf = EmptyVerts;
+        private static ushort[] _idxBuf = EmptyIdx;
+
+        private static PortCmd[] GrowCmds(int need)
+        {
+            if (_cmdBuf.Length < need)
+            {
+                _cmdBuf = new PortCmd[need];
+            }
+            return _cmdBuf;
+        }
+
+        private static PortVertex[] GrowVerts(int need)
+        {
+            if (_vertBuf.Length < need)
+            {
+                _vertBuf = new PortVertex[need];
+            }
+            return _vertBuf;
+        }
+
+        private static ushort[] GrowIdx(int need)
+        {
+            if (_idxBuf.Length < need)
+            {
+                _idxBuf = new ushort[need];
+            }
+            return _idxBuf;
         }
 
         // --- the game host's managed surface ------------------------------
@@ -877,7 +929,26 @@ namespace Phirura
         /// </summary>
         public static string TextureSummary()
         {
-            return wp81_texture_count() + " registered, " + wp81_texture_overflow() + " dropped";
+            uint dropped = wp81_texture_overflow();
+            string text = wp81_texture_count() + " registered, " + dropped + " dropped";
+            if (dropped == 0)
+            {
+                return text;
+            }
+
+            // A dropped texture is invisible rather than an error, so a bare count reads as "the
+            // chart is fine" and sends the next round looking for a rendering bug. Name the cause
+            // and the victim instead: `slots` needs the slot table enlarged, `budget` needs the
+            // byte ceiling (or an early release) - opposite fixes.
+            uint reason = wp81_texture_drop_info(0);
+            string why = reason == 1 ? "slots" : (reason == 2 ? "single too large" : (reason == 3 ? "budget" : "?"));
+            return text
+                + " [" + why
+                + " last=id " + wp81_texture_drop_info(1)
+                + " " + wp81_texture_drop_info(2) + "x" + wp81_texture_drop_info(3)
+                + " " + wp81_texture_drop_info(4) + "B"
+                + " held=" + wp81_texture_drop_info(5) + "B"
+                + " cap=" + wp81_texture_drop_info(6) + "B]";
         }
 
         // --- the registry's incremental surface ---------------------------
@@ -1052,8 +1123,13 @@ namespace Phirura
         /// </summary>
         private const int CmdStride = 6 * 4 + 8 * 4;
 
-        /// <summary>Byte size of one <c>PortVertex</c>: eight f32 = 32 B.</summary>
-        private const int VertexStride = 8 * 4;
+        /// <summary>Byte size of one <c>PortVertex</c>: nine f32 = 36 B.</summary>
+        ///
+        /// Nine, not eight: the alpha was added when the port stopped forcing every geometry batch
+        /// opaque. It is the stride the *native* record uses, so this constant and `ReadVertex` are
+        /// the two places that must move together with `PortVertex` in the shim - and the layout
+        /// guard below is what says when they have not.
+        private const int VertexStride = 9 * 4;
 
         /// <summary>
         /// Fails loudly (in the log and the self-test summary) if the managed structs stop matching
@@ -1083,14 +1159,35 @@ namespace Phirura
             v.r = ReadF(basePtr, off + 20);
             v.g = ReadF(basePtr, off + 24);
             v.b = ReadF(basePtr, off + 28);
+            // The ninth float. Omitting it was not a cosmetic miss: `PortVertex.a` then stayed at
+            // its default 0, the renderer's "nothing to draw" guard fired for every geometry
+            // triangle, and the whole chart - notes, HUD, every glyph - disappeared while the judge
+            // lines (a different command kind) kept drawing.
+            v.a = ReadF(basePtr, off + 32);
             return v;
         }
 
         // Int32-bits-to-float rather than Marshal.PtrToStructure<float>: no struct marshalling and
         // no dependence on the marshaller agreeing with the native alignment.
+        //
+        // The union, not `BitConverter.ToSingle(BitConverter.GetBytes(..))`. That overload allocates
+        // a byte[] per call, and this is called once per float field - nine per vertex, fourteen per
+        // command. A busy chart frame is a few thousand vertices, so the old form allocated
+        // *tens of thousands* of four-byte arrays every frame and handed the phone's GC a permanent
+        // backlog; on a 512 MB device that shows up as the periodic hitch and the input latency that
+        // reads as "the game is laggy and ignores taps".
+        [StructLayout(LayoutKind.Explicit)]
+        private struct FloatBits
+        {
+            [FieldOffset(0)] public int Bits;
+            [FieldOffset(0)] public float Value;
+        }
+
         private static float ReadF(IntPtr p, int off)
         {
-            return BitConverter.ToSingle(BitConverter.GetBytes(Marshal.ReadInt32(p, off)), 0);
+            FloatBits f = new FloatBits();
+            f.Bits = Marshal.ReadInt32(p, off);
+            return f.Value;
         }
 
         // The delegates are held in static fields on purpose. If they were locals the GC could
@@ -1199,6 +1296,17 @@ namespace Phirura
             AppLog.WriteSync("PrprPort: callbacks=" + Marshal.SizeOf<HostCallbacks>()
                 + " bytes expected=" + (ExpectedCallbackCount * IntPtr.Size)
                 + " layoutOk=" + CallbacksLayoutOk());
+
+            // The other half of the same class of failure, and the one that just cost a round: the
+            // *record* strides. A field added to the shim's `PortVertex` without moving
+            // `VertexStride` makes the reader walk every record at the wrong offset - and because
+            // the alpha was the field added, the symptom was not garbage geometry but *no* geometry,
+            // with the judge lines (a different command kind) still drawing perfectly. Nothing else
+            // in the app can tell those two apart, so the stride is asserted at startup and printed
+            // whether or not it passes.
+            AppLog.WriteSync("PrprPort: wire layout ok=" + WireLayoutOk()
+                + " cmdStride=" + Marshal.SizeOf<PortCmd>() + "/" + CmdStride
+                + " vertexStride=" + Marshal.SizeOf<PortVertex>() + "/" + VertexStride);
         }
 
         /// <summary>

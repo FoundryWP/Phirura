@@ -1622,10 +1622,19 @@ pub mod draw {
     // =======================================================================
 
     /// Largest total the registry will hold across all textures.
-    const TEX_MAX_BYTES: usize = 32 * 1024 * 1024;
-    // 75 registrations were attempted on that chart; entries are 28 bytes, so this costs 3.5 KB and
-    // only exists because the byte budget used to be the binding constraint and hid it.
-    const TEX_SLOTS: usize = 128;
+    ///
+    /// Raised from 32 MiB once the real chart was measured: the 190 chart plus the shared assets
+    /// register ~194 textures whose *unique* content is ~37 MiB, so a 32 MiB ceiling was itself
+    /// refusing textures and the slot count below only ever hid half of it. This is a staging area
+    /// - the shell copies each texture out and keeps its own - so the number that matters is peak,
+    /// not steady state, and the follow-up (release the bytes once the shell has them) is still
+    /// worth doing before this gets raised again.
+    const TEX_MAX_BYTES: usize = 64 * 1024 * 1024;
+    // 194 registrations were attempted on the 190 chart (128 fit, 66 were dropped) - the earlier
+    // "75" note was written from a smaller chart and the cap was never revisited. Entries are 28
+    // bytes, so 512 slots cost 14 KB: the slot count must simply never be the binding constraint
+    // again, because a dropped texture is invisible rather than an error.
+    const TEX_SLOTS: usize = 512;
 
     #[derive(Copy, Clone)]
     struct TexEntry {
@@ -2241,14 +2250,21 @@ pub mod draw {
     // These two records can: they are `#[repr(C)]`, fixed-size and tag-then-payload, which is what
     // a `DllImport` on the C# side can read as a plain struct array.
     //
-    // One `PortVertex` per vertex and one `PortCmd` per draw call, both 32 bytes / aligned to 4,
-    // which keeps the ARM marshaller happy (no 8-byte members).
+    // One `PortVertex` per vertex (36 bytes) and one `PortCmd` per draw call (56 bytes), both
+    // aligned to 4, which keeps the ARM marshaller happy (no 8-byte members).
     // =======================================================================
 
     /// One vertex of a `Geometry` batch, in the same order as the shim's `Vertex`.
     ///
     /// Positions are in the shim's own space - the C# renderer applies the same projection it uses
     /// for the mesh path, so the numbers are handed over untransformed.
+    ///
+    /// `a` used to be missing, which silently made every geometry batch opaque. That is not a
+    /// cosmetic loss: `prpr` fades notes, judge lines and every particle through the *vertex* alpha
+    /// (`note.rs` builds `color.a` from the note's fade-out and the mod's fade), so dropping it
+    /// pinned all of them at 100% and no amount of fixing the renderer could have recovered the
+    /// animation. The shim's own `Vertex` carries `rgba`, so this is the field that was lost in
+    /// translation rather than one that never existed.
     #[repr(C)]
     #[derive(Copy, Clone, Debug, Default)]
     pub struct PortVertex {
@@ -2260,6 +2276,7 @@ pub mod draw {
         pub r: f32,
         pub g: f32,
         pub b: f32,
+        pub a: f32,
     }
 
     // Tag values. Kept in lockstep with `PortCmdKind` in `Phirura.WindowsPhone/PrprPort.cs`.
@@ -2277,6 +2294,19 @@ pub mod draw {
     /// Every variant is expressed with the same 14 `f32`/`u32` payload slots so the record is
     /// fixed-size, which is what lets C# read an array of them without a per-call marshaller.
     /// Unused slots are zero and must be ignored by the reader.
+    ///
+    /// The four arena fields are only offsets for `Geometry`. For `Line` and `Texture` - which have
+    /// no arena - they are reused to carry the colour channels that do not fit the 8-slot `f`
+    /// payload, as raw `f32` bit patterns. That is a union by convention, so the per-kind layout is
+    /// spelled out here and in `PrprPort.PortCmd` and nowhere else:
+    ///
+    /// * `Texture`: `f0..f7` = dest x/y/w/h then source x/y/w/h; `vstart,vcount,istart,icount` =
+    ///   r, g, b, a of the tint. `prpr` tints its sprite batches and fades its particles through
+    ///   this colour, so dropping it (as the first version did) pinned every texture at opaque
+    ///   white - which is why hit effects and texture-kind judge lines looked wrong.
+    /// * `Line`: `f0..f7` = x1/y1/x2/y2, thickness, r, g, b; `vstart` = a. The alpha is what a judge
+    ///   line animates, so without it every line sat at 100% opacity for the whole chart.
+    /// * `Rect` / `Circle`: `f` carries rgba already; the arena fields are zero.
     #[repr(C)]
     #[derive(Copy, Clone, Debug, Default)]
     pub struct PortCmd {
@@ -2284,7 +2314,7 @@ pub mod draw {
         pub kind: u32,
         /// Texture id for `Texture`/`Geometry`, `DrawMode` for `Geometry`, else 0.
         pub flags: u32,
-        /// Vertex/index arena offsets and sizes, for `Geometry` only.
+        /// Vertex/index arena offsets and sizes for `Geometry`; colour channels for `Line`/`Texture`.
         pub vstart: u32,
         pub vcount: u32,
         pub istart: u32,
@@ -2316,6 +2346,7 @@ pub mod draw {
         r: 0.0,
         g: 0.0,
         b: 0.0,
+        a: 0.0,
     }; PORT_VTX_CAP];
     static PORT_CMD_LEN: AtomicU32 = AtomicU32::new(0);
     /// Vertices `encode` actually wrote. Deliberately not `VLEN`: `VLEN` is the batcher's arena
@@ -2360,20 +2391,26 @@ pub mod draw {
                     rec.f[5] = source.y;
                     rec.f[6] = source.w;
                     rec.f[7] = source.h;
-                    // Rotation and flips do not fit the 8-slot payload, so they are folded into
-                    // the tag's high bits: bit 16 = flip_x, bit 17 = flip_y, and rotation is
-                    // carried in `flags`'s high half as a f32 bit pattern is not usable here -
-                    // so rotation is applied by the shell only for the unrotated common case.
-                    // (prpr rotates only its own particles, which do not use this path.)
+                    // Rotation still does not fit the payload: `Cmd::Texture` is a rectangle and the
+                    // shell applies the mirror through the tag's high bits. Rotation is folded into
+                    // the bounding box upstream (see `draw_texture_ex`), so the only thing lost here
+                    // is the tilt itself - `prpr` rotates particles, which are drawn from the
+                    // geometry path, not this one.
                     if flip_x {
                         rec.kind |= 1 << 16;
                     }
                     if flip_y {
                         rec.kind |= 1 << 17;
                     }
-                    // Colour is dropped for textures: `prpr` tints through the vertex colour of
-                    // its Geometry batches, and the Texture path is always full-white in practice.
-                    let _ = (color, rotation);
+                    //
+                    // The tint is carried in the four arena fields, which are unused for this kind -
+                    // see the struct doc. Without it `prpr`'s sprite tints and particle fades were
+                    // all silently forced to opaque white.
+                    rec.vstart = color.r.to_bits();
+                    rec.vcount = color.g.to_bits();
+                    rec.istart = color.b.to_bits();
+                    rec.icount = color.a.to_bits();
+                    let _ = rotation;
                 }
                 Cmd::Rect { dest, color } => {
                     rec.kind = KIND_RECT;
@@ -2396,6 +2433,10 @@ pub mod draw {
                     rec.f[5] = color.r;
                     rec.f[6] = color.g;
                     rec.f[7] = color.b;
+                    // `f` is full, so the alpha rides in an arena field this kind does not use - see
+                    // the struct doc. A judge line's whole animation is its alpha (`line.rs` scales
+                    // it by the line's own fade), so dropping it pinned every line at 100%.
+                    rec.vstart = color.a.to_bits();
                 }
                 Cmd::Circle { center, r, color } => {
                     rec.kind = KIND_CIRCLE;
@@ -2435,6 +2476,11 @@ pub mod draw {
                                 r: v.color[0],
                                 g: v.color[1],
                                 b: v.color[2],
+                                // The fourth channel is the one the batch actually animates -
+                                // `note.rs` and `line.rs` both build their alpha into the vertex
+                                // colour - so leaving it out is what made every note and glyph
+                                // opaque.
+                                a: v.color[3],
                             };
                         }
                         vout += 1;
