@@ -97,7 +97,10 @@ mod shell {
         pub fn wp81_audio_music_set_low_pass(id: u32, cutoff: f32);
         pub fn wp81_audio_music_fade(id: u32, seconds: f64, out: i32);
 
-        pub fn wp81_audio_sfx_new(clip_id: u32) -> u32;
+        /// `clip_id` is 0 for every clip, so the name and the duration are the only things that say
+        /// *which* sound this is - see `AudioClip::new_named`. The name is a UTF-8 pointer/length
+        /// pair rather than a Rust `&str` because this crosses an `extern "C"` boundary.
+        pub fn wp81_audio_sfx_new(clip_id: u32, name: *const u8, name_len: usize, secs: f64) -> u32;
         pub fn wp81_audio_sfx_play(id: u32, amp: f32);
     }
 }
@@ -111,11 +114,30 @@ pub struct AudioClip {
     id: u32,
     sample_rate: u32,
     frame_count: u64,
+    /// The asset name this clip was loaded from, without directory or extension.
+    ///
+    /// Carried because the shell has no other way to tell one sound from another: `id` is 0 for
+    /// every clip (there is no audio engine behind this shim, only the shell's), so `sfx_new` used to
+    /// arrive as "clip 0" every time and the shell could not know whether it was asked for the hit
+    /// sound or a button click. Fixed size, no allocation - see the DLL size note.
+    name: [u8; NAME_CAP],
+    name_len: u8,
 }
+
+/// Enough for the longest asset name in the resource pack, with room to spare.
+pub const NAME_CAP: usize = 48;
 
 impl AudioClip {
     /// Decode a compressed buffer via the shell.
     pub fn new(data: Vec<u8>) -> Result<Self> {
+        Self::new_named("", data)
+    }
+
+    /// As [`Self::new`], but records which asset this is.
+    ///
+    /// The caller knows the name (`load_clip!` has it as a literal, the RPE parser has it as a map
+    /// key); this shim does not, which is why it has to be handed in rather than derived.
+    pub fn new_named(name: &str, data: Vec<u8>) -> Result<Self> {
         let mut info = shell::DecodedInfo {
             sample_rate: 0,
             frame_count: 0,
@@ -128,11 +150,29 @@ impl AudioClip {
                 data.len()
             ));
         }
+        // Truncated rather than rejected: a long name still identifies the sound far better than no
+        // name at all, and refusing the clip would silence it.
+        let mut buf = [0u8; NAME_CAP];
+        let mut len = 0usize;
+        for b in name.bytes() {
+            if len == NAME_CAP {
+                break;
+            }
+            buf[len] = b;
+            len += 1;
+        }
         Ok(AudioClip {
             id: 0,
             sample_rate: info.sample_rate,
             frame_count: info.frame_count,
+            name: buf,
+            name_len: len as u8,
         })
+    }
+
+    /// Pointer and length of the recorded name, for the `sfx_new` callback.
+    pub fn name_parts(&self) -> (*const u8, usize) {
+        (self.name.as_ptr(), self.name_len as usize)
     }
 
     /// `phira`'s song page needs the frames themselves, not a count: `load_local_tuple` takes
@@ -173,6 +213,8 @@ impl AudioClip {
             id: 0,
             sample_rate,
             frame_count: frames.len() as u64,
+            name: [0u8; NAME_CAP],
+            name_len: 0,
         }
     }
 
@@ -503,8 +545,9 @@ impl AudioManager {
     }
 
     pub fn create_sfx(&mut self, clip: AudioClip, _buffer_size: Option<usize>) -> Result<Sfx> {
+        let (name, name_len) = clip.name_parts();
         Ok(Sfx {
-            id: unsafe { shell::wp81_audio_sfx_new(clip.id()) },
+            id: unsafe { shell::wp81_audio_sfx_new(clip.id(), name, name_len, clip.length()) },
         })
     }
 

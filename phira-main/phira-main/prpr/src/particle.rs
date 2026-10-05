@@ -836,9 +836,18 @@ impl Emitter {
     /// shape would need the aspect carried through with it.
     #[cfg(target_arch = "arm")]
     fn draw_port_particles(&self) {
+        // Recorded even when there is nothing to draw: "the pass never ran" and "the pass ran with no
+        // particles" are different faults and only this tells them apart.
+        let mut pushed = 0u32;
+        let held = self.gpu_particles.len() as u32;
+        // `texture: None` is the *normal* case for one of the two emitters, not an error: `Resource`
+        // builds `emitter_square` without an image on purpose, so its particles are solid-coloured
+        // squares - and it is the one that emits four per hit, so returning early here dropped most
+        // of the effect. `tex: 0` is the port's "no texture" id, which the shell draws as a flat
+        // fill from the vertex colour, which is exactly what the GL path does with no image bound.
         let tex = match self.config.texture {
             Some(t) => t.id,
-            None => return,
+            None => 0,
         };
         for p in &self.gpu_particles {
             let (c, s) = (p.pos.z.cos(), p.pos.z.sin());
@@ -866,7 +875,9 @@ impl Emitter {
                 &uvs,
                 Color::new(p.color.x, p.color.y, p.color.z, p.color.w),
             );
+            pushed += 1;
         }
+        macroquad::draw::note_particle_pass(held, pushed);
     }
 }
 

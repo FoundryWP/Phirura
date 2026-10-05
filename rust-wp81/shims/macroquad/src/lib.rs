@@ -1675,6 +1675,21 @@ pub mod draw {
     /// Why: 1 = out of slots, 2 = this one texture alone exceeds the budget, 3 = the running total
     /// would exceed it.
     static mut TEX_DROP_REASON: u8 = 0;
+
+    /// Render textures registered for the first time, and existing ones rebuilt in place.
+    ///
+    /// The glyph atlas is the only thing that does either, and the two mean very different things.
+    /// A *rebuild* is a redraw of the same id - harmless. A **new id** means glyph_brush outgrew its
+    /// atlas and re-created it, and every glyph quad already recorded for that frame still names the
+    /// old id, so that frame draws from a carrier that is no longer being fed: garbled text for one
+    /// frame, which is exactly the "text breaks when a new word appears" report.
+    static mut TEX_NEW: u32 = 0;
+    static mut TEX_REBUILT: u32 = 0;
+
+    /// `(new, rebuilt)` render-texture registrations since start.
+    pub fn render_texture_counts() -> (u32, u32) {
+        unsafe { (TEX_NEW, TEX_REBUILT) }
+    }
     /// Bytes of *unique* content the engine asked the registry to hold, whether or not they fit.
     ///
     /// `texture_used_bytes` is what actually fitted, which is capped at the budget - so it can never
@@ -1813,6 +1828,7 @@ pub mod draw {
 
             for i in 0..count {
                 if TEX_ENTRIES[i].id == id {
+                    TEX_REBUILT = TEX_REBUILT.wrapping_add(1);
                     let e = TEX_ENTRIES[i];
                     core::ptr::write_bytes(TEX_BYTES.as_mut_ptr().add(e.offset), 0, e.len);
                     // The *stored* extent, not the one just passed in. The dirty rectangle is a
@@ -1845,6 +1861,7 @@ pub mod draw {
             let offset = TEX_BYTES.len();
             TEX_DEMAND = TEX_DEMAND.saturating_add(len);
             TEX_BYTES.resize(offset + len, 0);
+            TEX_NEW = TEX_NEW.wrapping_add(1);
             TEX_ENTRIES[count] = TexEntry {
                 id,
                 width,
@@ -2243,6 +2260,7 @@ pub mod draw {
     /// model by the time it emits a particle (`Resource::world_to_screen`), so the projection here
     /// is the one every other vertex goes through, and the sprite lands where the particle is.
     pub fn push_sprite_quad(tex: u32, corners: &[Vec2; 4], uvs: &[[f32; 2]; 4], color: Color) {
+        SPRITE_QUADS.fetch_add(1, Ordering::Relaxed);
         let vs = VLEN.load(Ordering::Relaxed) as usize;
         let is = ILEN.load(Ordering::Relaxed) as usize;
         if vs + 4 > VCAP || is + 6 > ICAP {
@@ -2396,6 +2414,60 @@ pub mod draw {
     /// vertices this frame produced.
     static PORT_VTX_LEN: AtomicU32 = AtomicU32::new(0);
 
+    /// Sprite quads emitted by `push_sprite_quad` during the frame now being built.
+    ///
+    /// Its own counter because the particle path is the one thing that cannot be identified from
+    /// `geo=`: a hit adds about five quads to a frame that already carries forty-odd, so the totals
+    /// overlap and the count can neither confirm nor deny that the effect exists. This can - zero
+    /// means `prpr::particle` never reached the command stream, non-zero means it did.
+    static SPRITE_QUADS: AtomicU32 = AtomicU32::new(0);
+
+    /// The value `sprite_quad_count` reports - the count *as of the last completed encode*.
+    ///
+    /// Separate from `SPRITE_QUADS` because the two happen in the opposite order to the obvious one:
+    /// `push_sprite_quad` runs during the game frame, and `encode` runs afterwards. Publishing at
+    /// the end of `encode` is what makes the number survive to be read; the first version cleared
+    /// the counter at the *top* of `encode` and therefore always reported 0, while the path was
+    /// provably compiled and reached (`perform_render_pass` had become dead code, which is only
+    /// possible if the ARM branch replaced it).
+    static LAST_SPRITE_QUADS: AtomicU32 = AtomicU32::new(0);
+
+    /// How many particles the last encoded frame carried.
+    pub fn sprite_quad_count() -> u32 {
+        LAST_SPRITE_QUADS.load(Ordering::Relaxed)
+    }
+
+    /// Times `Emitter::draw` ran on the port path, and the particles it saw in total.
+    ///
+    /// `sprite_quad_count` alone cannot separate the two ways this can come out zero - the emitter
+    /// never being drawn, and it being drawn empty - and they have completely different fixes (the
+    /// draw gate in `scene/game.rs` versus `emit_at_origin` in `judge.rs`). Two counters separate
+    /// them: `passes == 0` means `draw` is not reached, `passes > 0` with `seen == 0` means the
+    /// emitter is alive but nothing is being emitted into it.
+    static PARTICLE_PASSES: AtomicU32 = AtomicU32::new(0);
+    static PARTICLE_SEEN: AtomicU32 = AtomicU32::new(0);
+    static PARTICLE_PUSHED: AtomicU32 = AtomicU32::new(0);
+
+    /// Called once per `Emitter::draw` on the ARM path: how many particles it held, and how many it
+    /// managed to push. The two differ only if the vertex arena is full, which is exactly the case
+    /// worth being able to see.
+    pub fn note_particle_pass(held: u32, pushed: u32) {
+        PARTICLE_PASSES.fetch_add(1, Ordering::Relaxed);
+        PARTICLE_SEEN.fetch_add(held, Ordering::Relaxed);
+        PARTICLE_PUSHED.fetch_add(pushed, Ordering::Relaxed);
+    }
+
+    /// `0` passes, `1` particles seen, `2` quads in the last frame, `3` particles pushed.
+    pub fn particle_diag(index: u32) -> u32 {
+        match index {
+            0 => PARTICLE_PASSES.load(Ordering::Relaxed),
+            1 => PARTICLE_SEEN.load(Ordering::Relaxed),
+            2 => LAST_SPRITE_QUADS.load(Ordering::Relaxed),
+            3 => PARTICLE_PUSHED.load(Ordering::Relaxed),
+            _ => 0,
+        }
+    }
+
     /// Translate the recorded `Cmd` arena into the flat records the shell reads.
     ///
     /// Returns the number of `PortCmd` records written; the matching vertex buffer is fetched with
@@ -2539,6 +2611,9 @@ pub mod draw {
 
         PORT_CMD_LEN.store(cout as u32, Ordering::Relaxed);
         PORT_VTX_LEN.store(vout as u32, Ordering::Relaxed);
+        // Publish, then clear - see `LAST_SPRITE_QUADS`.
+        LAST_SPRITE_QUADS.store(SPRITE_QUADS.load(Ordering::Relaxed), Ordering::Relaxed);
+        SPRITE_QUADS.store(0, Ordering::Relaxed);
         cout as u32
     }
 

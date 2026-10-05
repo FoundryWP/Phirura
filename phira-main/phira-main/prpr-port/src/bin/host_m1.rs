@@ -210,7 +210,7 @@ extern "C" fn music_paused(_id: u32) -> i32 {
 extern "C" fn music_amp(_id: u32, _amp: f32) {}
 extern "C" fn music_lowpass(_id: u32, _cutoff: f32) {}
 extern "C" fn music_fade(_id: u32, _seconds: f64, _out: i32) {}
-extern "C" fn sfx_new(_clip: u32) -> u32 {
+extern "C" fn sfx_new(_clip: u32, _name: *const u8, _name_len: usize, _secs: f64) -> u32 {
     0
 }
 extern "C" fn sfx_play(_id: u32, _amp: f32) {}

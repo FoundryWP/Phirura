@@ -260,7 +260,7 @@ impl ResourcePack {
                     .load_file(format!("{}.ogg", $path).as_str())
                     .await
                     .ok()
-                    .map(|it| AudioClip::new(it))
+                    .map(|it| AudioClip::new_named($path, it))
                     .transpose()?
                 {
                     sfx
@@ -268,7 +268,7 @@ impl ResourcePack {
                     .load_file(format!("{}.wav", $path).as_str())
                     .await
                     .ok()
-                    .map(|it| AudioClip::new(it))
+                    .map(|it| AudioClip::new_named($path, it))
                     .transpose()?
                 {
                     sfx
@@ -276,12 +276,12 @@ impl ResourcePack {
                     .load_file(format!("{}.mp3", $path).as_str())
                     .await
                     .ok()
-                    .map(|it| AudioClip::new(it))
+                    .map(|it| AudioClip::new_named($path, it))
                     .transpose()?
                 {
                     sfx
                 } else {
-                    AudioClip::new(load_file(format!("{}.ogg", $path).as_str()).await?)?
+                    AudioClip::new_named($path, load_file(format!("{}.ogg", $path).as_str()).await?)?
                 }
             };
         }

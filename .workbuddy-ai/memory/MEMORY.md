@@ -140,13 +140,16 @@ there is no `ISfxSink`. Rust requests them (`audio sfx_play id=0`), so the fix i
 same shape as the music one: carry `clip.length()` across `wp81_audio_sfx_new`, identify by duration,
 implement an `ISfxSink` in `GamePage` over `SfxPlayer`.
 
-**The hit *effect* cannot appear at all — architectural, not a regression.** `prpr::particle` drives
+**The hit *effect* — implemented (R57), not yet seen on the device.** `prpr::particle` drives
 miniquad's `Context` directly (`Emitter::draw` → `apply_bindings`/`apply_uniforms`/`draw`, instanced
-quads uploaded via `Buffer::update`), and **every one of those is a no-op in the shim** — the file
-says so. So particle geometry, its texture and its MVP are all discarded and never reach the port's
-`Cmd` arena. Fix: have the shim *record* that pass (`Buffer::update` keeps the bytes,
-`apply_bindings` keeps the texture, `Context::draw` expands instances into `Cmd::Geometry`). The same
-change unlocks `JudgeLineKind::Paint`, the other raw-render-pass path.
+quads uploaded via `Buffer::update`) and **every one of those is a no-op in the shim**, so particles
+never entered the port's `Cmd` arena. Fixed by emitting them through macroquad instead:
+`macroquad::draw::push_sprite_quad(tex, corners, uvs, color)` (new, in the macroquad shim) plus a
+`#[cfg(target_arch = "arm")]` branch and `draw_port_particles()` in `prpr/src/particle.rs`. The
+particles turn out to need no special projection — prpr applies its own model via
+`world_to_screen`, and the shim applies exactly the shader's `_mvp`. **`prpr/src/particle.rs` is now a
+file we modify** (it is a build input despite living under `phira-main/`); the desktop harness keeps
+the GL path via the cfg.
 
 ## Next steps
 Stage 3: port prpr scene draw calls — vertex stride **36 B** (`pos3(12)+uv2(8)+rgba4(16)`, `z` kept 0),

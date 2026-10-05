@@ -168,7 +168,7 @@ impl MainScene {
         // init button hitsound
         macro_rules! load_sfx {
             ($name:ident, $path:literal) => {{
-                let clip = AudioClip::new(load_file($path).await?)?;
+                let clip = AudioClip::new_named($path, load_file($path).await?)?;
                 let sound = UI_AUDIO.with(|it| it.borrow_mut().create_sfx(clip, None))?;
                 prpr::ui::$name.with(|it| *it.borrow_mut() = Some(sound));
             }};

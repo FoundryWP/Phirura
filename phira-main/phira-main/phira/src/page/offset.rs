@@ -46,7 +46,7 @@ impl OffsetPage {
                 ..Default::default()
             },
         )?;
-        let cali_hit = audio.create_sfx(AudioClip::new(load_file("cali_hit.ogg").await?)?, None)?;
+        let cali_hit = audio.create_sfx(AudioClip::new_named("cali_hit", load_file("cali_hit.ogg").await?)?, None)?;
 
         let mut tm = TimeManager::new(1., true);
         tm.force = 3e-2;

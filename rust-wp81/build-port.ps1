@@ -270,6 +270,9 @@ $exports = @(
     # Why the last texture was refused - see the export. A dropped texture is invisible rather than
     # an error, so the count alone has twice been read as "the chart is fine".
     "wp81_texture_drop_info",
+    # Particle quads in the last frame - the only evidence the hit effect reached the renderer at all.
+    "wp81_sprite_quads",
+    "wp81_particle_diag",
     "wp81_texture_dirty",
     "wp81_texture_rect_data",
     "wp81_texture_write_misses",

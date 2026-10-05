@@ -1120,6 +1120,8 @@ namespace Phirura.Game
             AppLog.WriteSync("Win2D: port frame n=" + frame.Count
                 + " tex=" + nTex + " rect=" + nRect + " line=" + nLine
                 + " circ=" + nCircle + " geo=" + nGeo
+                + " particles=" + PrprPort.SpriteQuads()
+                + " pd=" + PrprPort.ParticleDiag(0) + "/" + PrprPort.ParticleDiag(1)
                 + " geoTex=" + nGeoTex + " noCarrier=" + nGeoTexMissing
                 + " alpha0=" + nAlphaZero + "/" + nVert + " vtx0=" + firstVtx
                 + " rectBbox=" + bbox + " vertBbox=" + vertBbox
@@ -1293,6 +1295,48 @@ namespace Phirura.Game
                 return false;
             }
 
+            // Exactly four distinct vertices, or this is not a quad. Six indices that name five or
+            // six vertices mean the window straddles two shapes (a hold's body and its head are
+            // batched together), and taking the uv extremes across them builds an affine map from
+            // one shape's corners to another's - which draws as a skewed, stretched sprite behind
+            // the real one. That is the "a short hold suddenly grows a slanted copy" report.
+            int i0 = (int)frame.Indices[(int)c.istart + t];
+            int i1 = (int)frame.Indices[(int)c.istart + t + 1];
+            int i2 = (int)frame.Indices[(int)c.istart + t + 2];
+            int i3 = (int)frame.Indices[(int)c.istart + t + 3];
+            int i4 = (int)frame.Indices[(int)c.istart + t + 4];
+            int i5 = (int)frame.Indices[(int)c.istart + t + 5];
+            int unique = 1;
+            int[] seen4 = { i0, -1, -1, -1 };
+            for (int k = 0; k < 6; k++)
+            {
+                int v = k == 0 ? i0 : (k == 1 ? i1 : (k == 2 ? i2 : (k == 3 ? i3 : (k == 4 ? i4 : i5))));
+                bool known = false;
+                for (int j = 0; j < unique; j++)
+                {
+                    if (seen4[j] == v)
+                    {
+                        known = true;
+                        break;
+                    }
+                }
+                if (known)
+                {
+                    continue;
+                }
+                if (unique >= 4)
+                {
+                    // A fifth distinct vertex: not a quad.
+                    return false;
+                }
+                seen4[unique] = v;
+                unique++;
+            }
+            if (unique != 4)
+            {
+                return false;
+            }
+
             PortTexture tex;
             if (!_portTextures.TryGetValue(c.flags, out tex) || tex == null || tex.Target == null)
             {
@@ -1301,12 +1345,12 @@ namespace Phirura.Game
 
             int istart = (int)c.istart;
             int vbase = (int)c.vstart;
-            _quadVerts[0] = Vert(frame, vbase + (int)frame.Indices[istart + t]);
-            _quadVerts[1] = Vert(frame, vbase + (int)frame.Indices[istart + t + 1]);
-            _quadVerts[2] = Vert(frame, vbase + (int)frame.Indices[istart + t + 2]);
-            _quadVerts[3] = Vert(frame, vbase + (int)frame.Indices[istart + t + 3]);
-            _quadVerts[4] = Vert(frame, vbase + (int)frame.Indices[istart + t + 4]);
-            _quadVerts[5] = Vert(frame, vbase + (int)frame.Indices[istart + t + 5]);
+            _quadVerts[0] = Vert(frame, vbase + i0);
+            _quadVerts[1] = Vert(frame, vbase + i1);
+            _quadVerts[2] = Vert(frame, vbase + i2);
+            _quadVerts[3] = Vert(frame, vbase + i3);
+            _quadVerts[4] = Vert(frame, vbase + i4);
+            _quadVerts[5] = Vert(frame, vbase + i5);
 
             float minU = _quadVerts[0].u, maxU = _quadVerts[0].u;
             float minV = _quadVerts[0].v, maxV = _quadVerts[0].v;
@@ -1356,6 +1400,17 @@ namespace Phirura.Game
             float qh = Math.Abs(b.y - a.y) + Math.Abs(d.y - a.y);
             float tol = 0.01f * (qw + qh + 1f);
             if (Math.Abs(ex) > tol || Math.Abs(ey) > tol)
+            {
+                return false;
+            }
+
+            // Axis-aligned quads deliberately go back to the caller's bounding-box path, which is
+            // *exact* for them. This function exists for the case that path cannot express - a
+            // rotated sprite, which came out stretched - and sending the common case (every glyph,
+            // every UI rectangle) through an affine transform as well was needless risk: a wrong
+            // matrix there is not a stretched sprite but garbled text, which is precisely what
+            // appeared once the judgement word started drawing on the first touch.
+            if (Math.Abs(b.y - a.y) <= tol && Math.Abs(d.x - a.x) <= tol)
             {
                 return false;
             }
@@ -1541,6 +1596,20 @@ namespace Phirura.Game
                     // frame after it.
                     AppLog.WriteSync("Win2D: port texture fallback failed", ex);
                 }
+                return;
+            }
+
+            // Polled every third frame rather than every frame.
+            //
+            // The sweep costs three native calls per registered texture - ~119 of them on the 190
+            // chart, so ~360 calls per frame just to ask "did anything change", on a frame that also
+            // replays ~150 draw commands. Nothing here needs per-frame resolution: chart art never
+            // changes after load, and the glyph atlas only has to be current before the text that
+            // uses it is read, so a 60 ms lag is invisible. Those calls come straight off the frame
+            // time, and frame time is what touch latency is actually made of.
+            _texPollFrame++;
+            if ((_texPollFrame % 3) != 0)
+            {
                 return;
             }
 
@@ -2022,6 +2091,9 @@ namespace Phirura.Game
         // runs once per sprite per frame, and a fresh array there would be the same per-frame garbage
         // the drain buffers were changed to avoid.
         private readonly PrprPort.PortVertex[] _quadVerts = new PrprPort.PortVertex[6];
+
+        /// <summary>Frame counter for the texture-poll gate - see `EnsurePortTextures`.</summary>
+        private int _texPollFrame;
 
         // ------------------------------------------------------------------
         // Small helpers

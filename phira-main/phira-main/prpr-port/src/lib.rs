@@ -67,7 +67,8 @@ pub struct HostCallbacks {
     pub audio_music_set_amplifier: Option<unsafe extern "C" fn(id: u32, amp: f32)>,
     pub audio_music_set_low_pass: Option<unsafe extern "C" fn(id: u32, cutoff: f32)>,
     pub audio_music_fade: Option<unsafe extern "C" fn(id: u32, seconds: f64, out: i32)>,
-    pub audio_sfx_new: Option<unsafe extern "C" fn(clip: u32) -> u32>,
+    pub audio_sfx_new:
+        Option<unsafe extern "C" fn(clip: u32, name: *const u8, name_len: usize, secs: f64) -> u32>,
     pub audio_sfx_play: Option<unsafe extern "C" fn(id: u32, amp: f32)>,
     pub pick_file: Option<unsafe extern "C" fn(title: *const u16, out: *mut u16, cap: usize) -> i32>,
     pub save_file:
@@ -276,10 +277,21 @@ pub unsafe extern "C" fn wp81_audio_music_fade(id: u32, seconds: f64, out: i32) 
     }
 }
 
+/// Create a sound effect.
+///
+/// `name`/`name_len` are the asset name the clip was loaded from (no directory, no extension) and
+/// `secs` its duration. Together they are the only thing that identifies it: `AudioClip` carries no
+/// id of its own here (every one is 0), so without them the shell could not tell the hit sound from a
+/// button click - and it has to, because it is the shell that owns the audio device.
 #[no_mangle]
-pub unsafe extern "C" fn wp81_audio_sfx_new(clip: u32) -> u32 {
+pub unsafe extern "C" fn wp81_audio_sfx_new(
+    clip: u32,
+    name: *const u8,
+    name_len: usize,
+    secs: f64,
+) -> u32 {
     match cb().audio_sfx_new {
-        Some(f) => f(clip),
+        Some(f) => f(clip, name, name_len, secs),
         None => 0,
     }
 }
@@ -542,6 +554,24 @@ pub extern "C" fn wp81_texture_overflow() -> u32 {
     macroquad::draw::texture_overflow()
 }
 
+/// Particle quads the last encoded frame carried.
+///
+/// `prpr::particle` used to reach the renderer not at all - it drives miniquad's `Context`, whose
+/// shim methods are no-ops - so the hit effect was invisible with nothing in the log to say so. This
+/// is the one number that can: zero means the emitter never made it into the command stream.
+#[no_mangle]
+pub extern "C" fn wp81_sprite_quads() -> u32 {
+    macroquad::draw::sprite_quad_count()
+}
+
+/// Particle-pass detail, indexed: `0` draws, `1` particles seen, `2` quads in the last frame.
+///
+/// Separates "the emitter was never drawn" from "it was drawn empty" - see the shim's note.
+#[no_mangle]
+pub extern "C" fn wp81_particle_diag(index: u32) -> u32 {
+    macroquad::draw::particle_diag(index)
+}
+
 /// Detail about the most recent refusal, indexed - `0` reason code, `1` id, `2` width, `3` height,
 /// `4` byte length, `5` bytes currently held, `6` the byte budget. `0` for any other index.
 ///
@@ -739,7 +769,73 @@ pub extern "C" fn wp81_phira_boot(data_dir: *const u16, auto_open: *const u16, a
 /// negative code when nothing is running.
 #[no_mangle]
 pub extern "C" fn wp81_game_frame(dt: f64) -> i32 {
+    // Once every ~60 frames, written from Rust rather than read by the shell.
+    //
+    // The shell reads the same counters, but it reads them inside the Win2D draw callback, which runs
+    // asynchronously to the game loop - so a zero there is ambiguous between "no particles" and "read
+    // at the wrong moment". This line is written from the frame that actually built the particles.
+    //
+    // Hand-rolled decimal rather than `format!`: this crate deliberately pulls in no formatting
+    // machinery (see the note on the DLL's size), and once a second is not worth changing that.
+    unsafe {
+        let draws = macroquad::draw::particle_diag(0);
+        if draws.wrapping_sub(PARTICLE_LOG_AT) >= 60 {
+            PARTICLE_LOG_AT = draws;
+            let mut buf = [0u8; 96];
+            let mut n = push_str(&mut buf, 0, "particles: draws=");
+            n = push_u32(&mut buf, n, draws);
+            n = push_str(&mut buf, n, " seen=");
+            n = push_u32(&mut buf, n, macroquad::draw::particle_diag(1));
+            n = push_str(&mut buf, n, " pushed=");
+            n = push_u32(&mut buf, n, macroquad::draw::particle_diag(3));
+            n = push_str(&mut buf, n, " quads=");
+            n = push_u32(&mut buf, n, macroquad::draw::particle_diag(2));
+            let (tex_new, tex_rebuilt) = macroquad::draw::render_texture_counts();
+            n = push_str(&mut buf, n, " texNew=");
+            n = push_u32(&mut buf, n, tex_new);
+            n = push_str(&mut buf, n, " texRebuilt=");
+            n = push_u32(&mut buf, n, tex_rebuilt);
+            if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                log_line(s);
+            }
+        }
+    }
     host::frame(dt)
+}
+
+static mut PARTICLE_LOG_AT: u32 = 0;
+
+fn push_str(buf: &mut [u8], at: usize, s: &str) -> usize {
+    let mut at = at;
+    for b in s.as_bytes() {
+        if at < buf.len() {
+            buf[at] = *b;
+            at += 1;
+        }
+    }
+    at
+}
+
+fn push_u32(buf: &mut [u8], at: usize, mut n: u32) -> usize {
+    let mut tmp = [0u8; 10];
+    let mut len = 0usize;
+    if n == 0 {
+        tmp[0] = b'0';
+        len = 1;
+    }
+    while n > 0 {
+        tmp[len] = b'0' + (n % 10) as u8;
+        n /= 10;
+        len += 1;
+    }
+    let mut at = at;
+    for i in (0..len).rev() {
+        if at < buf.len() {
+            buf[at] = tmp[i];
+            at += 1;
+        }
+    }
+    at
 }
 
 /// Stop the game and release the scene. Safe to call when nothing is running.

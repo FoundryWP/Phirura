@@ -222,6 +222,7 @@ namespace Phirura
                 // the page being torn down - and cleared rather than left pointing, because the
                 // table is static and outlives this page by a long way.
                 PrprPort.MusicSink = null;
+                PrprPort.SfxSink = null;
             }
             try
             {
@@ -682,6 +683,9 @@ namespace Phirura
                 // Installed before the engine exists: `PhiraBoot` blocks until phira parks and
                 // never yields, so a sink installed afterwards would miss the first `music_new`.
                 PrprPort.MusicSink = this;
+                // The other half of the same wiring. Without it `sfx_new`/`sfx_play` only logged, so
+                // every sound phira asked for - the note hits above all - was silent by construction.
+                PrprPort.SfxSink = this;
 
                 StartRustEngine();
                 if (!_rustCreated)
@@ -967,6 +971,81 @@ namespace Phirura
             return t;
         }
 
+        // ------------------------------------------------------------------
+        // Sound effects (phira's own)
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// The URI each registered effect should play, indexed by the handle `SfxPlay` receives.
+        ///
+        /// A table rather than a dictionary keyed by a real id, because there is no real id: every
+        /// `AudioClip` on the Rust side reports 0, so the handle this shell returns is just the slot
+        /// the name was recorded in.
+        /// </summary>
+        private readonly List<string> _sfxUris = new List<string>();
+
+        /// <summary>
+        /// Where an effect lives.
+        ///
+        /// The packaged `.wav` wins for the sounds this project ships, so the hit sounds survive a
+        /// missing resource pack - they are the ones a player notices. Everything else (the UI
+        /// clicks, the ending sting) is phira's own `.ogg`, which the seeded asset tree puts under
+        /// `charts\`.
+        /// </summary>
+        private static string SfxUri(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+            {
+                return null;
+            }
+            string bare = name;
+            int dot = bare.LastIndexOf('.');
+            if (dot > 0)
+            {
+                bare = bare.Substring(0, dot);
+            }
+            switch (bare)
+            {
+                case "click":
+                case "drag":
+                case "flick":
+                case "cali":
+                case "cali_hit":
+                    return "ms-appx:///Assets/game/" + bare + ".wav";
+                default:
+                    return "ms-appdata:///local/charts/" + bare + ".ogg";
+            }
+        }
+
+        uint PrprPort.ISfxSink.SfxNew(string name, double secs)
+        {
+            string uri = SfxUri(name);
+            _sfxUris.Add(uri);
+            AppLog.Write("GamePage: sfx_new '" + name + "' -> " + (uri == null ? "(none)" : uri));
+            return uri == null ? 0u : (uint)(_sfxUris.Count - 1);
+        }
+
+        void PrprPort.ISfxSink.SfxPlay(uint id, float amp)
+        {
+            if (id >= (uint)_sfxUris.Count || _sfx == null)
+            {
+                return;
+            }
+            string uri = _sfxUris[(int)id];
+            if (uri == null)
+            {
+                return;
+            }
+            try
+            {
+                _sfx.Play(uri);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("GamePage.SfxPlay(" + uri + ")", ex);
+            }
+        }
+
         /// <summary>
         /// Whether a pointer event should reach the engine.
         ///
@@ -990,18 +1069,47 @@ namespace Phirura
             }
         }
 
+        /// <summary>
+        /// Whether a per-touch line may be written now.
+        ///
+        /// Every line costs six blocking WinRT file calls (`AppLog.Append` writes the Local store and
+        /// the temp mirror), and the appends run as one serialised chain. A finger burst is five
+        /// touches in twenty milliseconds - ten lines, sixty calls, seconds of queued work - and the
+        /// next `WriteSync`, which runs on the UI thread once a second, waits for that whole queue.
+        /// That is what froze the picture on touch while the engine kept running: the render loop was
+        /// blocked, not stopped. Gating the burst keeps the signal and drops the pile-up.
+        /// </summary>
+        private bool TouchLogDue()
+        {
+            int now = Environment.TickCount;
+            if (unchecked(now - _touchLogTick) < 200)
+            {
+                _touchLogSkipped++;
+                return false;
+            }
+            _touchLogTick = now;
+            return true;
+        }
+
+        private int _touchLogTick = int.MinValue / 2;
+        private int _touchLogSkipped;
+
         private void OnPointerPressed(object sender, PointerRoutedEventArgs e)
         {
             // Logged *before* the guard on purpose. A press that arrives and is dropped because the
             // page is still loading looks identical, in every other line, to a press that never
             // arrived at all - and that difference is the whole question behind "the screen does not
-            // respond to touch". Low volume (one line per finger down), so it is not rate-gated.
+            // respond to touch". Rate-gated: see `TouchLogDue`.
             uint id = e.Pointer.PointerId;
             Windows.Foundation.Point where = e.GetCurrentPoint(GameSurface).Position;
-            AppLog.Write("GamePage: touch down id=" + id + " at " + where.X.ToString("0.#")
-                + "," + where.Y.ToString("0.#") + " rust=" + UseRustEngine
-                + " started=" + _started + " paused=" + _paused + " finished=" + _finished
-                + " live=" + InputLive);
+            if (TouchLogDue())
+            {
+                AppLog.Write("GamePage: touch down id=" + id + " at " + where.X.ToString("0.#")
+                    + "," + where.Y.ToString("0.#") + " rust=" + UseRustEngine
+                    + " started=" + _started + " paused=" + _paused + " finished=" + _finished
+                    + " live=" + InputLive + " skipped=" + _touchLogSkipped);
+                _touchLogSkipped = 0;
+            }
 
             if (!InputLive)
             {
@@ -1053,15 +1161,21 @@ namespace Phirura
                 // Logged because it is the one case where a release cannot be paired with a press:
                 // either the press was dropped by the guard (so the finger was never tracked) or the
                 // pointer was already retired. Both look like "the game ignored my tap" from outside.
-                AppLog.Write("GamePage: touch up id=" + id + " (not tracked)");
+                if (TouchLogDue())
+                {
+                    AppLog.Write("GamePage: touch up id=" + id + " (not tracked)");
+                }
                 return;
             }
             TouchInput next = MakeTouch(id, TouchPhase.Ended, e.GetCurrentPoint(GameSurface).Position);
             next.Time = cur.Time;
             _active[id] = next;
             _toRemove.Add(id);
-            AppLog.Write("GamePage: touch up id=" + id + " at " + next.Ndc.X.ToString("0.##")
-                + "," + next.Ndc.Y.ToString("0.##") + " remaining=" + _active.Count);
+            if (TouchLogDue())
+            {
+                AppLog.Write("GamePage: touch up id=" + id + " at " + next.Ndc.X.ToString("0.##")
+                    + "," + next.Ndc.Y.ToString("0.##") + " remaining=" + _active.Count);
+            }
         }
 
         private void OnPointerCanceled(object sender, PointerRoutedEventArgs e)

@@ -563,7 +563,7 @@ async fn parse_notes(
                     if hitsounds.get(&s).is_none() {
                         let data = fs.load_file(&s).await;
                         if let Ok(data) = data {
-                            hitsounds.insert(s.clone(), AudioClip::new(data)?);
+                            hitsounds.insert(s.clone(), AudioClip::new_named(&s, data)?);
                         } else {
                             ptl!(bail "hitsound-missing", "name" => s);
                         }

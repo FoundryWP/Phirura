@@ -91,6 +91,24 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern uint wp81_texture_drop_info(uint index);
 
+        /// <summary>Particle quads the last encoded frame carried - see the export's note.</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint wp81_sprite_quads();
+
+        public static uint SpriteQuads()
+        {
+            return wp81_sprite_quads();
+        }
+
+        /// <summary>Particle-pass detail: `0` draws, `1` particles seen, `2` quads last frame.</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint wp81_particle_diag(uint index);
+
+        public static uint ParticleDiag(uint index)
+        {
+            return wp81_particle_diag(index);
+        }
+
         // The incremental half of that same registry.
         //
         // The four calls above answer "what does this texture look like", which is all chart art
@@ -295,7 +313,7 @@ namespace Phirura
         private delegate void AudioMusicFadeFn(uint id, double seconds, int outFlag);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate uint AudioSfxNewFn(uint clip);
+        private delegate uint AudioSfxNewFn(uint clip, IntPtr name, int nameLen, double secs);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void AudioSfxPlayFn(uint id, float amp);
@@ -1538,10 +1556,50 @@ namespace Phirura
                 + " " + seconds.ToString("0.###") + "s out=" + outFlag);
         }
 
-        private static uint OnSfxNew(uint clip)
+        /// <summary>
+        /// The shell's sound-effect device.
+        ///
+        /// `PrprPort` stays free of `MediaElement` for the same reason it stays free of sockets: the
+        /// shell owns the devices and the Rust side must never be handed one. Until this existed the
+        /// two callbacks below only logged, so *every* sound effect in phira - the note hits
+        /// included - was silent by construction rather than by accident.
+        /// </summary>
+        public interface ISfxSink
         {
-            AppLog.WriteSync("PrprPort: audio sfx_new clip=" + clip);
-            return 0;
+            /// <summary>
+            /// Register a sound and return the handle `SfxPlay` will use.
+            ///
+            /// `name` is the asset it was loaded from (no directory, no extension) and `secs` its
+            /// duration. Both are needed because a clip has no id of its own across this boundary -
+            /// every `AudioClip` reports 0 - so together they are the only thing that says which
+            /// sound this is. Either may be empty or zero.
+            /// </summary>
+            uint SfxNew(string name, double secs);
+
+            void SfxPlay(uint id, float amp);
+        }
+
+        public static ISfxSink SfxSink { get; set; }
+
+        private static uint OnSfxNew(uint clip, IntPtr name, int nameLen, double secs)
+        {
+            string text = ReadName(name, nameLen);
+            AppLog.WriteSync("PrprPort: audio sfx_new clip=" + clip + " name='" + text
+                + "' secs=" + secs.ToString("0.###"));
+            ISfxSink sink = SfxSink;
+            if (sink == null)
+            {
+                return 0;
+            }
+            try
+            {
+                return sink.SfxNew(text, secs);
+            }
+            catch (Exception ex)
+            {
+                AppLog.WriteSync("PrprPort.SfxNew(" + text + ")", ex);
+                return 0;
+            }
         }
 
         private static void OnSfxPlay(uint id, float amp)
@@ -1551,6 +1609,31 @@ namespace Phirura
                 AppLog.WriteSync("PrprPort: audio sfx_play id=" + id
                     + " amp=" + amp.ToString("0.###"));
             }
+            ISfxSink sink = SfxSink;
+            if (sink == null)
+            {
+                return;
+            }
+            try
+            {
+                sink.SfxPlay(id, amp);
+            }
+            catch (Exception ex)
+            {
+                AppLog.WriteSync("PrprPort.SfxPlay", ex);
+            }
+        }
+
+        /// <summary>UTF-8 bytes from native, decoded without a marshaller.</summary>
+        private static string ReadName(IntPtr p, int len)
+        {
+            if (p == IntPtr.Zero || len <= 0)
+            {
+                return "";
+            }
+            byte[] buf = new byte[len];
+            Marshal.Copy(p, buf, 0, len);
+            return System.Text.Encoding.UTF8.GetString(buf, 0, len);
         }
 
         private static int OnPickFile(IntPtr title, IntPtr outPath, IntPtr cap)
