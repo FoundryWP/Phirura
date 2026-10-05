@@ -1,0 +1,18 @@
+[package]
+name = "zstd"
+# Must be the *exact* version Cargo.lock holds (0.13.3), not merely one that satisfies `zstd =
+# "0.13"`. Cargo compares a patch against what is locked first: when they differ it records
+# `[[patch.unused]]` and keeps building the real crate - which is how `zstd-sys` kept failing after
+# the patch was added. Cargo says "run cargo update", but pinning the version is what the other
+# shims here already do and it needs no extra step.
+version = "0.13.3"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# A zstd replacement for Windows Phone 8.1. See `src/lib.rs` for why, and
+# `rust-wp81/shims/reqwest` for the pattern this follows.
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

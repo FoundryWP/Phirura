@@ -115,6 +115,21 @@ rfd = { path = "../../rust-wp81/shims/rfd" }
 # callback exists on the C# side.
 reqwest = { path = "../../rust-wp81/shims/reqwest" }
 
+# `phira-mp-client` (multiplayer, an unconditional dependency of `phira`) resolves its
+# `_phira._tcp` SRV record through `hickory-resolver`, whose default features pull
+# `hickory-proto -> ring`. `ring` is a C/assembly crypto library that cannot be built for this
+# target, for the same reason `aws-lc-sys` cannot. Only one file in `phira-mp-client` touches
+# hickory, so replacing the resolver keeps the rest of that crate - and `phira`'s own use of its
+# `Client`, `RoomId` and `ClientCommand` - exactly as upstream wrote it.
+hickory-resolver = { path = "../../rust-wp81/shims/hickory-resolver" }
+
+# `phira::censor` zstd-compresses its cached Aho-Corasick automaton, and `zstd` is a C library -
+# `zstd-sys`'s build script compiles `libzstd` with `cc` and has no `thumbv7a-pc-windows-msvc`
+# toolchain, for the same reason `aws-lc-sys` and `ring` fail. The shim stores rather than
+# compresses: the cache is an optimisation, both ends of its format are that same shim, and the
+# pure-Rust `ruzstd` can decode but not encode.
+zstd = { path = "../../rust-wp81/shims/zstd" }
+
 # macroquad and miniquad are GL-only abstractions with no D3D or Metal backend, and WP8.1 has no
 # OpenGL at all. Rendering is already solved by Win2D on the C# side, so these record draw commands
 # for the shell to replay instead of issuing GL calls.

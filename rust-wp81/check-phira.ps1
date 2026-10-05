@@ -66,8 +66,13 @@ if (Test-Path $patch) {
 # `check`, not `build`: no link step, so the missing CRT and the DLL import budget - which are
 # separate gates with their own scripts - stay out of this measurement entirely.
 # Commas in -Z values are safe here because each is its own array element.
+# `--no-default-features` is not an optimisation, it is the shape of the real build: `prpr-port`
+# declares `prpr = { default-features = false }`, and `phira`'s only default feature is `video`,
+# which drags in `prpr-avc -> ureq -> rustls -> ring`. `ring` is a C library whose build script
+# fails here for the same reason `aws-lc-sys` did. Checking with default features on would be
+# measuring a dependency combination the shipping DLL never uses.
 $cargoArgs = @(
-    "check", "-p", $Package, "--lib",
+    "check", "-p", $Package, "--lib", "--no-default-features",
     "--target", $target,
     "-Zjson-target-spec",
     "-Zbuild-std=std,panic_abort",
@@ -86,7 +91,28 @@ Write-Host "cargo exit code: $code"
 $errs = @(Select-String -Path $log -Pattern "^error(\[E\d+\])?:" -ErrorAction SilentlyContinue)
 Write-Host "error count: $($errs.Count)"
 
+# A `[patch]` Cargo declined to apply is worse than an error: it is a *warning*, so it never
+# reaches the count above, and the real crate keeps building - which means this probe can report
+# "OK" about a dependency graph the shipping DLL will never have. Cargo only says so once, mid-log,
+# with a suggestion to run `cargo update`. Checked before the success exit for that reason.
+# (Matched per line: cargo wraps this message, so only its first half survives as a line.)
+$unused = @(Select-String -Path $log -Pattern "was not used" -ErrorAction SilentlyContinue)
+if ($unused.Count -gt 0) {
+    Write-Host "`n=== [patch] entries cargo did NOT apply ===" -ForegroundColor Yellow
+    foreach ($u in $unused) { Write-Host "  $($u.Line)" }
+    Write-Host "  -> the REAL crate is still building. Pin the shim's version to the one in Cargo.lock." -ForegroundColor Yellow
+}
+
+# Build-script failures (`error: failed to run custom build command for ...`) carry no `--> file.rs`,
+# so they are invisible to the grouping below - which is why every round so far printed an empty
+# "blocked crates" list while the whole measurement was one of them.
+$buildFail = @(Select-String -Path $log -Pattern "failed to run custom build command for" -ErrorAction SilentlyContinue)
+
 if ($errs.Count -eq 0) {
+    if ($unused.Count -gt 0 -or $buildFail.Count -gt 0) {
+        Write-Host "`nNOT OK: no type errors, but the graph is still wrong (see above)." -ForegroundColor Red
+        exit 1
+    }
     Write-Host "OK: $Package type-checks for thumbv7a." -ForegroundColor Green
     exit 0
 }
@@ -102,6 +128,15 @@ foreach ($e in $errs) {
         # registry/path crate (`.../reqwest-0.13.2/src/x.rs` -> `reqwest`).
         $parts = $p -split '[\\/]'
         $key = if ($parts.Count -ge 4) { $parts[$parts.Count - 4] } else { $p }
+        if (-not $byFile.ContainsKey($key)) { $byFile[$key] = 0 }
+        $byFile[$key] += 1
+    }
+}
+
+# Add the build-script failures, which are the same unit of work by a different route.
+foreach ($b in $buildFail) {
+    if ($b.Line -match 'for `(.+?) v') {
+        $key = $Matches[1]
         if (-not $byFile.ContainsKey($key)) { $byFile[$key] = 0 }
         $byFile[$key] += 1
     }

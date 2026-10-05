@@ -1,0 +1,21 @@
+[package]
+name = "hickory-resolver"
+# Must satisfy `hickory-resolver = "0.25.2"` as declared by `phira-mp-client`, or `[patch]` will
+# not substitute.
+version = "0.25.2"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# A DNS resolver replacement for Windows Phone 8.1. See `src/lib.rs` for why the real crate cannot
+# be used here, and `rust-wp81/shims/reqwest` for the pattern this follows.
+
+[lib]
+path = "src/lib.rs"
+
+# `phira-mp-client` declares `hickory-resolver = "0.25.2"` with default features enabled, so cargo
+# requests `default` from the substituted package. The real crate's default feature turns on the
+# DNSSEC providers - and that is precisely what is being avoided here - so this one is empty.
+[features]
+default = []
+
+[dependencies]
