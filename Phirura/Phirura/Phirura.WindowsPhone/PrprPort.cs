@@ -1201,13 +1201,41 @@ namespace Phirura
                 + " layoutOk=" + CallbacksLayoutOk());
         }
 
+        /// <summary>
+        /// The music device behind the port's playback callbacks.
+        ///
+        /// <see cref="PrprPort"/> is the table Rust calls into, and it stays free of
+        /// <c>MediaElement</c> for the same reason it stays free of sockets: the shell owns the
+        /// devices and the Rust side must never be handed one. The shell's end is `GamePage`,
+        /// which already holds the <c>MediaElement</c> the chart path plays through and the
+        /// `MusicClock` that makes a WP8.1 <c>MediaElement</c> usable as a rhythm-game clock -
+        /// that API refreshes `Position` only a few times a second, which nothing can be judged
+        /// against, so a stopwatch runs the clock and is re-anchored to the media as they drift.
+        ///
+        /// Null is a supported state rather than a mistake: every callback below degrades to its
+        /// logged no-op, because an exception thrown here unwinds back into Rust as an unmanaged
+        /// fault and takes the process down with no managed message at all.
+        /// </summary>
+        public interface IMusicSink
+        {
+            void MusicNew(double rate, float amp, double loopMix);
+            void MusicPlay();
+            void MusicPause();
+            void MusicSeek(double seconds);
+            double MusicPosition();
+            bool MusicPaused();
+            void MusicAmplifier(float amp);
+        }
+
+        /// <summary>Where the music callbacks go. Set by `GamePage`, cleared when it leaves.</summary>
+        public static IMusicSink MusicSink;
+
         // ===========================================================================
         // the callbacks themselves
         //
-        // Each one is a stub for now, except decode, which is real enough to prove the table works.
-        // They are written as the shape the shell needs rather than as placeholders that throw -
-        // a throwing callback would cross back into Rust as an unhandled exception and take the
-        // process down with no useful message.
+        // The music ones forward to `MusicSink` and are otherwise stateless; the rest are still
+        // shaped placeholders rather than throwers, because a throwing callback would cross back
+        // into Rust as an unhandled exception and take the process down with no useful message.
         // ===========================================================================
 
         /// <summary>
@@ -1255,47 +1283,138 @@ namespace Phirura
                 + " rate=" + rate.ToString("0.###")
                 + " amp=" + amp.ToString("0.###")
                 + " loop=" + loopMix.ToString("0.###")
-                + " (NOT WIRED, returning 0)");
+                + (MusicSink == null ? " (no sink)" : ""));
+            if (MusicSink != null)
+            {
+                try
+                {
+                    MusicSink.MusicNew(rate, amp, loopMix);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.WriteSync("PrprPort: audio music_new threw", ex);
+                }
+            }
+
+            // Always 0, deliberately. The shell keeps exactly one music stream - there is no
+            // identity worth handing back - and the callers only echo whatever arrives here
+            // through every later call, so 0 is as good as any other value and is the one the
+            // chart has always been launched on.
             return 0;
         }
 
         private static void OnMusicPlay(uint id)
         {
             AppLog.WriteSync("PrprPort: audio music_play id=" + id);
+            if (MusicSink != null)
+            {
+                try
+                {
+                    MusicSink.MusicPlay();
+                }
+                catch (Exception ex)
+                {
+                    AppLog.WriteSync("PrprPort: audio music_play threw", ex);
+                }
+            }
         }
 
         private static void OnMusicPause(uint id)
         {
             AppLog.WriteSync("PrprPort: audio music_pause id=" + id);
+            if (MusicSink != null)
+            {
+                try
+                {
+                    MusicSink.MusicPause();
+                }
+                catch (Exception ex)
+                {
+                    AppLog.WriteSync("PrprPort: audio music_pause threw", ex);
+                }
+            }
         }
 
         private static void OnMusicSeek(uint id, double position)
         {
             AppLog.WriteSync("PrprPort: audio music_seek id=" + id + " -> " + position.ToString("0.000"));
+            if (MusicSink != null)
+            {
+                try
+                {
+                    MusicSink.MusicSeek(position);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.WriteSync("PrprPort: audio music_seek threw", ex);
+                }
+            }
         }
 
         private static double OnMusicPosition(uint id)
         {
+            double pos = 0.0;
+            if (MusicSink != null)
+            {
+                try
+                {
+                    pos = MusicSink.MusicPosition();
+                }
+                catch (Exception ex)
+                {
+                    AppLog.WriteSync("PrprPort: audio music_position threw", ex);
+                }
+            }
+
+            // Rate-gated as before, but now printing the number it is actually returning - the
+            // line that used to read `-> 0.0 (NOT WIRED)` every second was the whole proof that
+            // the chart's clock was pinned at zero, and a fixed copy has to be able to show a
+            // different value or the reader cannot tell the fix from the symptom.
             if (AudioLogDue(ref _musicLogTick))
             {
-                AppLog.WriteSync("PrprPort: audio music_position id=" + id + " -> 0.0 (NOT WIRED)");
+                AppLog.WriteSync("PrprPort: audio music_position id=" + id
+                    + " -> " + pos.ToString("0.###")
+                    + (MusicSink == null ? " (no sink)" : ""));
             }
-            return 0.0;
+            return pos;
         }
 
         private static int OnMusicPaused(uint id)
         {
+            int paused = 1;
+            if (MusicSink != null)
+            {
+                try
+                {
+                    paused = MusicSink.MusicPaused() ? 1 : 0;
+                }
+                catch (Exception ex)
+                {
+                    AppLog.WriteSync("PrprPort: audio music_paused threw", ex);
+                }
+            }
             if (AudioLogDue(ref _musicLogTick))
             {
-                AppLog.WriteSync("PrprPort: audio music_paused id=" + id + " -> 0 (NOT WIRED)");
+                AppLog.WriteSync("PrprPort: audio music_paused id=" + id + " -> " + paused);
             }
-            return 0;
+            return paused;
         }
 
         private static void OnMusicAmp(uint id, float amp)
         {
             AppLog.WriteSync("PrprPort: audio music_set_amplifier id=" + id
                 + " amp=" + amp.ToString("0.###"));
+            if (MusicSink != null)
+            {
+                try
+                {
+                    MusicSink.MusicAmplifier(amp);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.WriteSync("PrprPort: audio music_set_amplifier threw", ex);
+                }
+            }
         }
 
         private static void OnMusicLowPass(uint id, float cutoff)

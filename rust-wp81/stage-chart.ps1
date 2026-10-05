@@ -177,9 +177,16 @@ if ($PullLog) {
         Start-Sleep -Seconds $WaitSeconds
     }
     $logdir = "E:\_phirura_log_pull_{0:HHmmss}" -f (Get-Date)
-    & $ise ts $Device $ProductId $logdir 2>&1 | Out-Null
+
+    // The output used to be discarded (`| Out-Null`), which turned every failure into the same
+    // one line - "no log at ..." - regardless of cause. `ts` has at least three distinct
+    // outcomes (store not readable, wrong device, target dir already existing) and they need
+    // different fixes, so the message is kept and printed only when it produced nothing: the
+    // success path would otherwise be flooded with ISETool's progress text.
+    $tsout = (& $ise ts $Device $ProductId $logdir 2>&1 | Out-String)
+
     $logfile = Join-Path $logdir "IsolatedStore\phirura.log"
-    if (-not (Test-Path $logfile)) { Write-Warning "no log at $logfile"; return }
+    if (-not (Test-Path $logfile)) { Write-Warning "no log at $logfile"; if ($tsout) { "ISETool ts said:"; $tsout }; return }
     "=== $logfile ==="
     Get-Content $logfile | Select-Object -Last 80
 }

@@ -16,10 +16,10 @@ using Windows.UI.Xaml.Navigation;
 namespace Phirura
 {
     /// <summary>
-    /// Gameplay. Owns the chart, the judge, the renderer and the music clock, and drives
+    /// gameplay. Owns the chart, the judge, the renderer and the music clock, and drives
     /// them from CompositionTarget.Rendering (WP8.1 has no XAML-native game loop).
     /// </summary>
-    public sealed partial class GamePage : Page
+    public sealed partial class GamePage : Page, PrprPort.IMusicSink
     {
         public static PlayResult LastResult;
         public static string LastChartTitle = string.Empty;
@@ -33,6 +33,15 @@ namespace Phirura
         private MusicClock _clock;
         private GameSettings _settings;
         private SfxPlayer _sfx;
+
+        // Where phira's own library copy of the chart sits, as an absolute path.
+        private static string PhiraChartDir;
+
+        // ms-appdata URI of that copy's music, or null when no music file was found.
+        // Resolved before the boot rather than on demand: music_new arrives on the frame
+        // thread as a clip id and nothing else - the bytes are Rust's and never reach the
+        // shell - so the one thing a MediaElement needs, a source, has to be waiting here.
+        private static string PhiraMusicUri;
 
         private readonly List<BadNote> _badNotes = new List<BadNote>();
         private readonly List<Judge.JudgementEvent> _events = new List<Judge.JudgementEvent>();
@@ -184,6 +193,11 @@ namespace Phirura
                 {
                 }
                 _rustCreated = false;
+
+                // After `GameDestroy`, so no frame can still be inside a callback whose sink is
+                // the page being torn down - and cleared rather than left pointing, because the
+                // table is static and outlives this page by a long way.
+                PrprPort.MusicSink = null;
             }
             try
             {
@@ -468,6 +482,9 @@ namespace Phirura
                     LoadingText.Text = "内置谱面失败：" + ex.Message;
                     return;
                 }
+                // Before `StartPhiraAsync`, which never yields: the music URI has to exist by the
+                // time phira first asks for the music, and phira asks from the frame thread.
+                await ResolvePhiraMusicAsync();
                 StartPhiraAsync();
                 return;
             }
@@ -637,6 +654,10 @@ namespace Phirura
                 HudRoot.Visibility = Visibility.Collapsed;
                 PauseButton.Visibility = Visibility.Collapsed;
 
+                // Installed before the engine exists: `PhiraBoot` blocks until phira parks and
+                // never yields, so a sink installed afterwards would miss the first `music_new`.
+                PrprPort.MusicSink = this;
+
                 StartRustEngine();
                 if (!_rustCreated)
                 {
@@ -699,6 +720,11 @@ namespace Phirura
             dest = await dest.CreateFolderAsync("charts", open);
             dest = await dest.CreateFolderAsync(parent, open);
             dest = await dest.CreateFolderAsync(folder, open);
+
+            // Recorded before the idempotency check: the music is resolved from this folder on
+            // both the "already bundled" and the "just copied" path, and deriving it from
+            // `PhiraAutoChart` a second time would be a second chance to get it wrong.
+            PhiraChartDir = dest.Path;
 
             try
             {
@@ -1449,12 +1475,310 @@ namespace Phirura
         }
 
         // ------------------------------------------------------------------
+        // phira's music (PrprPort.IMusicSink)
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// Records the `ms-appdata:` URI of the chart's music, before the phira boot.
+        ///
+        /// The port's `music_new` arrives as a clip id, a rate and an amplifier and nothing else:
+        /// the bytes belong to Rust and never reach the shell, so the one thing a `MediaElement`
+        /// needs - a source - cannot be discovered when the call lands. It is therefore found
+        /// here, while there is still an `await` available, from the same folder
+        /// `EnsureBundledChartAsync` just wrote and recorded in <see cref="PhiraChartDir"/>.
+        ///
+        /// The folder is rebuilt from <see cref="PhiraAutoChart"/> rather than from the recorded
+        /// path, so the directory read here and the one phira reopens with `std::fs` are the same
+        /// string by construction - the reasoning that already makes the bundler derive its
+        /// destination instead of spelling it out.
+        ///
+        /// `info.yml`'s `music:` field is the authoritative answer, with "the first audio file in
+        /// the folder" as fallback: a chart that misquotes its own metadata still has music, and
+        /// silence there would read as a broken engine rather than a badly described chart.
+        /// </summary>
+        private static async Task ResolvePhiraMusicAsync()
+        {
+            PhiraMusicUri = null;
+            try
+            {
+                Windows.Storage.CreationCollisionOption open =
+                    Windows.Storage.CreationCollisionOption.OpenIfExists;
+                Windows.Storage.StorageFolder local = Windows.Storage.ApplicationData.Current.LocalFolder;
+                Windows.Storage.StorageFolder dir = await local.CreateFolderAsync("data", open);
+                dir = await dir.CreateFolderAsync("charts", open);
+                int cut = PhiraAutoChart.LastIndexOf('/');
+                dir = await dir.CreateFolderAsync(PhiraAutoChart.Substring(0, cut), open);
+                dir = await dir.CreateFolderAsync(PhiraAutoChart.Substring(cut + 1), open);
+
+                string music = null;
+                try
+                {
+                    Windows.Storage.StorageFile info = await dir.GetFileAsync("info.yml");
+                    music = YamlScalar(await Windows.Storage.FileIO.ReadTextAsync(info), "music");
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Write("GamePage.ResolvePhiraMusic(info.yml)", ex);
+                }
+
+                if (string.IsNullOrEmpty(music))
+                {
+                    foreach (Windows.Storage.StorageFile file in await dir.GetFilesAsync())
+                    {
+                        string lower = file.Name.ToLowerInvariant();
+                        if (lower.EndsWith(".mp3") || lower.EndsWith(".ogg") || lower.EndsWith(".wav"))
+                        {
+                            music = file.Name;
+                            break;
+                        }
+                    }
+                }
+
+                if (string.IsNullOrEmpty(music))
+                {
+                    AppLog.Write("GamePage: no music file in " + PhiraChartDir);
+                    return;
+                }
+
+                // Rebuilt rather than converted from `PhiraChartDir`: `ms-appdata:///local/` *is*
+                // LocalFolder, so this stays one string and cannot drift from the folder above.
+                PhiraMusicUri = "ms-appdata:///local/data/charts/" + PhiraAutoChart + "/" + music;
+                AppLog.Write("GamePage: phira music = " + PhiraMusicUri
+                    + " (dir " + PhiraChartDir + ")");
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("GamePage.ResolvePhiraMusic", ex);
+            }
+        }
+
+        /// <summary>
+        /// Pulls one scalar out of a flat `key: value` YAML document.
+        ///
+        /// `info.yml` is a straight scalar-per-line file with a couple of list blocks at the end,
+        /// and the only field needed from it is one of those scalars. Handing it to a real YAML
+        /// parser would mean a dependency for six lines of matching; scanning for a line that
+        /// *starts* with `music:` cannot match `backgroundMusic:` or a mention inside `intro:`,
+        /// which is the whole of what could go wrong here.
+        /// </summary>
+        private static string YamlScalar(string text, string key)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return null;
+            }
+            string prefix = key + ":";
+            foreach (string raw in text.Split('\n'))
+            {
+                string line = raw.Trim();
+                if (!line.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                string value = line.Substring(prefix.Length).Trim();
+                if (value.Length >= 2
+                    && ((value[0] == '\'' && value[value.Length - 1] == '\'')
+                        || (value[0] == '"' && value[value.Length - 1] == '"')))
+                {
+                    value = value.Substring(1, value.Length - 2).Trim();
+                }
+                return (value.Length == 0 || value == "null") ? null : value;
+            }
+            return null;
+        }
+
+        /// <summary>Opens the chart's music on the shell's `Player`. See <see cref="PrprPort.IMusicSink"/>.</summary>
+        public void MusicNew(double rate, float amp, double loopMix)
+        {
+            if (_clock == null)
+            {
+                _clock = new MusicClock(Player);
+            }
+            _clock.Rate = rate > 0.0 ? rate : 1.0;
+
+            // Zero on purpose. prpr applies the chart's own offset downstream of this position,
+            // so folding the shell's in here too would apply one correction twice - and when the
+            // timing looks off there would be no way to tell which of the two moved.
+            _clock.Offset = 0.0;
+            MusicAmplifier(amp);
+
+            if (string.IsNullOrEmpty(PhiraMusicUri))
+            {
+                // Still free-run. A chart that plays in silence is a diagnosable state; one pinned
+                // at zero - which is what `music_position -> 0.0` meant every second - is not.
+                _clock.StartFree();
+                AppLog.Write("GamePage: music_new with no URI, running a silent clock");
+                return;
+            }
+
+            try
+            {
+                Player.Source = new Uri(PhiraMusicUri);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("GamePage.MusicNew.Source(" + PhiraMusicUri + ")", ex);
+            }
+
+            _mediaReady = false;
+            _clock.StartFree();
+            AppLog.Write("GamePage: music_new -> " + PhiraMusicUri
+                + " rate=" + rate.ToString("0.###")
+                + " amp=" + amp.ToString("0.###")
+                + " loop=" + loopMix.ToString("0.###"));
+        }
+
+        public void MusicPlay()
+        {
+            MusicClock clock = _clock;
+            if (clock == null)
+            {
+                return;
+            }
+            if (!clock.IsRunning)
+            {
+                // Re-arms the stopwatch from the frozen position. `Resume` also re-issues a media
+                // seek, which a not-yet-open element silently ignores - `OnMediaOpened` puts the
+                // position back once it stops ignoring it.
+                try
+                {
+                    clock.Resume();
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Write("GamePage.MusicResume", ex);
+                }
+            }
+            try
+            {
+                Player.Play();
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("GamePage.MusicPlay", ex);
+            }
+        }
+
+        public void MusicPause()
+        {
+            MusicClock clock = _clock;
+            if (clock == null)
+            {
+                return;
+            }
+            if (clock.IsRunning)
+            {
+                // `Pause` freezes the clock before it touches the element, so the chart stops
+                // even in the case where the media call is the thing that throws.
+                try
+                {
+                    clock.Pause();
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Write("GamePage.MusicPause", ex);
+                }
+            }
+            else
+            {
+                try
+                {
+                    Player.Pause();
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Write("GamePage.MusicPause(media)", ex);
+                }
+            }
+        }
+
+        public void MusicSeek(double seconds)
+        {
+            MusicClock clock = _clock;
+            if (clock == null)
+            {
+                return;
+            }
+            try
+            {
+                clock.Seek(seconds);
+            }
+            catch (Exception ex)
+            {
+                // Caught here rather than by the port: the port would only report "the sink threw",
+                // and this is the line that says *which* seek at *which* time could not be applied.
+                AppLog.Write("GamePage.MusicSeek(" + seconds.ToString("0.###") + ")", ex);
+            }
+        }
+
+        public double MusicPosition()
+        {
+            MusicClock clock = _clock;
+            if (clock == null)
+            {
+                return 0.0;
+            }
+
+            // `Resync` only once the media can report a position. Before `MediaOpened` it reads
+            // zero, and re-anchoring onto that pins the chart at 0 for as long as the file takes
+            // to open - which is precisely the symptom this sink exists to remove.
+            if (_mediaReady)
+            {
+                clock.Resync();
+            }
+            return clock.Now;
+        }
+
+        public bool MusicPaused()
+        {
+            MusicClock clock = _clock;
+            return clock == null || !clock.IsRunning;
+        }
+
+        public void MusicAmplifier(float amp)
+        {
+            // Both factors, and clamped: prpr's amplifier and the user's volume setting are
+            // independent, and MediaElement.Volume rejects anything outside 0..1 outright.
+            double volume = amp * (_settings == null ? 1.0 : _settings.VolumeMusic);
+            Player.Volume = volume < 0.0 ? 0.0 : (volume > 1.0 ? 1.0 : volume);
+        }
+
+        // ------------------------------------------------------------------
         // Media events
         // ------------------------------------------------------------------
 
         private void OnMediaOpened(object sender, RoutedEventArgs e)
         {
             _mediaReady = true;
+
+            // phira mode: the port's `music_*` callbacks drive this element instead of
+            // `_started`/`_paused`, which only the chart path ever sets, so the generic branch
+            // below would take the `_clock.PrimeAnchor()` path and leave the stopwatch running
+            // away from the media. The clock has been free-running since `music_new` on purpose -
+            // `MusicClock.Resync` pins it to a `Position` that reads 0 until the element opens -
+            // and this is the first moment that number is real, so anchor onto it now.
+            if (_phiraMode && _clock != null)
+            {
+                _clock.Reanchor();
+                if (_clock.IsRunning)
+                {
+                    try
+                    {
+                        Player.Play();
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLog.Write("MediaOpened(phira).Play", ex);
+                    }
+                }
+                AppLog.Write("MediaOpened(phira): state=" + Player.CurrentState
+                    + " dur=" + (Player.NaturalDuration.HasTimeSpan
+                        ? Player.NaturalDuration.TimeSpan.TotalSeconds.ToString("0.###")
+                        : "?")
+                    + " clock=" + _clock.Now.ToString("0.###"));
+                return;
+            }
+
             // The element is only now able to accept Play(). Re-anchor the clock to its real
             // position (it has been free-running on the stopwatch since StartPlayback) and
             // start it for real.
