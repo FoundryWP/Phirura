@@ -103,6 +103,17 @@ namespace Phirura
         private double _phiraTime;
         private DateTime _phiraLastFrameUtc;
 
+        /// The chart phira opens on launch, spelled the way phira's `LocalChart::local_path` spells
+        /// it - relative to `data/charts`, never a path. `EnsureBundledChartAsync` derives the
+        /// packaged folder from the segment after the last slash, so the two cannot drift into
+        /// "the app ships a chart and phira is asked for a different one".
+        private const string PhiraAutoChart = "custom/190";
+
+        /// Whether phira starts that chart rather than stopping on its song page. Kept separate
+        /// from *which* chart because they change for different reasons: which chart is what was
+        /// packaged, this is whether the app drops the player straight into playing it.
+        private const bool PhiraAutoPlay = true;
+
         public GamePage()
         {
             this.InitializeComponent();
@@ -438,6 +449,25 @@ namespace Phirura
             // screen this page used to show.
             if (_phiraMode)
             {
+                // phira reads its own library with real `std::fs`, not through `load_asset`, and it
+                // scans that library exactly once - during construction, inside `PhiraBoot`. A chart
+                // that exists only as packaged `ms-appx:` content is therefore invisible to it
+                // however well the shell can read it, so the bytes have to be on disk before this
+                // call, which never yields control back.
+                LoadingText.Text = "正在内置谱面…";
+                try
+                {
+                    await EnsureBundledChartAsync();
+                }
+                catch (Exception ex)
+                {
+                    // Worth failing loudly. The alternative symptom is phira opening with an empty
+                    // library, the auto-open finding nothing, and the log showing a successful boot
+                    // that did nothing - three separate observations to reconcile into one cause.
+                    AppLog.Write("GamePage.EnsureBundledChart", ex);
+                    LoadingText.Text = "内置谱面失败：" + ex.Message;
+                    return;
+                }
                 StartPhiraAsync();
                 return;
             }
@@ -627,6 +657,85 @@ namespace Phirura
                 AppLog.Write("GamePage.StartPhiraAsync", ex);
                 LoadingText.Text = "启动失败：" + ex.Message;
             }
+        }
+
+        /// <summary>
+        /// Copies the shell's own copy of the chart into phira's library, and returns its
+        /// <c>local_path</c>.
+        ///
+        /// The two halves of this app keep charts in different places on purpose. The shell reads
+        /// them from <c>LocalFolder\charts\&lt;id&gt;</c> through <c>load_asset</c> (see
+        /// <see cref="ChartLibrary.LocalFolderName"/>), because those are files the shell imported.
+        /// phira looks in exactly two places of its own - <c>data/charts/custom</c> and
+        /// <c>data/charts/download/&lt;id&gt;</c> - and it looks with real <c>std::fs</c>, because
+        /// those are *its* files. Neither side can be pointed at the other's: phira's
+        /// <c>local_path</c> is resolved relative to <c>dir::charts()</c>, so a path that did not
+        /// sit underneath <c>data/charts</c> would scan once and then fail to reopen itself on every
+        /// later use. The bytes therefore have to be copied, once, before <c>PhiraBoot</c> - which
+        /// never yields control - runs and <c>Data::init</c> scans.
+        ///
+        /// The destination is derived from <see cref="PhiraAutoChart"/> rather than spelled out, so
+        /// the folder copied and the path handed to <c>PhiraBoot</c> are the same string by
+        /// construction. The failure this avoids is shipping a chart under one name and asking
+        /// phira for another, which presents as "it opened the menu instead of the chart".
+        ///
+        /// The completion marker - not "the folder is non-empty" - is what makes it idempotent: a
+        /// copy interrupted by a crash leaves a full-looking folder missing the largest file, and
+        /// the next launch would skip it forever. ~15 MB is copied exactly once per install.
+        /// </summary>
+        private static async Task<string> EnsureBundledChartAsync()
+        {
+            int cut = PhiraAutoChart.LastIndexOf('/');
+            string folder = PhiraAutoChart.Substring(cut + 1);
+            string parent = PhiraAutoChart.Substring(0, cut);
+
+            Windows.Storage.StorageFolder local = Windows.Storage.ApplicationData.Current.LocalFolder;
+            Windows.Storage.CreationCollisionOption open = Windows.Storage.CreationCollisionOption.OpenIfExists;
+
+            // Built one segment at a time: `StorageFolder.CreateFolderAsync` takes a single name on
+            // this API surface, and a path with separators in it is not portable between the places
+            // this could be pointed at.
+            Windows.Storage.StorageFolder dest = await local.CreateFolderAsync("data", open);
+            dest = await dest.CreateFolderAsync("charts", open);
+            dest = await dest.CreateFolderAsync(parent, open);
+            dest = await dest.CreateFolderAsync(folder, open);
+
+            try
+            {
+                await dest.GetFileAsync(".bundled");
+                return PhiraAutoChart;
+            }
+            catch (Exception)
+            {
+                // Not finished - fall through and copy. Absence of the marker is the only thing
+                // that can be trusted, because a half-copied folder is indistinguishable from a
+                // whole one by counting files.
+            }
+
+            // The shell's own copy, already on disk because this is where `ChartLibrary` imports
+            // charts and where `-Push` puts them. Its absence is reported rather than ignored: the
+            // auto-open would otherwise find nothing and phira would open on an empty library, which
+            // is three separate observations to reconcile into one cause.
+            Windows.Storage.StorageFolder src = await local.CreateFolderAsync("charts", open);
+            try
+            {
+                src = await src.GetFolderAsync(folder);
+            }
+            catch (Exception)
+            {
+                throw new System.IO.FileNotFoundException(
+                    "内置谱面缺失：charts\\" + folder + "（先用 stage-chart.ps1 -Push 推送）");
+            }
+
+            foreach (Windows.Storage.StorageFile file in await src.GetFilesAsync())
+            {
+                await file.CopyAsync(dest, file.Name, Windows.Storage.NameCollisionOption.ReplaceExisting);
+            }
+            await dest.CreateFileAsync(".bundled", Windows.Storage.CreationCollisionOption.ReplaceExisting);
+
+            AppLog.Write("GamePage: chart copied into phira library -> " + dest.Path
+                + " (" + (await dest.GetFilesAsync()).Count + " files)");
+            return PhiraAutoChart;
         }
 
         private readonly Dictionary<string, ChartTexture> _lineTextures = new Dictionary<string, ChartTexture>();
@@ -1004,14 +1113,38 @@ namespace Phirura
                 // `GameScene`, so there is no folder and no chart file - and `_entry` must not be
                 // read here, because in phira mode there is not one. Its `BasePath` would be the
                 // NRE this branch exists to avoid.
+                // `AssetRoot` is what every bare asset name gets resolved against, and phira asks
+                // for `phigros.ttf` + `font.ttf` before it can build a single scene. Only
+                // `RustStage1Page` ever assigned it, so on this path `ReadAsset` fell straight
+                // through its `IsNullOrEmpty(root)` guard and reported every asset missing - the
+                // boot came back `-2: asset not found: phigros.ttf` with nothing recorded saying
+                // what the root had actually been. The chart is deliberately NOT resolved here:
+                // `Data::init` reads it with `std::fs` from
+                // `LocalFolder\data\charts\custom\190`, a completely different path.
+                string assetRoot = Windows.Storage.ApplicationData.Current.LocalFolder.Path + "\\charts";
+                PrprPort.AssetRoot = assetRoot;
+                AppLog.WriteSync("GamePage: phira asset root = " + assetRoot);
+
                 var boot = System.Diagnostics.Stopwatch.StartNew();
                 AppLog.WriteSync("GamePage: phira boot (screen " + _rustW + "x" + _rustH + " px @ "
-                    + _rustScale.ToString("0.0") + ")");
-                PrprPort.GameResult bootResult = PrprPort.PhiraBoot();
+                    + _rustScale.ToString("0.0") + ", chart " + PhiraAutoChart + ")");
+                // `LocalFolder` is handed over as phira's `DATA_PATH`. It is the one directory this
+                // process is certainly allowed to create and write, and phira builds `data`,
+                // `data/charts` and its cache underneath it; left unset phira falls back to a
+                // relative `./data`, which is not ours here, and the boot dies before its first
+                // frame with a reason that used to be dropped on the floor.
+                PrprPort.GameResult bootResult = PrprPort.PhiraBoot(
+                    Windows.Storage.ApplicationData.Current.LocalFolder.Path, PhiraAutoChart, PhiraAutoPlay);
                 boot.Stop();
                 _rustCreated = bootResult == PrprPort.GameResult.Ok;
+                // The stage is logged on every attempt and the reason whenever the boot did not
+                // succeed. The two answer different questions and both are needed on a phone: a
+                // bare `-2` cannot say whether phira never left its entry point or built the whole
+                // library scene and then failed, and `GameLastError` alone cannot say which of the
+                // three `-2`s it was.
                 AppLog.WriteSync("GamePage: phira boot -> " + (int)bootResult + " in " + boot.ElapsedMilliseconds
-                    + " ms" + (_rustCreated ? "" : " (" + PrprPort.GameLastError() + ")"));
+                    + " ms, stage " + PrprPort.GameProgressText()
+                    + (_rustCreated ? "" : ", " + PrprPort.GameLastError()));
                 return;
             }
 

@@ -159,8 +159,8 @@ namespace Phirura
         /// phira's first frame, -100 construction panicked. The reason for -2 comes back through
         /// <c>wp81_game_error</c>.
         /// </summary>
-        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-        private static extern int wp81_phira_boot();
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int wp81_phira_boot(string dataDir, string chartLocalPath, int autoPlay);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_game_frame(double dt);
@@ -313,6 +313,16 @@ namespace Phirura
         private delegate int LoadAssetFn(IntPtr name, IntPtr outBytes, IntPtr cap);
 
         /// <summary>
+        /// One line of UTF-8 text from Rust for the log.
+        ///
+        /// <c>msg</c>/<c>len</c> are a borrowed slice rather than a NUL-terminated string: Rust
+        /// hands over bytes it already owns and the shell copies them before returning, so there is
+        /// nothing to free and no terminator to trust.
+        /// </summary>
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void LogFn(IntPtr msg, IntPtr len);
+
+        /// <summary>
         /// Mirrors <c>HostCallbacks</c> in the Rust port.
         ///
         /// Laid out by hand rather than with <c>[MarshalAs]</c> because it is passed by pointer,
@@ -320,7 +330,7 @@ namespace Phirura
         /// natural one for the target. Every field is a function pointer (4 bytes on ARM), which
         /// makes the layout uniform.
         ///
-        /// FIELD ORDER IS THE ABI. <c>load_asset</c> is appended last to match the Rust struct - if
+        /// FIELD ORDER IS THE ABI. <c>log</c> is appended last to match the Rust struct - if
         /// either side gains a field in the middle, this compiles and then calls the wrong function
         /// pointer. <see cref="CallbacksLayoutOk"/> is the guard.
         /// </summary>
@@ -343,6 +353,7 @@ namespace Phirura
             public IntPtr save_file;
             public IntPtr present;
             public IntPtr load_asset;
+            public IntPtr log;
         }
 
         /// <summary>
@@ -350,7 +361,7 @@ namespace Phirura
         /// the C# struct cannot be counted at compile time; the point is that a mismatch is caught
         /// by <see cref="CallbacksLayoutOk"/> instead of by a crash inside a Rust callback.
         /// </summary>
-        private const int ExpectedCallbackCount = 16;
+        private const int ExpectedCallbackCount = 17;
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern void wp81_install_callbacks(ref HostCallbacks callbacks);
@@ -513,14 +524,30 @@ namespace Phirura
         /// inside Rust where it cannot report which of the two it actually did.
         ///
         /// Slow for the same reason <see cref="GameCreate"/> is - phira builds its data directory,
-        /// loads its fonts and constructs the whole library scene - so the shell samples
-        /// <see cref="SampleProgress"/> while it runs and logs every step change. Without that,
-        /// a boot that takes the process down leaves one last log line and nothing after it.
+        /// loads its fonts and constructs the whole library scene - and, being synchronous, it
+        /// gives the shell nothing to watch *while* it runs: this is one uninterrupted call on the
+        /// UI thread, so the stage numbers published from inside can only be read in the turn
+        /// after. That is enough to be worth logging, because the stage is what separates "died
+        /// before phira was ever entered" from "died inside phira", and <see
+        /// cref="GameLastError"/> carries the reason for every failure phira reports itself.
+        ///
+        /// <paramref name="dataDir"/> is the absolute directory that becomes the parent of phira's
+        /// <c>data</c> folder. It has to be handed over rather than discovered: phira chooses a data
+        /// directory at compile time for ohos and ios and leaves it unset everywhere else, which on
+        /// a phone resolves to a relative <c>./data</c> that nothing may write - so the boot fails
+        /// before it draws a frame, and the reason was being dropped. Null leaves it unset, which is
+        /// what a desktop harness wants.
+        ///
+        /// <paramref name="chartLocalPath"/> is a chart for phira to open on its own song page once
+        /// the library is up, spelled the way phira spells it (<c>custom/190</c>), not as a path;
+        /// null stops at the library. <paramref name="autoPlay"/> starts that chart instead of
+        /// waiting for a tap. The two stay separate so a build can show the song page first without
+        /// having to name a different chart to do it.
         /// </summary>
-        public static GameResult PhiraBoot()
+        public static GameResult PhiraBoot(string dataDir, string chartLocalPath, bool autoPlay)
         {
             Install();
-            return (GameResult)wp81_phira_boot();
+            return (GameResult)wp81_phira_boot(dataDir, chartLocalPath, autoPlay ? 1 : 0);
         }
 
         /// <summary>
@@ -691,6 +718,8 @@ namespace Phirura
                 case 3: name = "loading info.yml"; break;
                 case 4: name = "info ready"; break;
                 case 5: name = "building scene"; break;
+                case 6: name = "phira booting"; break;
+                case 7: name = "phira ready"; break;
                 default: name = "step " + p; break;
             }
             return p + " (" + name + ")";
@@ -1070,6 +1099,7 @@ namespace Phirura
         private static SaveFileFn _saveFile;
         private static PresentFn _present;
         private static LoadAssetFn _loadAsset;
+        private static LogFn _log;
 
         private static bool _installed;
 
@@ -1107,13 +1137,16 @@ namespace Phirura
 
             _audioDecode = OnAudioDecode;
             _musicNew = OnMusicNew;
-            _musicPlay = OnMusicIdNoop;
-            _musicPause = OnMusicIdNoop;
+            // Play/pause and amp/low-pass used to share one delegate each, so the log could not
+            // tell them apart - and they are exactly the pair whose *order* differs between "the
+            // music faded out" and "the music was paused". Split, now that they are logged.
+            _musicPlay = OnMusicPlay;
+            _musicPause = OnMusicPause;
             _musicSeek = OnMusicSeek;
             _musicPosition = OnMusicPosition;
             _musicPaused = OnMusicPaused;
             _musicAmp = OnMusicAmp;
-            _musicLowPass = OnMusicAmp;
+            _musicLowPass = OnMusicLowPass;
             _musicFade = OnMusicFade;
             _sfxNew = OnSfxNew;
             _sfxPlay = OnSfxPlay;
@@ -1121,6 +1154,7 @@ namespace Phirura
             _saveFile = OnSaveFile;
             _present = OnPresent;
             _loadAsset = OnLoadAsset;
+            _log = OnLog;
 
             HostCallbacks cb = new HostCallbacks();
             cb.audio_decode = Marshal.GetFunctionPointerForDelegate(_audioDecode);
@@ -1139,6 +1173,7 @@ namespace Phirura
             cb.save_file = Marshal.GetFunctionPointerForDelegate(_saveFile);
             cb.present = Marshal.GetFunctionPointerForDelegate(_present);
             cb.load_asset = Marshal.GetFunctionPointerForDelegate(_loadAsset);
+            cb.log = Marshal.GetFunctionPointerForDelegate(_log);
 
             wp81_install_callbacks(ref cb);
             _installed = true;
@@ -1162,51 +1197,119 @@ namespace Phirura
         // process down with no useful message.
         // ===========================================================================
 
+        /// <summary>
+        /// Rate gate for the callbacks that fire every frame.
+        ///
+        /// `audio_music_position` and `audio_music_paused` are read once per frame, and the judge
+        /// fires `audio_sfx_play` on every tap; printing them unconditionally would push every
+        /// other line out of the log's tail, which is precisely the failure this diagnostic exists
+        /// to avoid. One line per second of them is enough to tell a clock that is advancing from
+        /// one pinned at 0. Two separate gates, because sharing one would let the music position
+        /// starve the sfx line into invisibility.
+        /// </summary>
+        private static int _musicLogTick = int.MinValue / 2;
+        private static int _sfxLogTick = int.MinValue / 2;
+
+        private static bool AudioLogDue(ref int tick)
+        {
+            int now = Environment.TickCount;
+            if (unchecked(now - tick) < 1000)
+            {
+                return false;
+            }
+            tick = now;
+            return true;
+        }
+
         private static int OnAudioDecode(IntPtr data, IntPtr len, IntPtr outInfo)
         {
             // The shell already knows how to read these files; wiring it up is the next step. Until
             // then report failure so the Rust side surfaces it as an error rather than silence.
+            //
+            // Logged unconditionally, because this is the single callback that decides whether the
+            // chart has a soundtrack at all: the `sasa` shim turns any non-zero rc into `Err`, and
+            // `load_local_tuple` propagates it with `?`, so a chart can be launched and drawn while
+            // this has never succeeded. "Silent because nothing called it" and "silent because the
+            // decode failed" were the same line before this existed.
+            AppLog.WriteSync("PrprPort: audio decode <- " + len.ToInt64()
+                + " bytes (NOT WIRED, returning 1)");
             return 1;
         }
 
         private static uint OnMusicNew(uint clip, double rate, float amp, double loopMix)
         {
+            AppLog.WriteSync("PrprPort: audio music_new clip=" + clip
+                + " rate=" + rate.ToString("0.###")
+                + " amp=" + amp.ToString("0.###")
+                + " loop=" + loopMix.ToString("0.###")
+                + " (NOT WIRED, returning 0)");
             return 0;
         }
 
-        private static void OnMusicIdNoop(uint id)
+        private static void OnMusicPlay(uint id)
         {
+            AppLog.WriteSync("PrprPort: audio music_play id=" + id);
+        }
+
+        private static void OnMusicPause(uint id)
+        {
+            AppLog.WriteSync("PrprPort: audio music_pause id=" + id);
         }
 
         private static void OnMusicSeek(uint id, double position)
         {
+            AppLog.WriteSync("PrprPort: audio music_seek id=" + id + " -> " + position.ToString("0.000"));
         }
 
         private static double OnMusicPosition(uint id)
         {
+            if (AudioLogDue(ref _musicLogTick))
+            {
+                AppLog.WriteSync("PrprPort: audio music_position id=" + id + " -> 0.0 (NOT WIRED)");
+            }
             return 0.0;
         }
 
         private static int OnMusicPaused(uint id)
         {
+            if (AudioLogDue(ref _musicLogTick))
+            {
+                AppLog.WriteSync("PrprPort: audio music_paused id=" + id + " -> 0 (NOT WIRED)");
+            }
             return 0;
         }
 
         private static void OnMusicAmp(uint id, float amp)
         {
+            AppLog.WriteSync("PrprPort: audio music_set_amplifier id=" + id
+                + " amp=" + amp.ToString("0.###"));
+        }
+
+        private static void OnMusicLowPass(uint id, float cutoff)
+        {
+            AppLog.WriteSync("PrprPort: audio music_set_low_pass id=" + id
+                + " cutoff=" + cutoff.ToString("0.###"));
         }
 
         private static void OnMusicFade(uint id, double seconds, int outFlag)
         {
+            AppLog.WriteSync("PrprPort: audio music_fade id=" + id
+                + " " + seconds.ToString("0.###") + "s out=" + outFlag);
         }
 
         private static uint OnSfxNew(uint clip)
         {
+            AppLog.WriteSync("PrprPort: audio sfx_new clip=" + clip);
             return 0;
         }
 
         private static void OnSfxPlay(uint id, float amp)
         {
+            if (AudioLogDue(ref _sfxLogTick))
+            {
+                AppLog.WriteSync("PrprPort: audio sfx_play id=" + id
+                    + " amp=" + amp.ToString("0.###"));
+            }
         }
 
         private static int OnPickFile(IntPtr title, IntPtr outPath, IntPtr cap)
@@ -1353,6 +1456,44 @@ namespace Phirura
                 // have no idea how to handle it.
                 AppLog.WriteSync("PrprPort: load_asset failed", ex);
                 return -1;
+            }
+        }
+
+        /// <summary>
+        /// Rust's line for the log.
+        ///
+        /// Synchronous, and callable from whatever thread Rust happens to be on, because of *when*
+        /// it is called: almost all of these arrive while the shell is blocked inside
+        /// <c>PhiraBoot</c> waiting on the very code that is producing them. A queued write would
+        /// be sitting in memory at the moment the process died, which is precisely when the line
+        /// saying which phase was running matters most.
+        ///
+        /// The <c>rust: </c> prefix is deliberate - a line that came out of Rust must never be
+        /// mistaken for one the shell wrote about Rust.
+        /// </summary>
+        private static void OnLog(IntPtr msg, IntPtr len)
+        {
+            try
+            {
+                int n = len.ToInt32();
+                if (msg == IntPtr.Zero || n <= 0)
+                {
+                    return;
+                }
+                if (n > 8192)
+                {
+                    // A length that large is a bad pointer or a bug, not a message; refusing keeps
+                    // one broken call from turning into a multi-megabyte allocation.
+                    n = 8192;
+                }
+                byte[] bytes = new byte[n];
+                Marshal.Copy(msg, bytes, 0, n);
+                AppLog.WriteSync("rust: " + System.Text.Encoding.UTF8.GetString(bytes, 0, n));
+            }
+            catch (Exception)
+            {
+                // Diagnostics must never be the fault, and an exception unwinding back into Rust
+                // has no handler to land in.
             }
         }
 

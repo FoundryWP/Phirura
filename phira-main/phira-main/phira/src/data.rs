@@ -145,7 +145,15 @@ impl Data {
             let res = (|| -> Result<()> {
                 let root = dir::root().with_context(|| "failed to get root directory")?;
                 let path = format!("{}/data.json", root);
-                std::fs::write(&path, serde_json::to_string(data)?).with_context(|| format!("failed to write to {}", path))?;
+                let json = serde_json::to_string(data)?;
+                // Split in three, because this is the call the device log stopped in the middle
+                // of: `data.json` turned up on disk at zero bytes with no line after
+                // `custom entry`. "writing" without "written" says the serialize finished and the
+                // fs call did not come back; missing "serializing" says the crash is earlier.
+                crate::log_line("Data::init: serializing data.json");
+                crate::log_line(&format!("Data::init: writing {path} ({} bytes)", json.len()));
+                std::fs::write(&path, json).with_context(|| format!("failed to write to {}", path))?;
+                crate::log_line("Data::init: data.json written");
                 Ok(())
             })();
             if let Err(err) = res {
@@ -172,7 +180,9 @@ impl Data {
             *entry = (*entry + 1).min(MAX_IMPORT_RETRIES);
         }
 
+        crate::log_line("Data::init: entered");
         let collections = dir::collections()?;
+        crate::log_line("Data::init: collections dir ok");
         for col in self.collections_legacy.drain(..) {
             let uuid = Uuid::new_v4();
             self.collection_uuids.push(uuid);
@@ -192,11 +202,18 @@ impl Data {
         let charts = dir::charts()?;
         self.charts.retain(|it| Path::new(&format!("{}/{}", charts, it.local_path)).exists());
         let occurred: HashSet<_> = self.charts.iter().map(|it| it.local_path.clone()).collect();
-        for entry in std::fs::read_dir(dir::custom_charts()?)? {
+        let custom_dir = dir::custom_charts()?;
+        // One line per stage rather than one per file: `init` is the last thing that ran before an
+        // unrecoverable exit, so the value here is knowing *which* call it died in, not what it
+        // was processing. `read_dir` is the first call in this function that `dir::root` did not
+        // already prove works on the device, which makes its line the dividing one.
+        crate::log_line(&format!("Data::init: read_dir custom -> {custom_dir}"));
+        for entry in std::fs::read_dir(&custom_dir)? {
             let entry = entry?;
             let filename = entry.file_name();
             let filename = filename.to_str().unwrap();
             let filename = format!("custom/{filename}");
+            crate::log_line(&format!("Data::init: custom entry {filename}"));
             let path = entry.path();
             if occurred.contains(&filename) {
                 self.import_scan_retry.remove(&filename);
@@ -211,12 +228,16 @@ impl Data {
             // Persist retry count before parsing so crashes during parsing still consume one retry.
             bump_retry(&mut self.import_scan_retry, &filename);
             persist_retry_state(self);
+            crate::log_line(&format!("Data::init: opening {filename}"));
             let Ok(mut fs) = prpr::fs::fs_from_file(&path) else {
+                crate::log_line(&format!("Data::init: fs_from_file refused {filename}"));
                 continue;
             };
+            crate::log_line(&format!("Data::init: load_info {filename}"));
             let result = prpr::fs::load_info(fs.deref_mut()).await;
             match result {
                 Ok(info) => {
+                    crate::log_line(&format!("Data::init: load_info ok for {filename}"));
                     self.import_scan_retry.remove(&filename);
                     self.charts.push(LocalChart {
                         info: BriefChartInfo { id: None, ..info.into() },
@@ -227,11 +248,15 @@ impl Data {
                     });
                 }
                 Err(err) => {
+                    crate::log_line(&format!("Data::init: load_info rejected {filename}: {err:#}"));
                     warn!(?err, "failed to parse startup custom import candidate: {}", filename);
                 }
             }
         }
-        for entry in std::fs::read_dir(dir::downloaded_charts()?)? {
+        crate::log_line(&format!("Data::init: custom scan done, {} chart(s)", self.charts.len()));
+        let download_dir = dir::downloaded_charts()?;
+        crate::log_line(&format!("Data::init: read_dir download -> {download_dir}"));
+        for entry in std::fs::read_dir(&download_dir)? {
             let entry = entry?;
             let filename = entry.file_name();
             let filename = filename.to_str().unwrap();
@@ -272,8 +297,11 @@ impl Data {
                 }
             }
         }
+        crate::log_line("Data::init: download scan done");
         let respacks: HashSet<_> = self.respacks.iter().cloned().collect();
-        for entry in std::fs::read_dir(dir::respacks()?)? {
+        let respack_dir = dir::respacks()?;
+        crate::log_line(&format!("Data::init: read_dir respack -> {respack_dir}"));
+        for entry in std::fs::read_dir(&respack_dir)? {
             let entry = entry?;
             let filename = entry.file_name();
             let filename = filename.to_str().unwrap().to_string();
@@ -282,6 +310,7 @@ impl Data {
             }
             self.respacks.push(filename);
         }
+        crate::log_line(&format!("Data::init: respack scan done, {} respack(s)", self.respacks.len()));
         self.respack_id = self.respack_id.min(self.respacks.len());
         if let Some(res_pack_path) = &mut self.config.res_pack_path {
             if res_pack_path.starts_with('/') {
@@ -295,6 +324,9 @@ impl Data {
             self.read_tos_and_policy = false;
         }
         if !self.collection_cache.iter().any(|it| it.value().is_default) {
+            // The first use of `Uuid::new_v4` in the process, which means the first use of
+            // `getrandom` - a crate this build patches. Worth a line of its own for that reason.
+            crate::log_line("Data::init: creating the default collection");
             let uuid = Uuid::new_v4();
             self.set_collection_info(
                 &uuid,

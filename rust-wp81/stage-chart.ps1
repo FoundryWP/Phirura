@@ -154,7 +154,16 @@ if ($Push) {
 
 if ($Launch) {
     & $adp /launch $ProductId /targetdevice:$Device 2>&1 | Out-Null
-    "launched"
+    # `/launch` returns 0x80131500 whenever the phone screen is locked, and the single line
+    # that says so is inside the output being discarded. Printing "launched" unconditionally
+    # makes a locked screen look identical to an engine that booted and produced no log -
+    # which sends the next round off to bisect Rust that was never executed. Same treatment
+    # as the `rs` exit code above; pull the log either way, the warning is the signal.
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "AppDeployCmd /launch exit $LASTEXITCODE - the app did not start (screen locked?)"
+    } else {
+        "launched"
+    }
 }
 
 # ---------------------------------------------------------------------------

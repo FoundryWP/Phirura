@@ -125,6 +125,41 @@ impl MainScene {
 
         let mut sf = Self::new_inner(bgm, fallback).await?;
         sf.pages.push(Box::new(HomePage::new(Arc::clone(&sf.icons)).await?));
+
+        // A host that packaged a chart with the app asks for it here rather than by faking a tap.
+        //
+        // `deeplink_scene` is the field phira's own deeplink fills in for a *remote* chart, and
+        // `next_scene` consumes it on the first frame - which is exactly "the library is up, now
+        // open this". Reusing it means there is one path into a song page instead of two, so
+        // whatever that path later gets (a confirmation, a transition, a bgm fade) applies here
+        // too, and a host with no chart to open costs one `take()` that returns `None`.
+        if let Some(local_path) = crate::take_auto_open() {
+            crate::log_line(&format!("MainScene: auto-open requested for {local_path}"));
+            if let Some(chart) = crate::page::load_local()
+                .into_iter()
+                .find(|it| it.local_path.as_deref() == Some(local_path.as_str()))
+            {
+                let mods = get_data()
+                    .charts
+                    .iter()
+                    .find(|it| it.local_path == local_path)
+                    .map(|it| it.mods)
+                    .unwrap_or_default();
+                sf.deeplink_scene = Some(NextScene::Overlay(Box::new(SongScene::new(
+                    chart,
+                    Some(local_path.clone()),
+                    Arc::clone(&sf.icons),
+                    sf.state.icons.clone(),
+                    mods,
+                ))));
+                crate::log_line(&format!("MainScene: auto-open queued the song page for {local_path}"));
+            } else {
+                // The library scan runs once at `Data::init`, so "not found" here means the chart
+                // never made it into `data/charts/custom` - not that it failed to load.
+                crate::log_line(&format!("MainScene: auto-open found no chart named {local_path}"));
+            }
+        }
+
         Ok(sf)
     }
 

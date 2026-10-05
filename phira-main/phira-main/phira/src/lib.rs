@@ -112,6 +112,100 @@ pub fn save_data() -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// What a host has to tell phira before it starts, and what it gets back.
+//
+// `the_main` picks its data directory at compile time for ohos and ios and leaves `DATA_PATH`
+// unset everywhere else, which lands on `dir::root()`'s fallback of a relative `./data`. There is
+// no working directory worth the name on a phone, so `create_dir_all` fails, `the_main` returns
+// before it has drawn anything, and the reason goes into an `error!` that has no subscriber on
+// this target (the `log` feature is off). A host that hands over a directory it knows is writable
+// fixes the first half; these accessors fix the second by letting it ask why.
+//
+// The chart request exists for the same reason phira has a deeplink at all: its only ways into a
+// song are a download or a tap in the charts view, and a host that already has the chart in its
+// package should not have to fake a tap to reach it.
+// ---------------------------------------------------------------------------
+
+/// Where phira may create and write its data directory (`<path>/data`, its charts, its cache).
+///
+/// Must be called before [`boot`]: `build_global_window_conf` reads it while the window is being
+/// configured, which happens inside `boot` itself.
+pub fn set_data_path(path: String) {
+    *DATA_PATH.lock().unwrap() = Some(path);
+}
+
+static AUTO_OPEN: Mutex<Option<String>> = Mutex::new(None);
+
+/// The local chart to open on its song page as soon as the library is up, written the way
+/// [`data::LocalChart::local_path`] writes it - `custom/190`, not a filesystem path. `None` stops
+/// at the library, which is what an ordinary phira does. Call before [`boot`].
+pub fn set_auto_open(local_path: Option<String>) {
+    *AUTO_OPEN.lock().unwrap() = local_path;
+}
+
+/// [`set_auto_open`]'s request, taken on first read. Taken rather than copied because the library
+/// rebuilds itself as scenes come and go, and a request that outlived the first read would open
+/// the chart again every time it did.
+pub fn take_auto_open() -> Option<String> {
+    AUTO_OPEN.lock().unwrap().take()
+}
+
+static AUTO_PLAY: Mutex<bool> = Mutex::new(false);
+
+/// Whether [`set_auto_open`]'s chart should start itself instead of waiting on a tap. Kept separate
+/// from which chart, because the two are decided by different things: the chart is what the host
+/// packaged, whether to drop the player straight into it is a product choice the host may not want
+/// to make the same way every time.
+pub fn set_auto_play(on: bool) {
+    *AUTO_PLAY.lock().unwrap() = on;
+}
+
+/// [`set_auto_play`]'s request, taken on first read, for the same reason as [`take_auto_open`].
+pub fn take_auto_play() -> bool {
+    let mut on = AUTO_PLAY.lock().unwrap();
+    let was = *on;
+    *on = false;
+    was
+}
+
+static BOOT_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+/// Why `the_main` failed. Kept as well as logged because the log is dropped here, and a host told
+/// only "exited before its first frame" cannot tell an unwritable data directory from a missing
+/// font or a chart the parser rejected - which are three completely different repairs.
+pub fn set_boot_error(msg: String) {
+    *BOOT_ERROR.lock().unwrap() = Some(msg);
+}
+
+/// Take [`set_boot_error`]'s message, clearing it so a later failure cannot be reported as this one.
+pub fn boot_error() -> Option<String> {
+    BOOT_ERROR.lock().unwrap().take()
+}
+
+static LOG_SINK: Mutex<Option<fn(&str)>> = Mutex::new(None);
+
+/// Install the host's log sink.
+///
+/// A plain `fn`, not a closure, because a function pointer is all a host needs and it keeps this
+/// `static` free of lifetime questions about who owns the callback.
+pub fn set_log_sink(sink: fn(&str)) {
+    *LOG_SINK.lock().unwrap() = Some(sink);
+}
+
+/// Forward a line to the host, if one was installed.
+///
+/// Why this exists rather than `tracing`: the `log` feature is off for this target, so every
+/// `info!`/`warn!` in phira and prpr is dropped - and even a working subscriber would say nothing
+/// about *phases*. The host's `PhiraBoot` is one uninterrupted call on the UI thread, so the only
+/// account of what it was doing when the process vanished is what Rust wrote down as it went.
+/// Silent when no sink is installed, so it costs nothing anywhere else.
+pub fn log_line(msg: &str) {
+    if let Some(sink) = *LOG_SINK.lock().unwrap() {
+        sink(msg);
+    }
+}
+
 mod dir {
     use anyhow::Result;
 
@@ -179,6 +273,7 @@ async fn the_main() -> Result<()> {
     };
 
     init_assets();
+    log_line("the_main: assets registered");
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -186,6 +281,7 @@ async fn the_main() -> Result<()> {
         .build()
         .unwrap();
     let _guard = rt.enter();
+    log_line("the_main: tokio runtime up (4 workers)");
 
     #[cfg(target_os = "ios")]
     {
@@ -198,14 +294,18 @@ async fn the_main() -> Result<()> {
     }
 
     let dir = dir::root()?;
+    log_line(&format!("the_main: data root = {dir}"));
     let mut data: Data = std::fs::read_to_string(format!("{dir}/data.json"))
         .map_err(anyhow::Error::new)
         .and_then(|s| Ok(serde_json::from_str(&s)?))
         .unwrap_or_default();
+    log_line("the_main: data.json read (or defaulted)");
     data.init().await?;
+    log_line("the_main: Data::init scanned the chart library");
     set_data(data);
     sync_data();
     save_data()?;
+    log_line("the_main: data stored");
 
     // Warm up the offline banned-word automaton so local edits can check
     // synchronously. No-op without the `aa` feature.
@@ -222,13 +322,16 @@ async fn the_main() -> Result<()> {
         .display_mut()
         .set_pause_resume_listener(on_pause_resume);
 
+    log_line("the_main: loading phigros.ttf + font.ttf");
     let pgr_font = FontArc::try_from_vec(load_file("phigros.ttf").await?)?;
     PGR_FONT.with(move |it| *it.borrow_mut() = Some(TextPainter::new(pgr_font, None)));
 
     let font = FontArc::try_from_vec(load_file("font.ttf").await?)?;
     let mut painter = TextPainter::new(font.clone(), None);
 
+    log_line("the_main: fonts ok, building MainScene");
     let mut main = Main::new(Box::new(MainScene::new(font).await?), TimeManager::default(), None).await?;
+    log_line("the_main: MainScene built, entering the frame loop");
 
     let tm = TimeManager::default();
     let mut fps_time = -1;
@@ -237,6 +340,11 @@ async fn the_main() -> Result<()> {
     let mut fps_times = VecDeque::<f32>::with_capacity(FPS_BUF_SIZE);
     let mut last_frame_start = f32::NAN;
     let mut fps_time_sum = 0.;
+    // Phira's first iteration is where the auto-opened song page is entered and the chart launch
+    // is spawned onto a tokio worker, so it is the one frame worth naming: if the process dies
+    // between this line and the pump's own "first frame reached", the work that killed it is
+    // inside `update`/`render` or inside that task.
+    let mut frame_no: u32 = 0;
 
     'app: loop {
         if main.paused() {
@@ -259,6 +367,33 @@ async fn the_main() -> Result<()> {
             fps_time_sum += frame_time;
         }
         last_frame_start = frame_start as f32;
+        if frame_no == 0 {
+            log_line("the_main: first frame: update() + render()");
+        }
+        frame_no += 1;
+
+        // A heartbeat, one line every ~30 frames.
+        //
+        // Everything before this point is logged exactly once, during boot, and then the frame
+        // loop falls silent - so "the chart is playing and nothing new happens" and "the pump
+        // stopped at the last frame we ever wrote" produced byte-identical output. That is not a
+        // hypothetical: it is how a round in which the app was merely idle was read as a crash.
+        //
+        // `frame_start` is the same clock the FPS bookkeeping a few lines up already reads, so the
+        // line also settles whether time is advancing at all - `set_now_micros` has no caller in
+        // this shim, and a frozen clock is indistinguishable from a frozen scene without a number.
+        // `scenes` is the stack depth (1 = main menu, 2 = song page pushed, 3 = in the chart), and
+        // `paused` is the one that would otherwise explain a stack which is deep but not moving.
+        // The `Scene` trait has no name to print, so depth is what identifies the scene.
+        if frame_no % 30 == 0 {
+            log_line(&format!(
+                "the_main: frame={} t={:.3} scenes={} paused={}",
+                frame_no,
+                frame_start,
+                main.scenes.len(),
+                main.paused()
+            ));
+        }
         let res = || -> Result<()> {
             main.update()?;
             main.render(&mut painter)?;
@@ -347,6 +482,12 @@ pub extern "C" fn quad_main() {
 pub fn boot() {
     macroquad::Window::from_config(build_global_window_conf(), async {
         if let Err(err) = the_main().await {
+            // Recorded as well as logged. The `error!` below is dropped on this target - there is
+            // no subscriber - so without this the host would be handed "exited before its first
+            // frame" standing in for every cause `the_main` can return, and there are at least
+            // three it hits before it draws anything (the data directory, the tokio runtime, the
+            // fonts).
+            set_boot_error(format!("{err:#}"));
             error!(?err, "global error");
         }
     });

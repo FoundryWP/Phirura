@@ -498,7 +498,7 @@ fn font_fallback() -> glyph_brush::ab_glyph::FontArc {
 /// Returns [`GAME_OK`], or the same negative codes [`create`] uses: the shell already knows how to
 /// print those, and `-2` carries the reason through `wp81_game_error`.
 #[cfg(target_arch = "arm")]
-pub fn boot_phira() -> i32 {
+pub fn boot_phira(data_dir: Option<String>, auto_open: Option<String>, auto_play: bool) -> i32 {
     step(progress::ENTERED);
     if GAME.with(|g| g.borrow().is_some()) || macroquad::app::is_running() {
         return GAME_ERR_ALREADY;
@@ -506,15 +506,48 @@ pub fn boot_phira() -> i32 {
     clear_error();
     step(progress::PHIRA_BOOTING);
 
+    // Both land before `phira::boot`, and the data directory has to be first by more than taste:
+    // `build_global_window_conf` reads it *during* `from_config`, so a setter called after `boot`
+    // would arrive too late. phira leaves `DATA_PATH` unset for this target and falls back to a
+    // relative `./data`, which is not ours to write on a phone - the first thing `the_main` would
+    // do is fail, and until this existed the reason went into a log with no subscriber.
+    if let Some(dir) = data_dir {
+        phira::set_data_path(dir);
+    }
+    phira::set_auto_open(auto_open);
+    phira::set_auto_play(auto_play);
+    // From here to the `phira: boot_phira -> ` line the shell sees nothing: this is one call on
+    // the UI thread, and phira's own `tracing` has no subscriber on this target. These three lines
+    // are the only thing that distinguishes "died before phira ran", "died inside phira's
+    // construction" and "phira booted and the shell never got the return value".
+    phira::set_log_sink(crate::log_line);
+    crate::log_line("phira: pump start (the_main not yet polled)");
+
     let res = std::panic::catch_unwind(|| {
         phira::boot();
+        crate::log_line("phira: window stored, polling the_main");
 
-        for _ in 0..BOOT_POLLS {
+        for i in 0..BOOT_POLLS {
             if macroquad::app::reached_first_frame() {
                 return Ok(());
             }
-            if let std::task::Poll::Ready(()) = macroquad::app::poll() {
-                return Err("the application exited before its first frame".to_owned());
+            let poll = macroquad::app::poll();
+            if i == 0 {
+                // Whether the *first* poll returned Pending or Ready is the whole difference
+                // between "construction is running across many frames" and "it finished or died
+                // immediately", which is otherwise unrecoverable: the shell only sees the return.
+                crate::log_line(match poll {
+                    std::task::Poll::Ready(()) => "phira: poll 0 -> Ready (the_main finished)",
+                    std::task::Poll::Pending => "phira: poll 0 -> Pending (parked, booting)",
+                });
+            }
+            if let std::task::Poll::Ready(()) = poll {
+                // A future that has completed is either `the_main` returning an error or the
+                // window closing, and the two are indistinguishable here. Ask phira which: the
+                // message is only `None` when nothing actually failed, in which case the old
+                // wording was the honest one after all.
+                return Err(phira::boot_error()
+                    .unwrap_or_else(|| "the application exited before its first frame".to_owned()));
             }
         }
         Err(format!(
@@ -532,13 +565,18 @@ pub fn boot_phira() -> i32 {
             // had drawn something before ever being asked to.
             macroquad::draw::drain_reset();
             step(progress::PHIRA_READY);
+            crate::log_line("phira: boot_phira -> 0 (first frame reached)");
             GAME_OK
         }
         Ok(Err(msg)) => {
+            crate::log_line(&format!("phira: boot_phira -> -2: {msg}"));
             set_error(msg);
             GAME_ERR_PARSE
         }
-        Err(_) => GAME_ERR_PANIC,
+        Err(_) => {
+            crate::log_line("phira: boot_phira -> -100 (panic inside the pump)");
+            GAME_ERR_PANIC
+        }
     }
 }
 

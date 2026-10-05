@@ -319,10 +319,37 @@ namespace Phirura.Game
         // Drawing
         // ------------------------------------------------------------------
 
+        /// <summary>
+        /// Whether the canvas's own size has been recorded.
+        ///
+        /// This is where "the picture is the wrong size" is decided, and nothing above it ever
+        /// wrote the numbers down: Win2D draws in DIPs while Rust was told to render at pixel size
+        /// through `GameSetScreen(_rustW, _rustH)`, and the two agree only at dpi == 96 - which
+        /// this device is not. `GamePage` already logs the pixel side as `screen WxH px @ scale`,
+        /// so this records the DIP side; the ratio between them is the whole question. One line,
+        /// first draw only.
+        /// </summary>
+        private bool _dpiLogged;
+
         private void OnDraw(CanvasControl sender, CanvasDrawEventArgs args)
         {
             CanvasDrawingSession ds = args.DrawingSession;
             ds.Clear(Background);
+
+            if (!_dpiLogged)
+            {
+                _dpiLogged = true;
+                // `ActualWidth`/`ActualHeight` and nothing else. The first attempt at this line
+                // used `sender.Bounds` and `sender.SizeInPixels`, and this Win2D build has
+                // neither - CS1061 on all five references. WinRT XAML has no `Bounds` on
+                // `FrameworkElement` at all (that is a WPF shape), and `SizeInPixels` is not
+                // projected onto `CanvasControl` here. `ActualWidth` is guaranteed, and the pixel
+                // figure it needs to be compared against is already on the record.
+                double dipW = sender.ActualWidth;
+                double dipH = sender.ActualHeight;
+                AppLog.WriteSync("Win2D: draw canvas=" + dipW.ToString("0.##") + "x" + dipH.ToString("0.##")
+                    + " DIP (pixel size is GamePage's \"screen WxH px @ scale\" line)");
+            }
 
             // The Rust game host takes priority when it is driving: its frame is already projected
             // and is the newer of the two paths. The XAML-chart path below is the fallback for every
@@ -883,6 +910,9 @@ namespace Phirura.Game
             PortCommands = frame.Count;
             PrprPort.PortCmd[] cmds = frame.Commands;
 
+            // Geometry census, throttled to ~1 Hz - see the method below.
+            PortFrameStats(frame, cmds);
+
             for (int i = 0; i < frame.Count; i++)
             {
                 PrprPort.PortCmd c = cmds[i];
@@ -919,6 +949,88 @@ namespace Phirura.Game
                         break;
                 }
             }
+        }
+
+        /// <summary>Rate gate for <see cref="PortFrameStats"/>.</summary>
+        private int _portStatsTick = int.MinValue / 2;
+
+        /// <summary>
+        /// One line per second describing what the frame actually contained.
+        ///
+        /// It separates the three ways a frame can look wrong, none of which the command *count* -
+        /// the only thing recorded before this existed - is able to tell apart:
+        ///
+        /// * `geo=0` while the chart should be on screen: the geometry was never emitted, so no
+        ///   amount of fixing the renderer would help;
+        /// * a `rectBbox` lying far outside the canvas: the projection is scaled or shifted, which
+        ///   is the "wrong resolution" symptom rather than a missing picture;
+        /// * sane `firstGeo` numbers while the screen shows nothing: the transform is right and the
+        ///   fault is in the texture content instead - which is what a white sprite looks like from
+        ///   the outside, because it has the correct geometry and the wrong pixels.
+        ///
+        /// Walked once a second rather than per frame: a busy chart has a few hundred commands and
+        /// this reads all of them, which is real work to do sixty times over.
+        /// </summary>
+        private void PortFrameStats(PrprPort.DrainFrame frame, PrprPort.PortCmd[] cmds)
+        {
+            int now = Environment.TickCount;
+            if (unchecked(now - _portStatsTick) < 1000)
+            {
+                return;
+            }
+            _portStatsTick = now;
+
+            int nTex = 0, nRect = 0, nLine = 0, nCircle = 0, nGeo = 0;
+            double minX = double.MaxValue, minY = double.MaxValue;
+            double maxX = double.MinValue, maxY = double.MinValue;
+            string firstGeo = "-";
+
+            for (int i = 0; i < frame.Count; i++)
+            {
+                PrprPort.PortCmd c = cmds[i];
+                switch (c.kind & 0xFFFF)
+                {
+                    case 0:
+                        nTex++;
+                        break;
+
+                    case 1:
+                        nRect++;
+                        if (c.f0 < minX) minX = c.f0;
+                        if (c.f1 < minY) minY = c.f1;
+                        if (c.f0 + c.f2 > maxX) maxX = c.f0 + c.f2;
+                        if (c.f1 + c.f3 > maxY) maxY = c.f1 + c.f3;
+                        break;
+
+                    case 2:
+                        nLine++;
+                        break;
+
+                    case 3:
+                        nCircle++;
+                        break;
+
+                    case 4:
+                        nGeo++;
+                        if (firstGeo == "-")
+                        {
+                            firstGeo = c.f0.ToString("0.##") + "," + c.f1.ToString("0.##")
+                                + "," + c.f2.ToString("0.##") + "," + c.f3.ToString("0.##")
+                                + "," + c.f4.ToString("0.##") + "," + c.f5.ToString("0.##");
+                        }
+                        break;
+                }
+            }
+
+            string bbox = nRect == 0
+                ? "-"
+                : "(" + minX.ToString("0.#") + "," + minY.ToString("0.#") + ","
+                    + (maxX - minX).ToString("0.#") + "x" + (maxY - minY).ToString("0.#") + ")";
+
+            AppLog.WriteSync("Win2D: port frame n=" + frame.Count
+                + " tex=" + nTex + " rect=" + nRect + " line=" + nLine
+                + " circ=" + nCircle + " geo=" + nGeo
+                + " rectBbox=" + bbox + " firstGeo=" + firstGeo);
         }
 
         private void DrawPortTexture(CanvasDrawingSession ds, PrprPort.PortCmd c)
@@ -1055,13 +1167,23 @@ namespace Phirura.Game
 
             // Vertex colours are per-vertex in the shim; a flat fill uses the first. Averaging would
             // be closer to a gradient, but Win2D.win81 cannot interpolate across a triangle either.
-            ds.FillGeometry(PortTriangle(a, b, c), FloatColor(a.r, a.g, a.b, 1f));
+            ds.FillGeometry(PortTriangle(ds, a, b, c), FloatColor(a.r, a.g, a.b, 1f));
         }
 
-        private static CanvasGeometry PortTriangle(PrprPort.PortVertex a, PrprPort.PortVertex b,
-                                                    PrprPort.PortVertex c)
+        /// <summary>
+        /// Builds the solid-colour triangle the textured path cannot cover.
+        ///
+        /// The resource creator is not optional: `new CanvasPathBuilder(null)` is E_INVALIDARG on
+        /// Win2D.win81 and surfaces as `ArgumentException: Value does not fall within the expected
+        /// range` at the constructor, which took down every untextured triangle in the chart - the
+        /// note lines, which is most of a frame. `ds` is also the only correct argument, not just
+        /// a non-null one: a `CanvasGeometry` is bound to the device that built it, so
+        /// `ds.FillGeometry` below can consume it only because both came from the same session.
+        /// </summary>
+        private static CanvasGeometry PortTriangle(CanvasDrawingSession ds, PrprPort.PortVertex a,
+                                                   PrprPort.PortVertex b, PrprPort.PortVertex c)
         {
-            using (CanvasPathBuilder pb = new CanvasPathBuilder(null))
+            using (CanvasPathBuilder pb = new CanvasPathBuilder(ds))
             {
                 pb.BeginFigure(a.x, a.y);
                 pb.AddLine(b.x, b.y);
@@ -1325,6 +1447,11 @@ namespace Phirura.Game
 
             bool full = x == 0 && y == 0 && w == pt.PixelWidth && h == pt.PixelHeight;
             long bytes = 0;
+            // The content probe runs on the first band of a full upload only: it is the pixel data
+            // itself that decides whether "white" means "the texture really is white" or "the
+            // texture is fine and something else is hiding it", and re-probing every delta would
+            // pay for an answer that cannot change.
+            bool firstBand = full;
             System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
             try
             {
@@ -1352,6 +1479,12 @@ namespace Phirura.Game
                             }
                         }
                         bytes += rgba.Length;
+                        if (firstBand)
+                        {
+                            firstBand = false;
+                            AppLog.WriteSync("Win2D: port texture " + id + " band0 "
+                                + w + "x" + band + " " + BandSummary(rgba));
+                        }
                         PaintPortBand(ds.Device, target, x, y + row, w, band, rgba);
                         row += band;
                     }
@@ -1376,6 +1509,33 @@ namespace Phirura.Game
                     + " bytes=" + bytes
                     + " ms=" + clock.ElapsedMilliseconds);
             }
+        }
+
+        /// <summary>
+        /// A four-number read of what a band of a texture actually contains.
+        ///
+        /// Two textures that both report "uploaded 78876 bytes" look identical in the log yet one
+        /// can be a crisp sprite and the other a solid white rectangle, which is the difference
+        /// this needs to settle. `first` catches a source that was never written (all-zero or
+        /// all-0xFF at the very start); the percentages catch the case the first pixel cannot -
+        /// a sprite that is genuinely uniform, and a glyph atlas that is all background.
+        /// </summary>
+        private static string BandSummary(byte[] px)
+        {
+            int n = px.Length < 4096 ? px.Length : 4096;
+            n &= ~3;
+            if (n < 4)
+            {
+                return "band too short (" + px.Length + " bytes)";
+            }
+            int ff = 0, z = 0;
+            for (int i = 0; i < n; i++)
+            {
+                if (px[i] == 0xFF) ff++;
+                else if (px[i] == 0) z++;
+            }
+            return "first=" + px[0] + "," + px[1] + "," + px[2] + "," + px[3]
+                + " ff=" + (ff * 100 / n) + "% zero=" + (z * 100 / n) + "%";
         }
 
         /// <summary>How many rows a band may hold so it stays inside <see cref="MaxSyncBandPixels"/>.</summary>

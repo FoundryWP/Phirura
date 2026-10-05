@@ -24,14 +24,35 @@ namespace Phirura
 
         private static readonly object Gate = new object();
         private static Task _tail = Task.FromResult(0);
-        private static bool _failed;
+
+        /// <summary>
+        /// Until then, appends are skipped because the last one threw.
+        ///
+        /// This used to be a plain latch, and that was a mistake worth naming: one failed append
+        /// silenced the log for the rest of the process, so a run that died and a run whose logging
+        /// had broken produced byte-for-byte the same file - a log that stops mid-sentence and says
+        /// nothing about why. The shell now has diagnostics arriving from Rust while the UI thread
+        /// is blocked inside native code, which is exactly when an append is most likely to fail, so
+        /// a permanent latch would take out the channel that exists to explain a crash.
+        ///
+        /// A cool-down keeps the original guarantee - "logging must never be the reason the app
+        /// dies" - while allowing recovery: at most one failed attempt every few seconds, and once
+        /// an attempt succeeds the window simply stays in the past, which is the recovered state.
+        ///
+        /// Ticks rather than a <see cref="DateTime"/>, and read through <c>Interlocked</c>: this is
+        /// written by the append thread and read by any thread that happens to log, and a torn
+        /// read of an eight-byte timestamp is not a hypothetical - it is the one bug that could pin
+        /// this field in the far future and mute the log permanently, which is the exact failure
+        /// this field exists to stop.
+        /// </summary>
+        private static long _mutedUntilTicks;
 
         public static void Write(string message)
         {
             string line = DateTime.Now.ToString("HH:mm:ss.fff") + "  " + message;
             System.Diagnostics.Debug.WriteLine("[Phirura] " + line);
 
-            if (_failed)
+            if (System.Threading.Interlocked.Read(ref _mutedUntilTicks) > DateTime.UtcNow.Ticks)
             {
                 return;
             }
@@ -59,7 +80,7 @@ namespace Phirura
             string line = DateTime.Now.ToString("HH:mm:ss.fff") + "  " + message;
             System.Diagnostics.Debug.WriteLine("[Phirura] " + line);
 
-            if (_failed)
+            if (System.Threading.Interlocked.Read(ref _mutedUntilTicks) > DateTime.UtcNow.Ticks)
             {
                 return;
             }
@@ -165,7 +186,8 @@ namespace Phirura
             catch (Exception)
             {
                 // Logging must never be the reason the app dies.
-                _failed = true;
+                System.Threading.Interlocked.Exchange(
+                    ref _mutedUntilTicks, DateTime.UtcNow.AddSeconds(5).Ticks);
             }
         }
 

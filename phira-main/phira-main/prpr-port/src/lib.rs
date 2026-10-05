@@ -73,6 +73,15 @@ pub struct HostCallbacks {
     /// does not exist. This is how the Rust game reaches the shell's storage without owning any
     /// file IO itself.
     pub load_asset: Option<unsafe extern "C" fn(name: *const u16, out: *mut u8, cap: usize) -> i32>,
+    /// One line of UTF-8 text for the shell's log.
+    ///
+    /// This is not a general facility, it closes one hole: `PhiraBoot` is a single uninterrupted
+    /// call on the UI thread, and the `log` feature is off on this target, so when a run died
+    /// inside phira's construction the shell's log simply stopped mid-sentence with nothing to say
+    /// which phase was executing. A process dying mid-call is exactly when the shell cannot ask
+    /// Rust anything, so the shell has to be told as it happens - and written synchronously, so the
+    /// last line on disk is the last thing Rust did.
+    pub log: Option<unsafe extern "C" fn(msg: *const u8, len: usize)>,
 }
 
 static mut CALLBACKS: HostCallbacks = HostCallbacks {
@@ -92,6 +101,7 @@ static mut CALLBACKS: HostCallbacks = HostCallbacks {
     save_file: None,
     present: None,
     load_asset: None,
+    log: None,
 };
 
 /// Installed once by the shell, before anything else is called.
@@ -126,6 +136,19 @@ fn asset_hook(path: &str) -> Option<Vec<u8>> {
 #[inline]
 fn cb() -> &'static HostCallbacks {
     unsafe { &*core::ptr::addr_of!(CALLBACKS) }
+}
+
+/// Send one line to the shell's log.
+///
+/// Silent when the shell installed no such callback, so leaving the calls in place costs nothing
+/// on a shell that does not provide one. No allocation and no `unsafe` beyond the call itself:
+/// this is on the boot path, where a panic in the diagnostics would be worse than silence.
+#[inline]
+pub fn log_line(msg: &str) {
+    let Some(f) = cb().log else {
+        return;
+    };
+    unsafe { f(msg.as_ptr(), msg.len()) };
 }
 
 // ===========================================================================
@@ -620,9 +643,22 @@ pub unsafe extern "C" fn wp81_game_create(
 /// per display frame and the draw commands come back the same way (`prpr-port/src/host.rs`
 /// explains the split).
 ///
-/// Takes no arguments because phira owns its own configuration: it reads its data directory, its
-/// fonts and its settings from the hooks the shell already provides, and there is nothing a chart
-/// name would tell it that it does not look up itself.
+/// Takes three arguments, all of them about where phira may write and what it should do first.
+/// phira's *own* configuration - fonts, settings, volume - it still reads itself; there is no chart
+/// name in here that it could not look up, but there is also no way for it to discover a directory
+/// or an intention on its own.
+///
+///   `data_dir`   absolute, writable, and the parent of phira's `data` directory. phira only picks
+///                one at compile time for ohos and ios; everywhere else it falls back to a relative
+///                `./data`, which on a phone is not ours to write, so the boot fails before it
+///                draws. Null leaves it unset - what a desktop harness wants.
+///   `auto_open`  the local chart to open on its song page once the library is up, written the way
+///                `LocalChart::local_path` writes it (`custom/190`), not as a path. Null stops at
+///                the library, which is an ordinary phira.
+///   `auto_play`  non-zero to start that chart rather than wait for a tap. Kept separate from which
+///                chart because a host may want to change its mind about this one independently -
+///                a build that drops you in the chart and one that shows the page first are both
+///                reasonable, and neither should have to change which chart it names.
 ///
 /// Returns `0` on success, or the same negative codes as `wp81_game_create`:
 ///
@@ -631,8 +667,17 @@ pub unsafe extern "C" fn wp81_game_create(
 ///   -100  construction panicked
 #[cfg(target_arch = "arm")]
 #[no_mangle]
-pub extern "C" fn wp81_phira_boot() -> i32 {
-    host::boot_phira()
+pub extern "C" fn wp81_phira_boot(data_dir: *const u16, auto_open: *const u16, auto_play: i32) -> i32 {
+    // # Safety
+    //
+    // Both pointers come from the shell's own marshalling, so they are either null or point at a
+    // NUL-terminated UTF-16 buffer that outlives this call - which is what `utf16_to_string`
+    // requires. The null test is done here rather than left to it so that "unset" and "empty" both
+    // mean the same thing to the caller: neither string has to know whether the shell passes null
+    // or an empty buffer when it has nothing to say.
+    let data_dir = if data_dir.is_null() { None } else { unsafe { utf16_to_string(data_dir) } };
+    let auto_open = if auto_open.is_null() { None } else { unsafe { utf16_to_string(auto_open) } };
+    host::boot_phira(data_dir, auto_open, auto_play != 0)
 }
 
 /// Advance and render one frame. `dt` is the seconds since the previous call.

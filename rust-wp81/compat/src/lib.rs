@@ -190,10 +190,17 @@ unsafe fn c_ReadFile(a: HANDLE, b: *mut c_void, c: u32, d: *mut u32, e: *mut c_v
 unsafe fn c_WriteFile(a: HANDLE, b: *const c_void, c: u32, d: *mut u32, e: *mut c_void) -> BOOL {
     // std does not declare WriteFile (only WriteFileEx), so there is no generated trampoline for
     // it - it is resolved here directly. Same runtime-resolution discipline as the rest.
-    static DLL: [u16; 30] = [0x0061, 0x0070, 0x0069, 0x002D, 0x006D, 0x0073, 0x002D, 0x0077,
+    //
+    // 32 elements: `"api-ms-win-core-file-l1-2-1.dll"` is 31 chars plus the terminating NUL. This
+    // was a hand-typed `[u16; 30]` that stopped at `.dl` and had no terminator at all, so
+    // `LoadLibraryExW` walked off the end of the array looking for one - and `WriteFile` is the
+    // one function every `std::fs::write` goes through, which is why the device log showed
+    // `data.json` created at zero bytes and nothing after it. `BCRYPT_DLL` above is the correct
+    // shape to copy.
+    static DLL: [u16; 32] = [0x0061, 0x0070, 0x0069, 0x002D, 0x006D, 0x0073, 0x002D, 0x0077,
                              0x0069, 0x006E, 0x002D, 0x0063, 0x006F, 0x0072, 0x0065, 0x002D,
                              0x0066, 0x0069, 0x006C, 0x0065, 0x002D, 0x006C, 0x0031, 0x002D,
-                             0x0032, 0x002D, 0x0031, 0x002E, 0x0064, 0x006C];
+                             0x0032, 0x002D, 0x0031, 0x002E, 0x0064, 0x006C, 0x006C, 0x0000];
     let f: unsafe extern "system" fn(usize, usize, usize, usize, usize) -> usize =
         core::mem::transmute(wp81_resolve(DLL.as_ptr(), b"WriteFile\0".as_ptr()));
     if f as usize == 0 {
@@ -536,6 +543,118 @@ pub static __imp_BCryptGenRandom: unsafe extern "system" fn(*mut c_void, *mut u8
 #[no_mangle]
 pub static __imp_SystemFunction036: unsafe extern "system" fn(*mut c_void, u32) -> u8 =
     SystemFunction036;
+
+// ---------------------------------------------------------------------------
+// The IAT cells `winapi_util` and `windows_result` ask for.
+//
+// These eight were the whole of the first build after the raw-dylib pass, and they are why that
+// pass had to be followed rather than ending on its own. Everything else the removal orphaned
+// moved onto an API set through `WindowsPhoneCore.lib` - the link log now reads
+// `WindowsPhoneCore.lib(api-ms-win-core-timezone-l1-1-0.dll)` where it used to read
+// `prpr_port.lib(kernel32.dll)`, which is precisely the substitution `check_imports.py` exists
+// to enforce - but no import library reachable from a WP8.1 link can supply these.
+//
+//   `winapi_util` colours tracing output. It asks for the console's screen-buffer info, its text
+//   attributes and its mode; WP8.1 exposes the console only as far as `std` needs, and
+//   `GetConsoleScreenBufferInfo`/`SetConsoleTextAttribute` are not part of that.
+//
+//   `windows_result` formats a `windows`-crate error. `SysStringLen`/`SysFreeString` are
+//   oleaut32's BSTR pair, and `RoOriginateErrorW`/`SetErrorInfo`/`GetErrorInfo` are the
+//   diagnostic plumbing behind them. None of it is on the phone, and none of it has anything to
+//   report about a process that logs through the shell instead.
+//
+// Each stub keeps the polarity its caller branches on, so the failure is a graceful one rather
+// than a read of uninitialised memory: FALSE makes `winapi_util` conclude "not a console" and
+// drop styling - which is the truth on a device with no console - a length of 0 makes
+// `windows_result` format an empty message, and `S_FALSE` from `GetErrorInfo` is the "no error
+// object" answer, so the HRESULT is reported on its own rather than through a null `IErrorInfo`.
+//
+// `extern "system"` rather than `extern "C"` because that is the spelling `windows-link`'s
+// `link!` macro hands rustc; on ARM the two are the same ABI, and matching it here means a
+// signature change on either side cannot diverge silently.
+// ---------------------------------------------------------------------------
+
+/// FALSE = "this handle is not a console". `winapi_util` already has that branch; it just needs
+/// the call to fail instead of missing a definition.
+#[no_mangle]
+pub unsafe extern "system" fn GetConsoleScreenBufferInfo(
+    _handle: HANDLE,
+    _info: *mut c_void,
+) -> BOOL {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn SetConsoleMode(_handle: HANDLE, _mode: u32) -> BOOL {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn SetConsoleTextAttribute(_handle: HANDLE, _attributes: u16) -> BOOL {
+    0
+}
+
+/// BSTR length. 0 rather than a computed one: every string that could reach here is one we also
+/// refused to allocate, and returning 0 keeps `windows_result` from scanning past a buffer it
+/// does not own.
+#[no_mangle]
+pub unsafe extern "system" fn SysStringLen(_bstr: *const u16) -> u32 {
+    0
+}
+
+/// Deliberately a no-op. We never allocate a BSTR, so there is never one to free; freeing here
+/// would be the only call in this file that hands the phone's heap a pointer it did not produce.
+#[no_mangle]
+pub unsafe extern "system" fn SysFreeString(_bstr: *mut u16) {}
+
+/// `RoOriginateErrorW` is what attaches a human-readable message to an HRESULT before handing it
+/// to the error-info machinery. With no `IErrorInfo` sink on this platform it has nowhere to put
+/// one, and the HRESULT alone is what the caller ends up formatting anyway.
+#[no_mangle]
+pub unsafe extern "system" fn RoOriginateErrorW(_hr: i32, _reserved: u32, _message: *const u16) {}
+
+#[no_mangle]
+pub unsafe extern "system" fn SetErrorInfo(_reserved: u32, _error_info: *mut c_void) -> i32 {
+    0
+}
+
+/// S_FALSE - "there is no error object". `windows_result` branches on that and falls back to the
+/// HRESULT, which is the message we can actually produce.
+#[no_mangle]
+pub unsafe extern "system" fn GetErrorInfo(_reserved: u32, error_info: *mut *mut c_void) -> i32 {
+    if !error_info.is_null() {
+        *error_info = core::ptr::null_mut();
+    }
+    1
+}
+
+#[no_mangle]
+pub static __imp_GetConsoleScreenBufferInfo: unsafe extern "system" fn(HANDLE, *mut c_void) -> BOOL =
+    GetConsoleScreenBufferInfo;
+
+#[no_mangle]
+pub static __imp_SetConsoleMode: unsafe extern "system" fn(HANDLE, u32) -> BOOL = SetConsoleMode;
+
+#[no_mangle]
+pub static __imp_SetConsoleTextAttribute: unsafe extern "system" fn(HANDLE, u16) -> BOOL =
+    SetConsoleTextAttribute;
+
+#[no_mangle]
+pub static __imp_SysStringLen: unsafe extern "system" fn(*const u16) -> u32 = SysStringLen;
+
+#[no_mangle]
+pub static __imp_SysFreeString: unsafe extern "system" fn(*mut u16) = SysFreeString;
+
+#[no_mangle]
+pub static __imp_RoOriginateErrorW: unsafe extern "system" fn(i32, u32, *const u16) =
+    RoOriginateErrorW;
+
+#[no_mangle]
+pub static __imp_SetErrorInfo: unsafe extern "system" fn(u32, *mut c_void) -> i32 = SetErrorInfo;
+
+#[no_mangle]
+pub static __imp_GetErrorInfo: unsafe extern "system" fn(u32, *mut *mut c_void) -> i32 =
+    GetErrorInfo;
 
 // ===========================================================================
 // NT file API -> Win32 file API.

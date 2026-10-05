@@ -104,3 +104,11 @@ while ($attempt -lt $maxAttempts) {
 }
 
 Write-Output "=== EXITCODE: $exit (attempts: $attempt) ==="
+
+# Propagate msbuild's code instead of only printing it. As written the script always exited 0 -
+# a `.ps1` run with `-File` returns 0 unless it calls `exit` - so every caller chaining on
+# $LASTEXITCODE took a failed compile for a successful one and went on to deploy whatever appx
+# was left from the last good build. That reads as "the changes had no effect", which is a far
+# more expensive misunderstanding than a build that plainly failed: it sends the next round to
+# the device to look for a bug that was never shipped.
+exit $exit

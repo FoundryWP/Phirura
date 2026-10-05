@@ -188,10 +188,29 @@ fn with_effects((mut frames, sample_rate): (Vec<Frame>, u32), range: Option<(f32
 }
 
 async fn load_local_tuple(local_path: &str, def_illu: SafeTexture, info: ChartInfo) -> Result<LocalTuple> {
+    // Four lines, because this one function decides three questions the log could not answer:
+    // whether the music file was found, whether the shell's decoder accepted it, and how long the
+    // track really is. `AudioClip::decode` returns `Err` for any non-zero rc out of
+    // `wp81_audio_decode`, and the `?` below carries it straight out - so a chart can be reached,
+    // drawn and finished while the soundtrack never existed. "The song never started" used to be
+    // indistinguishable from "the song started on a clock that cannot advance".
+    crate::log_line(&format!("SongScene: load_local_tuple({local_path}) music={}", info.music));
     let dir = prpr::dir::Dir::new(format!("{}/{local_path}", dir::charts()?))?;
     let bytes = dir.read(&info.music)?;
-    let (frames, sample_rate) = AudioClip::decode(bytes)?;
+    crate::log_line(&format!("SongScene: music read {} bytes", bytes.len()));
+    let (frames, sample_rate) = AudioClip::decode(bytes).map_err(|err| {
+        crate::log_line(&format!("SongScene: AudioClip::decode FAILED: {err}"));
+        err
+    })?;
     let length = frames.len() as f32 / sample_rate as f32;
+    crate::log_line(&format!(
+        "SongScene: decoded {} frames @ {} Hz = {:.3}s preview=({:.1},{:.1})",
+        frames.len(),
+        sample_rate,
+        length,
+        info.preview_start,
+        info.preview_end.unwrap_or(info.preview_start + 15.)
+    ));
     if info.preview_end.unwrap_or(info.preview_start + 1.) > length {
         tl!(bail "edit-preview-invalid");
     }
@@ -838,6 +857,9 @@ impl SongScene {
 
         self.scene_task =
             Self::global_launch(self.info.id, local_path, self.mods, mode, None, Some(self.background.clone()), self.record.clone(), is_unlock)?;
+        // Written *after* `global_launch` returns, so a failure inside `fs_from_path` never
+        // produces it - a missing line here means the launch did not even start.
+        crate::log_line(&format!("SongScene: chart launch spawned for {local_path}"));
 
         Ok(())
     }
@@ -855,6 +877,11 @@ impl SongScene {
         is_unlock: bool,
     ) -> Result<LocalSceneTask> {
         let mut fs = fs_from_path(local_path)?;
+        // Written before the returned future is polled, so a missing line means the launch died
+        // right here. `launch()` cannot say that itself: its own "spawned" line sits after this
+        // `?`, which is why the existing comment promised only that "a missing line means the
+        // launch did not even start" - this names the one place that promise pointed at.
+        crate::log_line(&format!("SongScene: global_launch({local_path}) chart fs opened"));
         let can_rated = id.is_some() || local_path.starts_with(':');
         #[cfg(feature = "video")]
         let local_path = local_path.to_owned();
@@ -1672,6 +1699,22 @@ impl Scene for SongScene {
             music.play()?;
         }
         self.update_menu();
+
+        // Straight into the chart when the host asked for it.
+        //
+        // Placed at the end of `enter` rather than in `update`, because `enter` is the one moment
+        // the page is known to be complete - `new` has filled in the local path, the info and the
+        // background, and `load_ldb` above has run - whereas the first `update` would be racing the
+        // entry animation and is also where a tap could have been handled.
+        //
+        // `take_auto_play` clears itself, so coming back from the result screen does not start a
+        // second game, and the `local_path` test comes first so a chart that was never local does
+        // not consume a request it could never satisfy.
+        if self.local_path.is_some() && crate::take_auto_play() {
+            crate::log_line("SongScene: auto-play requested, launching now");
+            self.launch(GameMode::Normal, false)?;
+        }
+
         Ok(())
     }
 
@@ -2028,6 +2071,13 @@ impl Scene for SongScene {
                 match res {
                     Err(err) => {
                         error!(?err, "failed to play");
+                        // `error!` is `tracing`, and this target installs no subscriber - the
+                        // line above is written to nowhere. A chart that fails to launch was
+                        // therefore *entirely* invisible in the log: no error, no scene, and a
+                        // dialog the player may never notice, which reads exactly like "the
+                        // chart started and did nothing". This is the one place that decides
+                        // whether a chart scene exists at all, so it must not be silent.
+                        crate::log_line(&format!("SongScene: launch FAILED: {err:?}"));
                         *self.background.lock().unwrap() = None;
                         self.tr_start = f32::NAN;
                         let error = format!("{err:?}");
@@ -2043,7 +2093,10 @@ impl Scene for SongScene {
                             })
                             .show();
                     }
-                    Ok(scene) => self.next_scene = Some(scene),
+                    Ok(scene) => {
+                        crate::log_line("SongScene: launch task produced the game scene");
+                        self.next_scene = Some(scene);
+                    }
                 }
                 self.scene_task = None;
             }
@@ -2603,6 +2656,17 @@ impl Scene for SongScene {
         }
         if let Some(task) = &mut self.scene_task {
             if let Some(res) = poll_future(task.as_mut()) {
+                // The `update` path above logs its failure because `tracing` is silent on this
+                // target; this second poll site had the same hole, and worse - it swallowed the
+                // error into `?` with no line of its own, so a chart that died here left nothing
+                // behind but a scene stack that never grew. `?` still runs afterwards, unchanged,
+                // so the conversion and the fact that `scene_task` survives the failure are both
+                // exactly what they were.
+                if let Err(err) = &res {
+                    crate::log_line(&format!("SongScene: chart task FAILED: {err:?}"));
+                } else {
+                    crate::log_line("SongScene: chart task produced the next scene");
+                }
                 self.next_scene = Some(res?);
                 self.scene_task = None;
             }
