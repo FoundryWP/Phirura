@@ -184,6 +184,13 @@ namespace Phirura
             Application.Current.Resuming -= OnAppResuming;
             SetImmersive(false);
             StopLoop();
+            // The log refresh rides a DispatcherTimer, which survives navigation unless it is
+            // stopped - and a timer still ticking against a page that has been torn down keeps the
+            // page (and its whole renderer) alive.
+            if (_logTimer != null)
+            {
+                _logTimer.Stop();
+            }
             if (_calibrating)
             {
                 EndCalibration();
@@ -901,6 +908,29 @@ namespace Phirura
             return t;
         }
 
+        /// <summary>
+        /// Whether a pointer event should reach the engine.
+        ///
+        /// `_started` is the C# chart path's flag - `StartPlayback` is its only writer - so a guard
+        /// on it alone silently drops *every* tap in phira mode, where the page never starts a
+        /// `MediaElement`-driven play of its own. That is precisely what "the screen does not
+        /// respond to touch" was, and it was invisible because the guard returned before anything
+        /// was recorded: the presses arrived and vanished with no trace. The phira path's
+        /// equivalent of "started" is <c>_rustCreated</c> - the engine exists and its frame loop is
+        /// running, which is the only precondition a touch actually needs.
+        /// </summary>
+        private bool InputLive
+        {
+            get
+            {
+                if (_paused || _finished)
+                {
+                    return false;
+                }
+                return UseRustEngine ? _rustCreated : _started;
+            }
+        }
+
         private void OnPointerPressed(object sender, PointerRoutedEventArgs e)
         {
             // Logged *before* the guard on purpose. A press that arrives and is dropped because the
@@ -911,9 +941,10 @@ namespace Phirura
             Windows.Foundation.Point where = e.GetCurrentPoint(GameSurface).Position;
             AppLog.Write("GamePage: touch down id=" + id + " at " + where.X.ToString("0.#")
                 + "," + where.Y.ToString("0.#") + " rust=" + UseRustEngine
-                + " started=" + _started + " paused=" + _paused + " finished=" + _finished);
+                + " started=" + _started + " paused=" + _paused + " finished=" + _finished
+                + " live=" + InputLive);
 
-            if (_paused || _finished || !_started)
+            if (!InputLive)
             {
                 return;
             }
@@ -960,12 +991,18 @@ namespace Phirura
             TouchInput cur;
             if (!_active.TryGetValue(id, out cur))
             {
+                // Logged because it is the one case where a release cannot be paired with a press:
+                // either the press was dropped by the guard (so the finger was never tracked) or the
+                // pointer was already retired. Both look like "the game ignored my tap" from outside.
+                AppLog.Write("GamePage: touch up id=" + id + " (not tracked)");
                 return;
             }
             TouchInput next = MakeTouch(id, TouchPhase.Ended, e.GetCurrentPoint(GameSurface).Position);
             next.Time = cur.Time;
             _active[id] = next;
             _toRemove.Add(id);
+            AppLog.Write("GamePage: touch up id=" + id + " at " + next.Ndc.X.ToString("0.##")
+                + "," + next.Ndc.Y.ToString("0.##") + " remaining=" + _active.Count);
         }
 
         private void OnPointerCanceled(object sender, PointerRoutedEventArgs e)
@@ -1360,7 +1397,26 @@ namespace Phirura
             PrprPort.DrainFrame frame = PrprPort.GameFrameSized(dt);
             _renderer.DrawPortFrame(frame);
             _renderer.Present();
+
+            // One line a second, and it is the shell's own number. The Rust side logs its frame
+            // counter, but that only says the engine is being ticked - it cannot see how long the
+            // drain, the command replay and the present took, which is where the port's cost lives
+            // and what the fixes in this round were aimed at. Printed with the live touch count so
+            // "laggy and ignoring taps" is one line to read rather than two logs to correlate.
+            _frames++;
+            int nowTick = Environment.TickCount;
+            if (unchecked(nowTick - _fpsTick) >= 1000)
+            {
+                double secs = (nowTick - _fpsTick) / 1000.0;
+                _fpsTick = nowTick;
+                AppLog.Write("GamePage: fps=" + (_frames / secs).ToString("0.#")
+                    + " touches=" + _active.Count + " paused=" + _paused);
+                _frames = 0;
+            }
         }
+
+        private int _frames;
+        private int _fpsTick = Environment.TickCount;
 
         private void RenderBadNotes(double t)
         {
@@ -1953,6 +2009,54 @@ namespace Phirura
         private void PauseButton_Click(object sender, RoutedEventArgs e)
         {
             DoPause();
+        }
+
+        // ------------------------------------------------------------------
+        // On-screen log
+        // ------------------------------------------------------------------
+
+        private DispatcherTimer _logTimer;
+        private int _logVersion = -1;
+
+        /// <summary>Shows or hides the log panel, and runs the refresh timer only while it is up.</summary>
+        private void LogToggle_Click(object sender, RoutedEventArgs e)
+        {
+            bool show = LogOverlay.Visibility != Visibility.Visible;
+            LogOverlay.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+
+            if (show)
+            {
+                if (_logTimer == null)
+                {
+                    _logTimer = new DispatcherTimer();
+                    // Four times a second. The panel is read by a human, and every tick that finds
+                    // the same version costs one integer compare - so the interval only has to be
+                    // shorter than the time it takes to read a line, not shorter than a frame.
+                    _logTimer.Interval = TimeSpan.FromMilliseconds(250);
+                    _logTimer.Tick += LogTimer_Tick;
+                }
+                _logVersion = -1;
+                LogTimer_Tick(null, null);
+                _logTimer.Start();
+            }
+            else if (_logTimer != null)
+            {
+                _logTimer.Stop();
+            }
+
+            // Recorded either way, so the log always shows why the panel appeared or vanished.
+            AppLog.WriteSync("GamePage: log overlay " + (show ? "on" : "off"));
+        }
+
+        private void LogTimer_Tick(object sender, object e)
+        {
+            int version;
+            string text = AppLog.RecentText(out version);
+            if (version != _logVersion)
+            {
+                _logVersion = version;
+                LogOverlayText.Text = text;
+            }
         }
 
         private void ResumeButton_Click(object sender, RoutedEventArgs e)

@@ -51,6 +51,7 @@ namespace Phirura
         {
             string line = DateTime.Now.ToString("HH:mm:ss.fff") + "  " + message;
             System.Diagnostics.Debug.WriteLine("[Phirura] " + line);
+            Remember(line);
 
             if (System.Threading.Interlocked.Read(ref _mutedUntilTicks) > DateTime.UtcNow.Ticks)
             {
@@ -79,6 +80,7 @@ namespace Phirura
         {
             string line = DateTime.Now.ToString("HH:mm:ss.fff") + "  " + message;
             System.Diagnostics.Debug.WriteLine("[Phirura] " + line);
+            Remember(line);
 
             if (System.Threading.Interlocked.Read(ref _mutedUntilTicks) > DateTime.UtcNow.Ticks)
             {
@@ -95,6 +97,53 @@ namespace Phirura
                 catch (Exception)
                 {
                 }
+            }
+        }
+
+        // ===================================================================================
+        // The last few lines, for the on-screen panel.
+        // ===================================================================================
+        //
+        // Kept here rather than in the page because the alternatives are both worse: re-reading the
+        // file is expensive and the file is held open a lot, and duplicating the text at every call
+        // site means the panel and the file drift apart. A ring buffer of already-formatted strings,
+        // written under the same lock the appends take, so the panel can never render a half-written
+        // line - and it costs a string reference per log call, not a copy.
+        private const int RecentMax = 20;
+        private static readonly string[] _recent = new string[RecentMax];
+        private static int _recentNext;
+        private static int _recentTotal;
+
+        private static void Remember(string line)
+        {
+            lock (Gate)
+            {
+                _recent[_recentNext] = line;
+                _recentNext = (_recentNext + 1) % RecentMax;
+                _recentTotal++;
+            }
+        }
+
+        /// <summary>
+        /// The most recent lines, oldest first, plus a counter that changes whenever they do.
+        ///
+        /// The counter is what lets the caller poll cheaply: it compares the number and only rebuilds
+        /// the string when it moved, so a panel refreshing a few times a second costs nothing on the
+        /// frames where no line was logged.
+        /// </summary>
+        public static string RecentText(out int version)
+        {
+            lock (Gate)
+            {
+                version = _recentTotal;
+                int n = _recentTotal < RecentMax ? _recentTotal : RecentMax;
+                System.Text.StringBuilder sb = new System.Text.StringBuilder(n * 48);
+                for (int i = 0; i < n; i++)
+                {
+                    int idx = ((_recentNext - n + i) % RecentMax + RecentMax) % RecentMax;
+                    sb.Append(_recent[idx]).Append('\n');
+                }
+                return sb.ToString();
             }
         }
 
@@ -163,9 +212,28 @@ namespace Phirura
         /// <summary>Runs on a thread-pool thread; the WinRT I/O is awaited there, never on the UI thread.</summary>
         private static void Append(string line)
         {
+            StringBuilder sb = new StringBuilder(line.Length + 2);
+            sb.Append(line);
+            sb.Append("\r\n");
+            string text = sb.ToString();
+
+            // Two stores, each in its own try: one failing must not cost the other.
+            //
+            // The second copy is not redundancy for its own sake. `ISETool ts` copies the WHOLE
+            // Local store and *aborts* on the first file it cannot open - and that file is the
+            // chart's music, held by the MediaElement for as long as the game is playing. So the log
+            // is the one file a pull most needs and the one it is least likely to reach: every
+            // "no log" was really "the copy died at the mp3, which sorts before it". The temporary
+            // store holds nothing but this file, so `ts appxfolder:Temp` is reliable and instant -
+            // no 22 MB of chart art to walk first.
+            TryAppend(ApplicationData.Current.LocalFolder, text);
+            TryAppend(ApplicationData.Current.TemporaryFolder, text);
+        }
+
+        private static void TryAppend(StorageFolder folder, string text)
+        {
             try
             {
-                StorageFolder folder = ApplicationData.Current.LocalFolder;
                 StorageFile file = folder.CreateFileAsync(
                     FileName, CreationCollisionOption.OpenIfExists).AsTask().Result;
 
@@ -178,9 +246,8 @@ namespace Phirura
                     // where the chart load, the texture registrations and the first gameplay frames
                     // are. A ten-minute session therefore lost the whole playable part and left only
                     // the result page, which reads as "the game never rendered anything" and sent a
-                    // whole round hunting a bug that had already been fixed. The per-frame lines
-                    // below are also rate-limited, so a rotation should now be rare rather than
-                    // routine.
+                    // whole round hunting a bug that had already been fixed. The per-frame lines are
+                    // also rate-limited, so a rotation should now be rare rather than routine.
                     string all = Windows.Storage.FileIO.ReadTextAsync(file).AsTask().Result;
                     int keep = all.Length / 2;
                     if (keep > all.Length)
@@ -199,10 +266,7 @@ namespace Phirura
                         + " chars)...\r\n" + tail).AsTask().Wait();
                 }
 
-                StringBuilder sb = new StringBuilder(line.Length + 2);
-                sb.Append(line);
-                sb.Append("\r\n");
-                FileIO.AppendTextAsync(file, sb.ToString()).AsTask().Wait();
+                FileIO.AppendTextAsync(file, text).AsTask().Wait();
             }
             catch (Exception)
             {

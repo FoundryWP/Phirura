@@ -3,25 +3,27 @@
     Follow the phone's phirura.log while the app is running.
 
 .DESCRIPTION
-    WP8.1 has no attached debugger here, so "runtime logging" means polling the app's
-    LocalFolder and printing what is new. `ISETool ts` copies the whole store, which is why
-    this keeps the previous snapshot in memory and prints only the delta instead of dumping
-    200 KB every poll.
+    WP8.1 has no attached debugger here, so "runtime logging" means polling the app's store and
+    printing what is new. This keeps the previous snapshot in memory and prints only the delta.
 
-    Two things make a naive version useless, and both are handled here:
+    Three things make a naive version useless, and all are handled here:
 
-      * `ISETool ts` fails with "another program is using this file" whenever the app happens
-        to hold phirura.log open - which is often, because AppLog opens and closes it per
-        write. That is a *race*, not a hard failure: retrying a few times wins it. A poll that
-        gives up on the first error reports "no log" for a perfectly healthy run.
-      * AppLog rotates the file when it passes 256 KB (it keeps the tail now, but the file can
-        still be rewritten). When the content stops being a prefix of what was printed, the
-        whole tail is re-printed rather than silently skipping the rotated-in lines.
+      * It reads the app's **temp** store (`appxfolder:Temp`), not Local. AppLog mirrors every line
+        into both, and Local is the wrong place to poll from: `ts` copies the whole 22 MB of chart
+        art and *aborts* on the first unreadable file - which is the chart's music, held open by the
+        MediaElement for as long as the game is playing. The log is then never reached, so every pull
+        during gameplay failed with a sharing violation that had nothing to do with the log. The temp
+        store holds only the log, which also makes each poll instant instead of a 22 MB walk.
+      * `ts` refuses a destination that already exists, and a *failed* attempt still leaves one
+        behind - so the directory name has to be fresh per attempt, not per poll. Reusing one made
+        every retry fail for the same reason as the first, and the retry loop could never win.
+      * AppLog rotates the file when it passes 256 KB (it keeps the tail now). When the content
+        stops being a prefix of what was printed, the whole tail is re-printed rather than silently
+        skipping the rotated-in lines.
 
 .PARAMETER Seconds
-    Delay between polls. `ts` copies the whole store (~22 MB of chart art, not just the log), so
-    polling faster than every few seconds costs real device and USB time without showing anything
-    sooner. 5 s is the default for that reason; go to 2-3 s only for a short, focused watch.
+    Delay between polls. The temp store is small, so this is cheap; 5 s is still the default because
+    the panel is read by a human and every poll is a device round-trip.
 
 .PARAMETER Filter
     Regex; only matching lines are printed. Use it to watch one subsystem, e.g.
@@ -59,17 +61,35 @@ while ($true) {
     $polls++
     if ($MaxPolls -gt 0 -and $polls -gt $MaxPolls) { break }
 
-    $snap = Join-Path $work ("snap_" + (Get-Date -Format HHmmssfff))
     $text = $null
-    for ($try = 1; $try -le 4; $try++) {
-        # The destination must not already exist, so each attempt gets its own name.
-        $out = (& $ise ts $device $productId $snap 2>&1 | Out-String)
-        $lf = Join-Path $snap "IsolatedStore\phirura.log"
-        if (Test-Path $lf) {
-            $text = [System.IO.File]::ReadAllText($lf)
+    $snaps = @()
+    # Patient on purpose. The lock correlates with *activity*: the more the app logs, the more often
+    # AppLog holds phirura.log open, so the polls most likely to fail are the ones during gameplay -
+    # exactly the ones worth watching. Four attempts was not enough; a failed poll that gives up
+    # early turns a busy run into "no output", which reads as a broken logger.
+    #
+    # A fresh directory per *attempt*, not per poll. `ISETool ts` refuses a destination that already
+    # exists, and a failed attempt leaves its directory behind - so reusing one name made every
+    # retry fail for the same reason as the first, and the retry loop could never succeed.
+    for ($try = 1; $try -le 10; $try++) {
+        $snap = Join-Path $work ("snap_" + (Get-Date -Format HHmmssfff) + "_$try")
+        $snaps += $snap
+        # `appxfolder:Temp`, not the default Local store. `ts` on Local copies the whole 22 MB of
+        # chart art and ABORTS on the first unreadable file - which is the chart's music, held open
+        # by the MediaElement for as long as the game is playing. The log is then never reached, and
+        # the failure looks like "the log is locked" when it is really "the copy died at the mp3".
+        # AppLog mirrors every line into the temp store, which holds nothing else, so this is both
+        # reliable and instant.
+        $out = (& $ise ts appxfolder:Temp $device $productId $snap 2>&1 | Out-String)
+        $found = @(Get-ChildItem -Path $snap -Recurse -Filter "phirura.log" -ErrorAction SilentlyContinue)
+        if ($found.Count -gt 0) {
+            $text = [System.IO.File]::ReadAllText($found[0].FullName)
             break
         }
-        Start-Sleep -Milliseconds 700
+        if ($try -eq 10) {
+            Write-Warning ("poll {0}: 10 attempts, last said: {1}" -f $polls, ($out -replace '\s+', ' ').Trim())
+        }
+        Start-Sleep -Milliseconds 900
     }
 
     if ($null -ne $text) {
@@ -92,13 +112,15 @@ while ($true) {
     # cannot be used here (it fails closed on a >50-file directory, which this always is), so the
     # delete is done through .NET - and bounded to the scratch root this script created, checked
     # explicitly rather than assumed, so a bug in the path maths cannot reach anything else.
-    if (Test-Path $snap) {
-        $full = [System.IO.Path]::GetFullPath($snap)
-        $root = [System.IO.Path]::GetFullPath($work)
-        if ($full.StartsWith($root + [System.IO.Path]::DirectorySeparatorChar)) {
-            try { [System.IO.Directory]::Delete($full, $true) } catch { }
-        } else {
-            Write-Warning "refusing to clean a snapshot outside $root : $full"
+    foreach ($snap in $snaps) {
+        if (Test-Path $snap) {
+            $full = [System.IO.Path]::GetFullPath($snap)
+            $root = [System.IO.Path]::GetFullPath($work)
+            if ($full.StartsWith($root + [System.IO.Path]::DirectorySeparatorChar)) {
+                try { [System.IO.Directory]::Delete($full, $true) } catch { }
+            } else {
+                Write-Warning "refusing to clean a snapshot outside $root : $full"
+            }
         }
     }
     Start-Sleep -Seconds $Seconds

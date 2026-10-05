@@ -85,6 +85,37 @@ the UI thread). **`edit` is flaky on `GamePage.xaml.cs`** — retry 1–4 times,
 **moved all 13 `Phirura.Shared/{Core,Parse,Game}` sources into `<ws>/trash/`**. Use `os.replace()`/
 `mv`; if a build reports missing files, **check `<ws>/trash/` first**.
 
+## R55 — the four symptoms after the first gameplay round
+
+1. **Texture registry cap.** `TEX_SLOTS` was 128 and the chart needs 194; the log said
+   `128 registered, 66 dropped`. **A dropped texture is invisible, never an error** — that is what
+   "the images don't display" was. Now 512 slots (14 KB) and `TEX_MAX_BYTES` 64 MiB (the 32 MiB
+   ceiling was also binding: ~37 MiB of unique content). Verified on device: `119 registered,
+   0 dropped`. `wp81_texture_drop_info(index)` + `PrprPort.TextureSummary()` print the reason.
+2. **Record strides are a pair.** Adding a field to `PortVertex` (alpha) without moving
+   `PortVertex`/`VertexStride`/`ReadVertex` made every geometry triangle read `a = 0`, so the
+   renderer's transparent-guard skipped *all* of it — notes, HUD and text gone while judge lines
+   (a different command kind) drew fine. `WireLayoutOk()` existed but was only reachable from the
+   unused `DrainSelfTest`. **It is now asserted at startup and printed every run**
+   (`wire layout ok=True cmdStride=56/56 vertexStride=36/36`) — check that line first when geometry
+   disappears.
+3. **Touch: `_started` is a chart-path flag.** `if (_paused || _finished || !_started) return;` in
+   `OnPointerPressed` dropped every tap in phira mode, where `StartPlayback` never runs. Now an
+   `InputLive` property (`_rustCreated` on the Rust path, `_started` on the chart path), and the
+   press is logged *before* the guard so a dropped press is visible.
+4. **Lag had three causes:** `PushRustTouches` duplicated drain+draw+present (2× per frame);
+   `FillPortTriangle` leaked a `CanvasGeometry` per untextured triangle per frame (78→26 fps over
+   10 min); `ReadF` allocated a byte[] per field (tens of thousands per frame). All fixed, plus the
+   drain buffers are reused and the two triangles of a quad now draw once.
+5. **AppLog rotation** used to delete and recreate past 256 KB, losing the *beginning* of a long
+   run. It keeps the tail now.
+
+**`rust-wp81/tail-log.ps1` is the runtime-log answer** (no debugger on WP8.1): poll `ISETool ts`,
+print the delta. Each attempt needs a **fresh** destination directory (a failed attempt leaves one
+behind, so reusing a name makes every retry fail identically), and the lock correlates with logging
+activity, so it retries 10× per poll. It copies the whole 22 MB store per poll — 5 s is the sane
+interval.
+
 ## Next steps
 Stage 3: port prpr scene draw calls — vertex stride **36 B** (`pos3(12)+uv2(8)+rgba4(16)`, `z` kept 0),
 `MAX_VERTICES=65536` → ~2.3 MB dynamic buffer (stride 32 is wrong). Scene is all macroquad

@@ -75,6 +75,29 @@
                 HorizontalAlignment="Left" VerticalAlignment="Top" Margin="14,10,0,0"
                 Click="PauseButton_Click" />
 
+        <!--
+            On-screen log.
+
+            A deployed WP8.1 app has no live console and no attached debugger, so seeing a line as it
+            happens means either pulling the isolated store - slow, and the file is locked whenever
+            the app is logging, which is exactly when it is interesting - or rendering it here. This
+            is the second one: the same strings AppLog writes to phirura.log, held in a ring buffer
+            and shown on demand.
+
+            Collapsed by default, and the panel itself is never hit-testable so it cannot steal a
+            gameplay touch. The button sits beside the pause button in the one corner the playfield
+            does not use.
+        -->
+        <Button x:Name="LogToggleButton" Content="LOG" FontSize="12" Width="46" Height="40"
+                HorizontalAlignment="Left" VerticalAlignment="Top" Margin="72,10,0,0"
+                Click="LogToggle_Click" />
+
+        <Grid x:Name="LogOverlay" Visibility="Collapsed" IsHitTestVisible="False"
+              Background="#CC07070B" VerticalAlignment="Bottom" MaxHeight="320">
+            <TextBlock x:Name="LogOverlayText" FontSize="10" Foreground="#FFB9E7B9"
+                       TextWrapping="NoWrap" Margin="6,4,6,4" />
+        </Grid>
+
         <!-- Pause overlay -->
         <Grid x:Name="PauseOverlay" Background="#CC000000" Visibility="Collapsed">
             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
