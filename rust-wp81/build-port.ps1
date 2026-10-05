@@ -225,6 +225,10 @@ $exports = @(
     "wp81_texture_write_count",
     # the game host - see `wp81_game_*`, which runs the real prpr scene
     "wp81_game_create",
+    # Boot phira itself (`MainScene` + its library UI) instead of a chart - ARM-only, see the export.
+    # Present on the phone build, absent from the desktop harness, which is why this list is not
+    # shared with `build-m1.ps1`.
+    "wp81_phira_boot",
     "wp81_game_frame",
     "wp81_game_destroy",
     "wp81_game_frames",

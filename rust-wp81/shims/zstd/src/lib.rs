@@ -28,18 +28,20 @@
 //! `decode_all` with an error and rebuild - the graceful direction. The reverse direction is the
 //! dangerous one, and it cannot happen here.)
 
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 
-/// Reads `source` and returns it unchanged in `W`.
+/// Reads `source` and returns it unchanged.
 ///
-/// `W: Default` rather than a way to build `W` from the bytes, because that is the only bound a
-/// generic `Write` does not already give: the sole call site infers `W = Vec<u8>` (it calls
-/// `.len()` and `extend_from_slice(&..)` on the result), and `Vec<u8>` implements both.
-pub fn encode_all<R: Read, W: Write + Default>(mut source: R, _level: i32) -> io::Result<W> {
-    let mut raw = Vec::new();
-    source.read_to_end(&mut raw)?;
-    let mut out = W::default();
-    out.write_all(&raw)?;
+/// Upstream's signature, taken from `zstd-0.13.3/src/functions.rs:32`:
+/// `pub fn encode_all<R: io::Read>(source: R, level: i32) -> io::Result<Vec<u8>>` - **not**
+/// generic over the output type. The `W: Write + Default` version this started as left `W`
+/// unconstrained at the call site (`censor::write_cache` only calls `.len()` and passes
+/// `&compressed` to `extend_from_slice`), inference fell the variable back to `!`, and every
+/// subsequent use failed against `!: Write` / `!: Default` / "no method `len` for type `!`".
+/// Keeping the return type concrete is the fix; there is no second call site to serve.
+pub fn encode_all<R: Read>(mut source: R, _level: i32) -> io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    source.read_to_end(&mut out)?;
     Ok(out)
 }
 

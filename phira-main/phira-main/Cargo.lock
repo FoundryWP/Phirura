@@ -2813,6 +2813,7 @@ dependencies = [
  "glyph_brush",
  "libm",
  "macroquad",
+ "phira",
  "pollster",
  "prpr",
  "tracing",
@@ -3052,6 +3053,7 @@ name = "reqwest"
 version = "0.13.2"
 dependencies = [
  "bytes",
+ "futures-core",
  "serde",
  "serde_json",
  "url",
@@ -4492,6 +4494,9 @@ dependencies = [
 [[package]]
 name = "wp81-compat"
 version = "0.1.0"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "writeable"

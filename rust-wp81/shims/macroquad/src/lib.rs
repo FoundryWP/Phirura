@@ -634,6 +634,144 @@ impl QuadGl {
     pub fn set_uniform<T>(&self, _name: &str, _value: T) {}
 }
 
+/// Storage and the frame handshake for an application the shell pumps.
+///
+/// # Why it exists
+///
+/// Upstream, `macroquad::Window::from_config(conf, fut)` *runs* `fut`: it owns the frame loop and
+/// does not return until the app exits. It cannot do that here, because the shell owns the loop -
+/// `wp81_game_frame` arrives once per display frame from the UI thread
+/// (`CompositionTarget.Rendering`) and expects draw commands back. So `from_config` stores the
+/// future and returns, and the shell polls it: one poll per frame.
+///
+/// `next_frame()` is the hinge (see `crate::window::next_frame`). `the_main`'s `'app: loop` ends
+/// with `next_frame().await`, so a poll that finds the park flag clear stops there with `Pending`,
+/// which hands control back to the shell having run exactly one `main.update()`/`main.render()`
+/// iteration. Without that park a single poll would spin the whole loop and never return; with it
+/// unconditional, the app would stall on frame one.
+///
+/// # Why a flag rather than a `Waker`
+///
+/// Nothing ever needs waking: the shell polls unconditionally on its own schedule, once per frame.
+/// A `Waker` would only be correct if some other party owned the decision to resume, and the point
+/// of this design is that none does. So `poll` drives with a no-op waker and keeps no state that
+/// outlives the call - which is also why nothing here needs `unsafe` or a pin projection.
+///
+/// # Why not `Send`
+///
+/// The future is created, stored, polled and dropped on the one thread the shell calls in on
+/// (`host::GAME` is `thread_local!` for the same reason). Requiring `Send` would force `the_main`
+/// to be `Send`, and its `mpsc`/`Mutex` guards have no reason to be.
+pub mod app {
+    use core::cell::{Cell, RefCell};
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll, Waker};
+
+    type Boxed = Pin<Box<dyn Future<Output = ()>>>;
+
+    thread_local! {
+        static APP: RefCell<Option<Boxed>> = RefCell::new(None);
+        // The three flags are `Cell`, not `RefCell`: each is a single `bool` read and written
+        // through `get`/`set` with no borrow guard to carry, and `RefCell` has no `get`/`set` at
+        // all - only `borrow`. Using it here would buy a runtime check on an access that cannot
+        // conflict, since none of them is ever held across a `poll`.
+        /// Set while an `await` on `next_frame` has parked and not yet been resumed.
+        static PARKED: Cell<bool> = Cell::new(false);
+        /// Set the first time the app parks: that is the signal that construction finished.
+        static REACHED: Cell<bool> = Cell::new(false);
+        /// Set once the app future completes, so later polls are not attempted.
+        static EXITED: Cell<bool> = Cell::new(false);
+    }
+
+    /// Hand the application future over. Called by `Window::from_config`.
+    pub fn store(fut: Boxed) {
+        APP.with(|a| *a.borrow_mut() = Some(fut));
+        PARKED.with(|p| p.set(false));
+        REACHED.with(|r| r.set(false));
+        EXITED.with(|e| e.set(false));
+    }
+
+    /// Whether an application is present and has not finished.
+    pub fn is_running() -> bool {
+        APP.with(|a| a.borrow().is_some()) && !EXITED.with(|e| e.get())
+    }
+
+    /// Whether the app has reached its first `next_frame().await`.
+    ///
+    /// This is what tells `boot` that setup is done. Everything before the `'app: loop` is served
+    /// synchronously by the shell hooks (`load_file`, `load_image`, the texture registry), so the
+    /// first park is the end of construction. A run that never parks is waiting for something this
+    /// thread will never deliver - which is why `boot` gives up after a bounded number of polls
+    /// rather than spinning.
+    pub fn reached_first_frame() -> bool {
+        REACHED.with(|r| r.get())
+    }
+
+    /// Whether the application future has completed (`the_main` returned).
+    pub fn has_exited() -> bool {
+        EXITED.with(|e| e.get())
+    }
+
+    /// Poll the application once.
+    ///
+    /// The future is taken out of the cell rather than borrowed across the `poll`, because a future
+    /// may call back into `app::store` (a restart would) and a `RefCell` borrow held over its own
+    /// execution would turn that into a panic instead of a working restart.
+    pub fn poll() -> Poll<()> {
+        if EXITED.with(|e| e.get()) {
+            return Poll::Ready(());
+        }
+        let mut fut = APP.with(|a| a.borrow_mut().take());
+        let out = match fut.as_mut() {
+            Some(f) => {
+                let mut cx = Context::from_waker(Waker::noop());
+                f.as_mut().poll(&mut cx)
+            }
+            // No application at all: report "nothing happened" rather than "it finished", so a
+            // caller cannot mistake an empty slot for a clean exit.
+            None => return Poll::Pending,
+        };
+        match out {
+            Poll::Ready(()) => {
+                drop(fut);
+                EXITED.with(|e| e.set(true));
+                Poll::Ready(())
+            }
+            Poll::Pending => {
+                APP.with(|a| *a.borrow_mut() = fut);
+                Poll::Pending
+            }
+        }
+    }
+
+    /// Called by `next_frame()` when it parks: this frame's work is over.
+    pub(crate) fn park() {
+        PARKED.with(|p| p.set(true));
+        REACHED.with(|r| r.set(true));
+    }
+
+    /// Called by `next_frame()` on every poll. `true` means "this is the resume - carry on";
+    /// `false` means "park".
+    pub(crate) fn take_park() -> bool {
+        PARKED.with(|p| p.replace(false))
+    }
+
+    /// Forget the application entirely. Called by `host::destroy`.
+    ///
+    /// Dropping the future *is* the teardown: it owns `Main`, the `TextPainter` and every scene
+    /// reachable from `the_main`'s stack frame, so nothing else is left holding them. The handshake
+    /// flags reset with it, because a fresh boot must not inherit a park left over from the run it
+    /// replaced - `reached_first_frame` reading `true` from the previous app would tell `boot_phira`
+    /// construction had finished when it had not even started.
+    pub fn drop_app() {
+        APP.with(|a| *a.borrow_mut() = None);
+        PARKED.with(|p| p.set(false));
+        REACHED.with(|r| r.set(false));
+        EXITED.with(|e| e.set(false));
+    }
+}
+
 pub mod window {
     use super::*;
 
@@ -642,7 +780,12 @@ pub mod window {
     pub use super::gl_set_drawcall_buffer_capacity;
 
     /// Re-exported here as well: `prpr` imports `macroquad::window::miniquad`.
-    pub use miniquad;
+    ///
+    /// `::miniquad` rather than plain `miniquad`: `use super::*` above already brings a `miniquad`
+    /// name into scope from the crate root, so the bare form is ambiguous between that and the
+    /// `--extern` crate - which the compiler currently accepts only as a deprecation warning
+    /// ("will become a hard error in a future release"), and this toolchain is a rolling nightly.
+    pub use ::miniquad;
 
     pub struct Conf {
         pub window_title: String,
@@ -684,12 +827,33 @@ pub mod window {
     pub struct Window;
 
     impl Window {
-        pub fn from_config<F>(_conf: Conf, _fut: F)
+        /// Store the application for the shell to pump, then return.
+        ///
+        /// Upstream this *runs* the future to completion - it is macroquad's frame loop - and does
+        /// not return until the app exits. It has to return immediately here: the caller is on the
+        /// UI thread, and blocking it would freeze the phone. See [`crate::app`] for the handshake
+        /// that makes the shell the loop instead.
+        ///
+        /// `+ 'static` is not a new restriction in practice - upstream boxes the future into an
+        /// owned task too. It is written out because the value is *stored*, and a stored value
+        /// cannot borrow from a scope that has ended.
+        pub fn from_config<F>(_conf: Conf, fut: F)
         where
-            F: core::future::Future<Output = ()>,
+            F: core::future::Future<Output = ()> + 'static,
         {
+            crate::app::store(Box::pin(fut));
         }
     }
+
+    /// Upstream asks the OS to change the window between windowed and fullscreen. WP8.1 WinRT
+    /// applications are fullscreen by definition and the shell owns the swapchain, so there is no
+    /// mode to change: the call is accepted and dropped.
+    ///
+    /// It still has to exist rather than be deleted from the caller, because `phira`'s settings
+    /// page guards it with `#[cfg(all(any(target_os = "windows", target_os = "linux"), not(target_env = "ohos")))]`
+    /// (`page/settings.rs:482`) - and `thumbv7a-pc-windows-msvc` *is* `target_os = "windows"`,
+    /// so the block compiles here and reaches this function.
+    pub fn set_fullscreen(_fullscreen: bool) {}
 
     #[derive(Default)]
     pub struct Platform {
@@ -784,8 +948,37 @@ pub mod window {
         crate::transform::set_default_camera()
     }
     pub fn request_new_screen_size(_w: f32, _h: f32) {}
+    /// The frame boundary: park the current frame's work and hand control back to the shell.
+    ///
+    /// Upstream this yields to macroquad's frame loop, which resumes it on the next tick. Here the
+    /// shell *is* the loop, so the first poll parks (`Pending`, with no waker - see [`crate::app`]
+    /// for why nothing needs one) and the shell's next `wp81_game_frame` polls the application
+    /// again, which polls this a second time; that resume returns `Ready` and the `'app: loop`
+    /// runs one more iteration.
+    ///
+    /// The flag is what makes "one shell call == one loop iteration" hold. Returning `Ready`
+    /// straight away - what this did while `phira` was only being type-checked, with the future
+    /// thrown away - would let a single poll spin `'app` forever and never return to the shell.
+    ///
+    /// Its only caller in this workspace is `phira::the_main` (line 297); `prpr` never calls it,
+    /// so nothing outside the loop can perturb the park flag.
     pub fn next_frame() -> impl core::future::Future<Output = ()> {
-        core::future::ready(())
+        struct NextFrame;
+        impl core::future::Future for NextFrame {
+            type Output = ();
+            fn poll(
+                self: core::pin::Pin<&mut Self>,
+                _cx: &mut core::task::Context<'_>,
+            ) -> core::task::Poll<()> {
+                if crate::app::take_park() {
+                    core::task::Poll::Ready(())
+                } else {
+                    crate::app::park();
+                    core::task::Poll::Pending
+                }
+            }
+        }
+        NextFrame
     }
     pub fn clear_background(_c: Color) {}
 }
@@ -2591,6 +2784,18 @@ pub mod color {
 
 pub mod texture {
     pub use super::{DrawTextureParams, FilterMode, Image, ImageFormat, RenderTarget, Texture2D};
+
+    /// File -> pixels -> GPU handle, which is exactly the pair `prpr` writes out itself
+    /// (`scene.rs:407`: `SafeTexture::from(Texture2D::from_image(&load_image($path).await?))`).
+    /// `phira` asks for the composed form instead - `icons.rs` loads eleven UI icons through it and
+    /// `scene/main.rs` four more - and every result is `.into()` a `SafeTexture`.
+    ///
+    /// The error is the crate-root `Error` rather than upstream's `FileError`: nothing names the
+    /// type (both callers only `?` it into `anyhow::Result`), and one error type for "could not
+    /// read it" and "could not decode it" is what `load_image` already produces.
+    pub async fn load_texture(path: &str) -> Result<Texture2D, super::Error> {
+        Ok(Texture2D::from_image(&super::load_image(path).await?))
+    }
 }
 
 pub mod math {
@@ -2699,7 +2904,21 @@ pub async fn load_image(path: &str) -> Result<Image, Error> {
     })
 }
 
+/// Re-exports of miniquad's log macros, mirroring upstream (`macroquad/src/lib.rs:136`) - which
+/// puts them behind `#[cfg(not(feature = "log-rs"))]` because the alternative is for miniquad to
+/// provide them. Neither crate has that feature here, so this is unconditional.
+///
+/// The definitions live in `miniquad`, not here: this is a re-export, and a `macro_rules!` can only
+/// be `#[macro_export]`ed from the crate that defines it.
+pub mod logging {
+    pub use miniquad::{debug, error, info, trace, warn};
+}
+
 pub mod prelude {
+    /// The five log macros, globbed in exactly as upstream's prelude does (`prelude.rs:23`). This
+    /// is where `phira`'s bare `warn!(...)` in `scene/main.rs`, `page/message.rs` and
+    /// `page/library.rs` resolves from - all three import only `macroquad::prelude::*`.
+    pub use super::logging::*;
     pub use super::color::*;
     pub use super::glam;
     pub use super::utils;

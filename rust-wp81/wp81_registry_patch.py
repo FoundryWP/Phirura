@@ -88,6 +88,39 @@ ARM_CFG_TARGETS = (
     ("System/WindowsProgramming/mod.rs", "DELAYLOAD_INFO"),
 )
 
+# Pass 3: textual substitutions, as (crate directory prefix, find, replace).
+#
+# `xxhash-rust`'s NEON path assumes aarch64: `StripeLanes` names
+# `core::arch::aarch64::uint8x16_t` with no architecture guard at all, and the intrinsics the path
+# then uses (`vld1q_u8!`, `vreinterpretq_u64_u8`, `uint64x2_t`) are gated behind
+# `stdarch_arm_neon_intrinsics`, which is *still unstable on 32-bit ARM*. So on `thumbv7a` - which
+# does enable `+neon`, because ARMv7-A has it - that path cannot compile, and 43 errors say so.
+#
+# The crate already ships a complete scalar fallback (`accumulate_512_scalar`,
+# `scramble_acc_scalar`, and the dispatcher that selects them), every one of them guarded by
+# `not(..., target_feature = "neon", ...)`. Qualifying each `neon` test with
+# `not(target_arch = "arm")` therefore selects the scalar path, and the now-undefined `StripeLanes`
+# stops being referenced because every user of it is behind one of the SIMD guards.
+#
+# The substitution is written to be valid in both positions it occurs in: as the whole body of
+# `cfg(target_feature = "neon")` and nested inside `not(any(..., target_feature = "neon", ...))`.
+# One replacement string handles all 12 sites.
+#
+# Why not teach the crate arm32 NEON instead? That needs `#![feature(stdarch_arm_neon_intrinsics)]`
+# in a registry crate, which ties the build to whatever the rolling nightly currently calls that
+# feature - a silent break on someone else's schedule. xxhash here hashes cache keys, where the
+# scalar path's only cost is time, and it is not on any path that matters.
+TEXT_REPLACEMENTS = (
+    (
+        "xxhash-rust-",
+        'target_feature = "neon"',
+        'all(target_feature = "neon", not(target_arch = "arm"))',
+    ),
+)
+
+# Derived so `targets()` and the substitution loop cannot drift apart.
+TEXT_CRATES = tuple(p for p, _f, _r in TEXT_REPLACEMENTS)
+
 ARM_CFG_OLD = '#[cfg(target_arch = "x86")]'
 ARM_CFG_NEW = '#[cfg(any(target_arch = "x86", target_arch = "arm"))]'
 
@@ -223,7 +256,7 @@ def targets():
             roots.append(sub)
     for base in roots:
         for entry in sorted(os.listdir(base)):
-            if not entry.startswith(TARGET_CRATES + ARM_CFG_CRATES):
+            if not entry.startswith(TARGET_CRATES + ARM_CFG_CRATES + TEXT_CRATES):
                 continue
             root = os.path.join(base, entry)
             if not os.path.isdir(root):
@@ -244,11 +277,12 @@ def main(argv):
     files = targets()
     if not files:
         print("no targeted crates under " + REGISTRY_SRC, file=sys.stderr)
-        print("(expected which-*, getrandom-* or windows-sys-*; is CARGO_HOME set?)", file=sys.stderr)
+        print("(expected which-*, getrandom-*, windows-sys-* or xxhash-rust-*; is CARGO_HOME set?)", file=sys.stderr)
         return 1
 
     total = 0
     arm_total = 0
+    text_total = 0
     touched = []
     for p in files:
         try:
@@ -276,16 +310,38 @@ def main(argv):
                 new_text, added = widen_arm_cfgs(new_text, name)
                 m += added
 
-        if n == 0 and m == 0:
+        # Pass 3 - textual substitutions. Off the crate directory prefix, so it can only ever fire
+        # in the crates listed in TEXT_REPLACEMENTS, and only in `.rs` files.
+        t = 0
+        if p.endswith(".rs"):
+            segs = re.split(r"[/\\]", p)
+            for prefix, find, repl in TEXT_REPLACEMENTS:
+                if not any(s.startswith(prefix) for s in segs):
+                    continue
+                # The replacement necessarily still contains `find` - the cfg test itself has to
+                # survive inside it - so a plain str.replace would fire again on its own output and
+                # nest one more all(...) per run. What follows `find` inside `repl` is exactly what
+                # an already-applied site looks like, so match `find` only where that tail is
+                # absent. The guard and the idempotency check are then the same thing: a re-run
+                # finds 0 sites and leaves the file byte-identical.
+                tail = repl[repl.index(find) + len(find):]
+                rx = re.compile(re.escape(find) + "(?!" + re.escape(tail) + ")")
+                new_text, added = rx.subn(lambda _m: repl, new_text)
+                t += added
+
+        if n == 0 and m == 0 and t == 0:
             continue
 
         if n:
             print("%-58s %d raw-dylib attr(s)" % (rel, n))
         if m:
             print("%-58s %d arch cfg(s) widened for arm" % (rel, m))
+        if t:
+            print("%-58s %d substitution(s) for arm" % (rel, t))
         touched.append(rel)
         total += n
         arm_total += m
+        text_total += t
         if new_text != text and args.apply:
             try:
                 os.chmod(p, 0o666)
@@ -298,8 +354,10 @@ def main(argv):
           % (len(touched), total, "stripped" if args.apply else "would be stripped"))
     if arm_total:
         print("%d arch cfg(s) %s" % (arm_total, "widened for arm" if args.apply else "would be widened for arm"))
+    if text_total:
+        print("%d substitution(s) %s" % (text_total, "applied" if args.apply else "would be applied"))
 
-    if args.check and total == 0 and arm_total == 0:
+    if args.check and total == 0 and arm_total == 0 and text_total == 0:
         print("\nNOTE: nothing to strip. Either the patch is already applied, or the crates' "
               "attribute text changed shape and this script no longer recognises it - which "
               "would put kernel32.dll back in the import table. Verify with check_imports.py "

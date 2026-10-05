@@ -86,3 +86,13 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # unchanged: it still passes no flags, and the thumbv7a JSON target reports `arch = "arm"`.
 [target.'cfg(target_arch = "arm")'.dependencies]
 wp81-compat = { path = "../../../rust-wp81/compat" }
+
+# The phone runs phira itself: `host::boot_phira` boots phira's `MainScene` and the shell then
+# pumps `the_main` one loop iteration per `wp81_game_frame` (see `macroquad::app`). ARM-gated for
+# the same reason `wp81-compat` is - the desktop harness drives `GameScene` directly through the
+# legacy path, and pulling phira into the host graph would make that build depend on every one of
+# phira's own platform assumptions having a desktop answer, which is not what the harness is for.
+#
+# `default-features = false` drops `video`, phira's only default feature: it turns on `prpr/video`
+# and `prpr-avc`, a video decoder this target does not have. The probe checks phira the same way.
+phira = { path = "../phira", default-features = false }

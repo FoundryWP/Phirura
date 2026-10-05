@@ -54,7 +54,13 @@ once_cell = { workspace = true }
 phira-mp-client = { workspace = true }
 phira-mp-common = { workspace = true }
 pollster = { workspace = true }
-prpr = { workspace = true, features = ["log"], default-features = false }
+# The `log` feature compiles `prpr/src/log.rs`: a tracing subscriber that writes ANSI-coloured text
+# to a terminal (`colored`). Nothing in this workspace has ever called its only entry point,
+# `prpr::log::register()` - not phira, not prpr itself - and WP8.1 has no terminal to write to, so
+# keeping it on would only drag `tracing-subscriber` + `colored` into the ARM DLL as dead code.
+# `prpr-port` already builds prpr with `default-features = false`, which drops `log`; this line was
+# the one place turning it back on.
+prpr = { workspace = true, default-features = false }
 prpr-l10n = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }

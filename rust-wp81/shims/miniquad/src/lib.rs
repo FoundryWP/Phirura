@@ -1021,3 +1021,45 @@ where
     F: 'static + FnMut(&mut Context),
 {
 }
+
+// ===========================================================================
+// logging macros
+// ===========================================================================
+
+/// `miniquad`'s five log macros, which upstream defines so that `macroquad::logging` can re-export
+/// them (`macroquad/src/lib.rs:137`) and `macroquad::prelude` can glob them - and the prelude is
+/// where `phira`'s `warn!(...)` in `scene/main.rs`, `page/message.rs` and `page/library.rs` gets
+/// them from. They must be macros, not functions: the call sites pass format strings.
+///
+/// Both halves are here rather than in `macroquad` because that is where upstream keeps them - a
+/// `macro_rules!` has to be `#[macro_export]` from the crate that names it, and
+/// `pub use miniquad::{debug, ...}` is a *re-export*, not a definition.
+///
+/// The bodies forward to `eprintln!` with a level prefix. WP8.1 has no terminal and
+/// `HostCallbacks` has no log sink yet, so on the phone this formats and nobody reads it; the
+/// calls sit on error paths rather than per frame, and the desktop harness does capture stderr,
+/// so the cost is kept instead of making the macros silent.
+#[macro_export]
+macro_rules! debug {
+    ($($t:tt)*) => { ::std::eprintln!("[debug] {}", ::std::format_args!($($t)*)) };
+}
+
+#[macro_export]
+macro_rules! info {
+    ($($t:tt)*) => { ::std::eprintln!("[info] {}", ::std::format_args!($($t)*)) };
+}
+
+#[macro_export]
+macro_rules! trace {
+    ($($t:tt)*) => { ::std::eprintln!("[trace] {}", ::std::format_args!($($t)*)) };
+}
+
+#[macro_export]
+macro_rules! warn {
+    ($($t:tt)*) => { ::std::eprintln!("[warn] {}", ::std::format_args!($($t)*)) };
+}
+
+#[macro_export]
+macro_rules! error {
+    ($($t:tt)*) => { ::std::eprintln!("[error] {}", ::std::format_args!($($t)*)) };
+}

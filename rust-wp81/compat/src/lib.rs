@@ -36,6 +36,10 @@
 mod generated_api;
 pub use generated_api::*;
 
+// The C math library, for a link with no CRT - see the module for why it is a whole file.
+mod math;
+pub use math::*;
+
 use core::ffi::c_void;
 
 // ---------------------------------------------------------------------------
@@ -465,6 +469,73 @@ pub unsafe extern "system" fn ProcessPrng(pbdata: *mut u8, cbdata: usize) -> BOO
     core::ptr::addr_of_mut!(WP81_PRNG_STATE).write(state);
     TRUE
 }
+
+// ---------------------------------------------------------------------------
+// The IAT slots `getrandom` expects.
+//
+// getrandom 0.2.17's Windows backend (`src/windows.rs`) declares `BCryptGenRandom` and
+// `SystemFunction036` inside `#[link(name = ...)]` blocks and reaches them through
+// `__imp_<name>`, the address-in-import-table cell. Neither import library can be on this link:
+// the WP8.1 kit ships no `bcrypt.lib` at all, and `advapi32.dll` is exactly the thing
+// `check_imports.py` exists to reject.
+//
+// So both cells are defined here instead, holding the address of functions built on the RNG
+// `ProcessPrng` already owns - the same `bcryptprimitives.dll` lookup, the same software
+// fallback. The caller does `ldr rX, =__imp_Foo; ldr rX, [rX]; blx rX`, so all it needs is a
+// readable pointer-sized cell with the right address in it; whether that cell sits in `.idata`
+// where a real import would live or in `.rdata` next to our own code is not visible to it.
+//
+// The bare names are exported too, although nothing references them today: the other two
+// `getrandom` versions in this graph (0.3 and 0.4) reach the same function by a different access
+// path, and four lines here covers both shapes rather than waiting for a later build to name the
+// third.
+//
+// Signatures are the ones `getrandom` compiled against. `_h_algorithm` is ignored because
+// `BCRYPT_USE_SYSTEM_PREFERRED_RNG` means "use the system RNG", and a null algorithm handle is
+// what that flag asks for.
+// ---------------------------------------------------------------------------
+
+/// Returns 0 (`STATUS_SUCCESS`) when the buffer is filled. The failure value has the top two bits
+/// set, which is the test `getrandom` applies (`if ret >> 30 == 0b11`) before falling back to
+/// `SystemFunction036` - so an unfillable buffer is reported instead of silently staying zeros.
+#[no_mangle]
+pub unsafe extern "system" fn BCryptGenRandom(
+    _h_algorithm: *mut c_void,
+    buffer: *mut u8,
+    len: u32,
+    _flags: u32,
+) -> i32 {
+    if ProcessPrng(buffer, len as usize) != 0 {
+        0
+    } else {
+        // 0xC000_0001, `STATUS_UNSUCCESSFUL`.
+        0xC000_0001u32 as i32
+    }
+}
+
+/// `SystemFunction036` - `RtlGenRandom`, the fallback `getrandom` tries. Returns non-zero on
+/// success, which is the polarity its caller checks (`if ret != 0 { continue; }`).
+#[no_mangle]
+pub unsafe extern "system" fn SystemFunction036(buffer: *mut c_void, len: u32) -> u8 {
+    if buffer.is_null() {
+        return 0;
+    }
+    if ProcessPrng(buffer as *mut u8, len as usize) != 0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// The import-table cell for `BCryptGenRandom`.
+#[no_mangle]
+pub static __imp_BCryptGenRandom: unsafe extern "system" fn(*mut c_void, *mut u8, u32, u32) -> i32 =
+    BCryptGenRandom;
+
+/// The import-table cell for `SystemFunction036`.
+#[no_mangle]
+pub static __imp_SystemFunction036: unsafe extern "system" fn(*mut c_void, u32) -> u8 =
+    SystemFunction036;
 
 // ===========================================================================
 // NT file API -> Win32 file API.

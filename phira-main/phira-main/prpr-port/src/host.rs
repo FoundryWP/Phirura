@@ -192,6 +192,14 @@ thread_local! {
 
     /// The chart descriptor, kept alive for the lifetime of the game.
     static INFO: RefCell<Option<ChartInfo>> = const { RefCell::new(None) };
+
+    /// Frames pumped through phira's own loop.
+    ///
+    /// The mirror of `Hosted::frames` for the path where `Main` lives *inside* the app future
+    /// rather than in a slot this module owns, so the counter cannot ride along on it. Without
+    /// this, `frames()` would have to answer `-1` for a running phira - which is exactly what the
+    /// shell reads as "nothing started".
+    static PHIRA_FRAMES: Cell<u64> = const { Cell::new(0) };
 }
 
 /// How far `create` has got, so the shell can sample it *while* it runs.
@@ -222,6 +230,12 @@ pub mod progress {
     pub const INFO_READY: u32 = 4;
     /// `GameScene::new` - chart parse, every texture, the whole respack.
     pub const SCENE_BUILDING: u32 = 5;
+    /// Inside `boot_phira`: phira's entry has been called and its own construction is being
+    /// pumped to the first `next_frame`. Its phases are phira's, not ours, so this is one step
+    /// rather than a sequence - what the shell can tell is *whether* construction is under way.
+    pub const PHIRA_BOOTING: u32 = 6;
+    /// phira's `MainScene` exists and the app is parked at its first frame, ready to be pumped.
+    pub const PHIRA_READY: u32 = 7;
 }
 
 #[inline]
@@ -464,39 +478,141 @@ fn font_fallback() -> glyph_brush::ab_glyph::FontArc {
 /// `wp81_draw_*`.
 ///
 /// Returns the number of draw commands the frame produced, or a negative code when nothing runs.
+/// Boot phira itself rather than a chart: build its `MainScene` and leave it parked, ready to be
+/// pumped by [`frame`].
+///
+/// This is the "start straight into Rust phira" path. Where [`create`] builds a `GameScene` from a
+/// chart the shell located, this runs phira's own `the_main` - data directory, fonts, the library
+/// UI - and stops at the first `next_frame().await`, because from there the shell owns the clock.
+///
+/// # Why the boot is pumped rather than blocked on
+///
+/// `the_main` is async, and nothing here may block the thread it runs on: that is the UI thread,
+/// the same one `CompositionTarget.Rendering` calls `wp81_game_frame` from, so blocking it freezes
+/// the phone rather than waiting politely. Every await phira makes before its loop is served
+/// synchronously by the shell hooks (`load_file`, `load_image`, the texture registry), so polling
+/// until it parks is not a workaround for missing async - it is the actual shape of the work. The
+/// bound exists because a run that *never* parks is waiting for something this thread will never
+/// deliver, and an unbounded loop there would freeze instead of report.
+///
+/// Returns [`GAME_OK`], or the same negative codes [`create`] uses: the shell already knows how to
+/// print those, and `-2` carries the reason through `wp81_game_error`.
+#[cfg(target_arch = "arm")]
+pub fn boot_phira() -> i32 {
+    step(progress::ENTERED);
+    if GAME.with(|g| g.borrow().is_some()) || macroquad::app::is_running() {
+        return GAME_ERR_ALREADY;
+    }
+    clear_error();
+    step(progress::PHIRA_BOOTING);
+
+    let res = std::panic::catch_unwind(|| {
+        phira::boot();
+
+        for _ in 0..BOOT_POLLS {
+            if macroquad::app::reached_first_frame() {
+                return Ok(());
+            }
+            if let std::task::Poll::Ready(()) = macroquad::app::poll() {
+                return Err("the application exited before its first frame".to_owned());
+            }
+        }
+        Err(format!(
+            "phira never reached its first frame (reached={}, exited={})",
+            macroquad::app::reached_first_frame(),
+            macroquad::app::has_exited()
+        ))
+    });
+
+    match res {
+        Ok(Ok(())) => {
+            // phira's *first* poll runs a whole loop iteration before parking, so the queue
+            // already holds one frame's worth of commands. Drop them: they belong to no
+            // `wp81_game_frame`, and leaving them would make the shell's first read look like it
+            // had drawn something before ever being asked to.
+            macroquad::draw::drain_reset();
+            step(progress::PHIRA_READY);
+            GAME_OK
+        }
+        Ok(Err(msg)) => {
+            set_error(msg);
+            GAME_ERR_PARSE
+        }
+        Err(_) => GAME_ERR_PANIC,
+    }
+}
+
+/// How many polls `boot_phira` gives phira's construction before calling it stuck.
+///
+/// One is the expected number - every await before the loop resolves synchronously - so this is
+/// not a timeout, it is a ceiling on how long a *broken* boot may hold the UI thread. 64 is
+/// arbitrary but small: the shell's next frame arrives ~16 ms later, and construction needing more
+/// than 64 resumptions to reach its first `next_frame` is looping, not loading.
+#[cfg(target_arch = "arm")]
+const BOOT_POLLS: u32 = 64;
+
 pub fn frame(dt: f64) -> i32 {
+    // Two engines can be running here, and they are driven differently. `phira` owns its own loop -
+    // `the_main` calls `main.update()`/`main.render()` and then parks at `next_frame().await` (see
+    // `macroquad::app`) - so the shell pumps it. The legacy host owns the `Main` and is driven from
+    // below. Deciding up front also makes "nothing is running" one answer rather than two.
+    let pump_phira = macroquad::app::is_running();
+    let hosted = GAME.with(|g| g.borrow().is_some());
+    if !pump_phira && !hosted {
+        return GAME_ERR_NO_CHART;
+    }
+
+    // A fresh frame starts with no complaint. Without this the shell would read last frame's -
+    // or, worse, the create's - against a frame that failed for a different reason.
+    clear_error();
+
+    // Advance the injected clock first: everything `prpr` reads this frame goes through it.
+    let now = CLOCK.with(|c| c.get()) + dt.max(0.0);
+    CLOCK.with(|c| c.set(now));
+
+    // Publish the uptime the judge ages touches with. `prpr::judge::get_uptime` reads it back
+    // through `miniquad::native::windows::get_uptime`, and uses it in exactly one place:
+    // `t - (uptime - it.time) * spd`, which rewinds a touch to the chart time it happened at.
+    //
+    // It is this clock and not a second, independent one on purpose. `t` is `TimeManager::now`
+    // fed by `clock_now` above, so the two sides of that subtraction would otherwise come from
+    // oscillators that drift apart - a bug that shows up as judgement error growing over a
+    // play rather than as a visible failure. `std::time::Instant` is the obvious other choice
+    // and is rejected here for two reasons: it is what module doc problem 3 says this port
+    // avoids (it needs `QueryPerformanceFrequency`, the call that has historically taken the
+    // process down on the phone), and it would pull Win32 imports into the ARM DLL that the
+    // `check_imports.py` gate exists to catch.
+    //
+    // Whoever stamps a touch later must stamp it with `miniquad::uptime_secs()` - this value
+    // - because `prpr` uses only the difference between the two. Today nothing stamps one at
+    // all: no touch reaches `prpr::judge` on this platform yet, so `it.time` has no producer
+    // and this reads as dead code until the shell's touch pipeline lands.
+    macroquad::miniquad::set_uptime_secs(now);
+
+    if pump_phira {
+        // Empty the queue first. phira's loop has no equivalent of this, because in upstream
+        // macroquad a frame *replaces* the framebuffer instead of appending to a list - and here
+        // `update` and `render` happen inside that loop, so they cannot be separated the way the
+        // legacy path separates them below. Left uncleared, whatever one frame drew would be
+        // replayed next to the next frame's commands forever.
+        macroquad::draw::drain_reset();
+        if let std::task::Poll::Ready(()) = macroquad::app::poll() {
+            // `the_main` returning is a one-way event: its loop ends only when `should_exit()`
+            // says so, and nothing here can restart it. Recording it as this frame's error is what
+            // turns "the UI went blank" into a sentence the shell can print.
+            set_error("the application exited (`the_main` returned)".to_owned());
+        }
+        macroquad::input::clear_touches();
+        PHIRA_FRAMES.with(|f| f.set(f.get().wrapping_add(1)));
+        return macroquad::draw::encode() as i32;
+    }
+
     GAME.with(|slot| {
         let mut guard = slot.borrow_mut();
         let game = match guard.as_mut() {
             Some(g) => g,
             None => return GAME_ERR_NO_CHART,
         };
-        // A fresh frame starts with no complaint. Without this the shell would read last frame's -
-        // or, worse, the create's - against a frame that failed for a different reason.
-        clear_error();
-
-        // Advance the injected clock first: everything `prpr` reads this frame goes through it.
-        let now = CLOCK.with(|c| c.get()) + dt.max(0.0);
-        CLOCK.with(|c| c.set(now));
-
-        // Publish the uptime the judge ages touches with. `prpr::judge::get_uptime` reads it back
-        // through `miniquad::native::windows::get_uptime`, and uses it in exactly one place:
-        // `t - (uptime - it.time) * spd`, which rewinds a touch to the chart time it happened at.
-        //
-        // It is this clock and not a second, independent one on purpose. `t` is `TimeManager::now`
-        // fed by `clock_now` above, so the two sides of that subtraction would otherwise come from
-        // oscillators that drift apart - a bug that shows up as judgement error growing over a
-        // play rather than as a visible failure. `std::time::Instant` is the obvious other choice
-        // and is rejected here for two reasons: it is what module doc problem 3 says this port
-        // avoids (it needs `QueryPerformanceFrequency`, the call that has historically taken the
-        // process down on the phone), and it would pull Win32 imports into the ARM DLL that the
-        // `check_imports.py` gate exists to catch.
-        //
-        // Whoever stamps a touch later must stamp it with `miniquad::uptime_secs()` - this value
-        // - because `prpr` uses only the difference between the two. Today nothing stamps one at
-        // all: no touch reaches `prpr::judge` on this platform yet, so `it.time` has no producer
-        // and this reads as dead code until the shell's touch pipeline lands.
-        macroquad::miniquad::set_uptime_secs(now);
 
         if let Err(e) = game.main.update() {
             tracing::error!("Main::update failed: {e:?}");
@@ -551,6 +667,12 @@ pub fn set_time(t: f64) {
 pub fn destroy() {
     GAME.with(|slot| *slot.borrow_mut() = None);
     INFO.with(|slot| *slot.borrow_mut() = None);
+    // phira's app future is torn down in the same breath. `destroy` means "the shell is finished
+    // with this surface", and leaving the future in the thread-local would let the next
+    // `wp81_game_frame` resume a loop whose window, input queue and audio all belong to the page
+    // that just went away.
+    macroquad::app::drop_app();
+    PHIRA_FRAMES.with(|f| f.set(0));
     CLOCK.with(|c| c.set(0.0));
     // Reset the published uptime together with the clock it is sampled from. Without this a read
     // between `destroy` and the next `frame` would answer with the previous game's value while
@@ -561,7 +683,15 @@ pub fn destroy() {
 
 /// Frames rendered since `create`, or -1 when nothing is running.
 pub fn frames() -> i64 {
-    GAME.with(|slot| slot.borrow().as_ref().map(|g| g.frames as i64).unwrap_or(-1))
+    if let Some(n) = GAME.with(|slot| slot.borrow().as_ref().map(|g| g.frames as i64)) {
+        return n;
+    }
+    // phira is running but owns no `Hosted`, so answer from its own counter rather than -1: the
+    // shell logs this every frame, and a permanent `-1` would read as a failed start.
+    if macroquad::app::is_running() {
+        return PHIRA_FRAMES.with(|f| f.get() as i64);
+    }
+    -1
 }
 
 /// The running game's score, combo and accuracy, or -1 when nothing is running.
@@ -656,6 +786,10 @@ pub fn set_screen(width: f32, height: f32) {
 }
 
 /// Whether a game is currently hosted.
+///
+/// Covers both engines: the legacy `Hosted` slot and phira's own pumped loop. The shell asks this
+/// before it decides whether a surface is live, so answering only for one of them would report a
+/// running phira as idle and invite a second boot over the top of the first.
 pub fn is_running() -> bool {
-    GAME.with(|slot| slot.borrow().is_some())
+    GAME.with(|slot| slot.borrow().is_some()) || macroquad::app::is_running()
 }

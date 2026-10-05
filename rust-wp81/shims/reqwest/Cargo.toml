@@ -37,3 +37,7 @@ serde_json = "1"
 # `reqwest::Url` *is* `url::Url` upstream, and `phira::deeplink` uses the `url` crate directly while
 # `phira::page::settings` reaches it as `reqwest::Url`. Re-exporting keeps those one type.
 url = "2"
+# `Response::bytes_stream` returns a `Stream`, and that trait is `futures-core`'s - `futures` and
+# `futures-util` re-export it rather than define it, which is why only the core crate is needed
+# here. `phira` already depends on `futures-util` for `.next()`, so this adds nothing to the graph.
+futures-core = "0.3"

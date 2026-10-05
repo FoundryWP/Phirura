@@ -127,6 +127,38 @@ impl AudioClip {
         })
     }
 
+    /// `phira`'s song page needs the frames themselves, not a count: `load_local_tuple` takes
+    /// `frames.len()` as the track length and rejects the chart when the preview range runs past
+    /// it, and `with_effects` drains a range out of the vector before handing what is left to
+    /// `from_raw`.
+    ///
+    /// The decode itself happens in the shell, exactly like `new` - same buffer, decoded once, and
+    /// the shell keeps it for `create_music`, which asks for it by clip id. What is returned here
+    /// is that buffer's *length* materialised as frames, whose values nothing reads: this shim's
+    /// `from_raw` keeps only `frame_count` and drops the vector, `Music` plays the shell's copy,
+    /// and `AudioClip::sample` answers `None`, so no path ever observes a sample. Filling them
+    /// with silence therefore cannot change behaviour - the length is the whole payload.
+    ///
+    /// Decoding a second time in Rust (with `symphonia`, which `prpr` already pulls in) would
+    /// yield the same length and the same unread samples at the cost of a decoder in this shim.
+    /// Note the allocation: it is proportional to the track, and upstream's is too - it is freed
+    /// again by `from_raw` a few lines later.
+    pub fn decode(data: Vec<u8>) -> Result<(Vec<Frame>, u32)> {
+        let mut info = shell::DecodedInfo {
+            sample_rate: 0,
+            frame_count: 0,
+        };
+        let rc = unsafe { shell::wp81_audio_decode(data.as_ptr(), data.len(), &mut info) };
+        if rc != 0 || info.sample_rate == 0 {
+            return Err(anyhow::anyhow!(
+                "audio decode failed (rc={}, {} bytes)",
+                rc,
+                data.len()
+            ));
+        }
+        Ok((vec![Frame(0.0, 0.0); info.frame_count as usize], info.sample_rate))
+    }
+
     /// Build a clip from already-decoded frames. The frames are not retained - see the module note.
     pub fn from_raw(frames: Vec<Frame>, sample_rate: u32) -> Self {
         AudioClip {

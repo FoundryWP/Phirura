@@ -612,6 +612,29 @@ pub unsafe extern "C" fn wp81_game_create(
     host::create(&folder, &chart_name)
 }
 
+/// Boot phira itself - its own `MainScene`, its own library UI - instead of a chart.
+///
+/// The shell calls this when it wants to land *in* Rust phira rather than in a game the C# side
+/// picked out, which is the "start straight into the app" path. From the first frame onwards it is
+/// driven exactly like a chart would be: `wp81_game_frame` pumps `the_main`'s loop one iteration
+/// per display frame and the draw commands come back the same way (`prpr-port/src/host.rs`
+/// explains the split).
+///
+/// Takes no arguments because phira owns its own configuration: it reads its data directory, its
+/// fonts and its settings from the hooks the shell already provides, and there is nothing a chart
+/// name would tell it that it does not look up itself.
+///
+/// Returns `0` on success, or the same negative codes as `wp81_game_create`:
+///
+///   -3  a game or phira is already running
+///   -2  construction never reached phira's first frame (see `wp81_game_error`)
+///   -100  construction panicked
+#[cfg(target_arch = "arm")]
+#[no_mangle]
+pub extern "C" fn wp81_phira_boot() -> i32 {
+    host::boot_phira()
+}
+
 /// Advance and render one frame. `dt` is the seconds since the previous call.
 ///
 /// Returns the number of draw commands produced (readable through `wp81_draw_commands`), or a

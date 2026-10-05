@@ -147,6 +147,21 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
         private static extern int wp81_game_create(string folder, string chartName);
 
+        /// <summary>
+        /// Boots phira itself - its own <c>MainScene</c> and library UI - rather than a chart.
+        ///
+        /// Takes no arguments because phira owns its own configuration: it reads its data directory,
+        /// fonts and settings through hooks the shell already provides, so there is nothing a chart
+        /// name would tell it that it does not look up itself. Afterwards it is driven by exactly
+        /// the same <c>wp81_game_frame</c> call as a chart is.
+        ///
+        /// Returns 0 on success, or -3 a game is already running, -2 construction never reached
+        /// phira's first frame, -100 construction panicked. The reason for -2 comes back through
+        /// <c>wp81_game_error</c>.
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_phira_boot();
+
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_game_frame(double dt);
 
@@ -486,6 +501,26 @@ namespace Phirura
         {
             Install();
             return (GameResult)wp81_game_create(folder, chartName);
+        }
+
+        /// <summary>
+        /// Starts the real Rust phira itself - its <c>MainScene</c>, its library UI, its settings -
+        /// instead of a chart the shell picked out.
+        ///
+        /// This is the "open straight into the app" path. It is deliberately separate from
+        /// <see cref="GameCreate"/> rather than a flag on it: the two differ in whether the shell
+        /// hands over a chart location, and folding that into one entry point would put the choice
+        /// inside Rust where it cannot report which of the two it actually did.
+        ///
+        /// Slow for the same reason <see cref="GameCreate"/> is - phira builds its data directory,
+        /// loads its fonts and constructs the whole library scene - so the shell samples
+        /// <see cref="SampleProgress"/> while it runs and logs every step change. Without that,
+        /// a boot that takes the process down leaves one last log line and nothing after it.
+        /// </summary>
+        public static GameResult PhiraBoot()
+        {
+            Install();
+            return (GameResult)wp81_phira_boot();
         }
 
         /// <summary>

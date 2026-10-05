@@ -385,11 +385,23 @@ pub mod header {
         }
     }
 
+    /// `slice::Iter` yields `&(HeaderName, HeaderValue)`, while `&HeaderMap` has to yield the pair
+    /// destructured - `for (k, v) in &headers` is how the header map is iterated everywhere. The
+    /// adapter is named (rather than a closure) because `IntoIterator::IntoIter` must be spelled as
+    /// a concrete type, and a closure's type cannot be written down.
+    fn pair_ref(it: &(HeaderName, HeaderValue)) -> (&HeaderName, &HeaderValue) {
+        let (k, v) = it;
+        (k, v)
+    }
+
     impl<'a> IntoIterator for &'a HeaderMap {
         type Item = (&'a HeaderName, &'a HeaderValue);
-        type IntoIter = std::slice::Iter<'a, (HeaderName, HeaderValue)>;
+        type IntoIter = std::iter::Map<
+            std::slice::Iter<'a, (HeaderName, HeaderValue)>,
+            fn(&(HeaderName, HeaderValue)) -> (&HeaderName, &HeaderValue),
+        >;
         fn into_iter(self) -> Self::IntoIter {
-            self.entries.iter()
+            self.entries.iter().map(pair_ref as fn(&(HeaderName, HeaderValue)) -> (&HeaderName, &HeaderValue))
         }
     }
 }
@@ -1015,6 +1027,20 @@ impl Response {
         Ok(self.body)
     }
 
+    /// The body as a stream of chunks, which is how `phira` downloads: `scene/song.rs` writes each
+    /// chunk to disk as it arrives (so an 8 MB track is never buffered twice) and `deeplink.rs`
+    /// counts bytes against a limit while downloading.
+    ///
+    /// Upstream the transport delivers this incrementally. Here the transport is the shell and it
+    /// answers with a complete response, so the whole body is handed over as a single chunk - the
+    /// two callers only do `write_all(&chunk)` and `count += chunk.len()`, which total the same
+    /// either way, and neither relies on more than one chunk arriving.
+    pub fn bytes_stream(self) -> BytesStream {
+        BytesStream {
+            body: Some(self.body),
+        }
+    }
+
     /// Fails when the status is a client or server error, matching upstream's contract that the
     /// `?` after it turns an HTTP error into an `Err`.
     pub fn error_for_status(self) -> Result<Response> {
@@ -1026,6 +1052,32 @@ impl Response {
             });
         }
         Ok(self)
+    }
+}
+
+/// See [`Response::bytes_stream`].
+///
+/// Yields the buffered body once and then ends: `body` is `Some` for exactly one `poll_next`.
+/// Written out by hand rather than with `futures_util::stream::once`, because `futures-util` is a
+/// much larger dependency than the `futures-core` trait this has to satisfy, and the shim should
+/// not decide what else goes into the graph.
+pub struct BytesStream {
+    body: Option<Bytes>,
+}
+
+impl futures_core::Stream for BytesStream {
+    type Item = Result<Bytes>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        // `BytesStream` is `Unpin` (a single `Option<Bytes>`), so `Pin<&mut Self>` derefs mutably
+        // and `take` is available without a projection.
+        std::task::Poll::Ready(match self.body.take() {
+            Some(body) if !body.is_empty() => Some(Ok(body)),
+            _ => None,
+        })
     }
 }
 

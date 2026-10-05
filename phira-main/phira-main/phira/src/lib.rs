@@ -31,7 +31,6 @@ use prpr::{
     build_conf,
     core::{init_assets, PGR_FONT},
     ext::SafeTexture,
-    log,
     scene::show_error,
     time::TimeManager,
     ui::{cleanup_audio, FontArc, TextPainter},
@@ -169,7 +168,9 @@ mod dir {
 }
 
 async fn the_main() -> Result<()> {
-    log::register();
+    // `log::register()` - the call that installed `prpr`'s terminal tracing subscriber - is gone
+    // with it: the `log` feature is off for this target (see `phira/Cargo.toml`), and WP8.1 has no
+    // terminal to receive ANSI-coloured output. Nothing else in the workspace called it.
     #[cfg(target_env = "ohos")]
     {
         *DATA_PATH.lock().unwrap() = Some("/data/storage/el2/base".to_owned());
@@ -327,6 +328,28 @@ pub extern "C" fn quad_main() {
         }
     });
     cleanup_audio();
+}
+
+/// Boot phira for a host that pumps frames itself.
+///
+/// This is [`quad_main`] minus `cleanup_audio()`, and the difference is load-bearing.
+/// `quad_main` is macroquad's shape, where `from_config` runs the app *to completion*, so the call
+/// after it is an exit hook. The shell's `from_config` only stores the future - `the_main` then
+/// runs one loop iteration per `wp81_game_frame` - so returning from it means "booted", not
+/// "exited".
+///
+/// Running `cleanup_audio()` at that moment would be the **first** access to `UI_AUDIO`, whose
+/// `thread_local` initializer *builds* the audio manager (`prpr/src/ui.rs:1405`); taking it
+/// straight back out would leave `SafeAudio(None)` for the rest of the session, which is UI audio
+/// silently dead rather than any visible failure. `cleanup_audio` is a genuine shutdown hook - it
+/// exists so the manager is dropped before thread-local destructors run - and this program never
+/// shuts down: the process dies with the app.
+pub fn boot() {
+    macroquad::Window::from_config(build_global_window_conf(), async {
+        if let Err(err) = the_main().await {
+            error!(?err, "global error");
+        }
+    });
 }
 
 fn on_pause_resume(pause: bool) {

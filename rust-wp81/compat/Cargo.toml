@@ -9,6 +9,15 @@ edition = "2021"
 # a `#[panic_handler]` here, which would then collide with the one std/panic_abort provides.
 crate-type = ["lib"]
 
+[dependencies]
+# The C math library, for a link that has no CRT. `src/math.rs` explains why the answers come
+# from here rather than from `x.ln()` - the short version is that on this target `x.ln()` *is*
+# a call to `logf`, so the obvious implementation recurses forever.
+#
+# `no_std` like the rest of this crate, and already in the workspace lockfile at this exact
+# version, so reaching for it costs no new registry bytes (the budget is ~4 MiB and shrinking).
+libm = "0.2.16"
+
 [profile.release]
 opt-level = 2
 

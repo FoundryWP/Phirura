@@ -88,7 +88,11 @@ $ErrorActionPreference = $saved
 
 Write-Host "cargo exit code: $code"
 
-$errs = @(Select-String -Path $log -Pattern "^error(\[E\d+\])?:" -ErrorAction SilentlyContinue)
+# `-Context 0,6`: rustc prints the location on the line *after* the message, and both the message
+# and the path are wrapped by the console before they reach this log - so the assembler below needs
+# several lines to reconstruct one `--> path:line:col`. One context line was not enough, which is
+# why the "blocked crates" list was still empty while the error was in a crate named two lines down.
+$errs = @(Select-String -Path $log -Pattern "^error(\[E\d+\])?:" -Context 0, 6 -ErrorAction SilentlyContinue)
 Write-Host "error count: $($errs.Count)"
 
 # A `[patch]` Cargo declined to apply is worse than an error: it is a *warning*, so it never
@@ -119,15 +123,37 @@ if ($errs.Count -eq 0) {
 
 # Group by the crate the error came from - `--> path/to/file.rs` tells us which dependency is
 # blocked, and that is the unit of work, not the individual diagnostic.
+#
+# The location has to be reassembled: it arrives on the following line, and both the message and the
+# path are wrapped by the console before they reach this log, so keep appending until the `:line:col`
+# coordinates appear - then cut back to whatever follows the last `-->`, because the (wrapped)
+# message text may have been appended along with it.
 $byFile = @{}
 foreach ($e in $errs) {
-    $loc = $e.Line
-    if ($loc -match '-->\s+(.+)$') {
-        $p = $Matches[1]
-        # Reduce a full path to the crate it belongs to: the 4th-from-last segment for a normal
-        # registry/path crate (`.../reqwest-0.13.2/src/x.rs` -> `reqwest`).
-        $parts = $p -split '[\\/]'
-        $key = if ($parts.Count -ge 4) { $parts[$parts.Count - 4] } else { $p }
+    $loc = ""
+    foreach ($line in $e.Context.PostContext) {
+        if ($line -match '^\s*[|=]') { break }  # source excerpt or a note/help block
+        # Any following diagnostic ends this one. Without this, `error: could not compile X` - which
+        # has no location of its own - kept walking into whatever was printed next and attributed
+        # the *following* crate's location to it (macroquad appeared in "blocked crates" while the
+        # only thing it produced was a warning).
+        if ($line -match '^(error|warning|note|help)(\[E\d+\])?:') { break }
+        $loc += $line.Trim()
+        if ($loc -match ':\d+:\d+\s*$') { break }
+    }
+    if ($loc -match '.*-->\s*(.+)$') { $loc = $Matches[1] }
+    # Two path shapes must both be read, and they differ by exactly one thing. A workspace-relative
+    # path (`prpr\src\log.rs`) has no separator before the crate directory, so a pattern demanding
+    # one never matches - which is why this list stayed empty even when every error came from one
+    # crate. A registry path (`...\registry\src\index.crates.io-...\xxhash-rust-0.8.15\src\xh3.rs`)
+    # has *two* `src` segments, so a leftmost match would report `registry`. Prepending a separator
+    # and matching greedily resolves both: the expression below always stops at the last `X\src\`.
+    if ($loc -notmatch '^[\\/]') { $loc = '\' + $loc }
+    # The crate directory also reads correctly for git checkouts (`.../phira-mp-client/src/x.rs`)
+    # and workspace members (`phira/src/x.rs`). Trailing `-1.2.3` is dropped so a patch bump cannot
+    # split one crate across two buckets.
+    if ($loc -match '.*[\\/]([^\\/]+)[\\/]src[\\/]') {
+        $key = $Matches[1] -replace '-\d+\.\d+\.\d+.*$', ''
         if (-not $byFile.ContainsKey($key)) { $byFile[$key] = 0 }
         $byFile[$key] += 1
     }
