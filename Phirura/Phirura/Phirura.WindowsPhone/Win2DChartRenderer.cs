@@ -1599,23 +1599,32 @@ namespace Phirura.Game
                 return;
             }
 
-            // Polled every third frame rather than every frame.
+            // Every frame while the registry is still growing, every third frame once it is stable.
             //
-            // The sweep costs three native calls per registered texture - ~119 of them on the 190
-            // chart, so ~360 calls per frame just to ask "did anything change", on a frame that also
-            // replays ~150 draw commands. Nothing here needs per-frame resolution: chart art never
-            // changes after load, and the glyph atlas only has to be current before the text that
-            // uses it is read, so a 60 ms lag is invisible. Those calls come straight off the frame
-            // time, and frame time is what touch latency is actually made of.
-            _texPollFrame++;
-            if ((_texPollFrame % 3) != 0)
+            // Gating it unconditionally was wrong, and it showed immediately: during a load the first
+            // frames are seconds apart, so a texture registered on frame N had no carrier for up to
+            // three frames - and a geometry batch whose texture has no carrier falls back to a *flat
+            // fill*, which is a white block. That is the "white blocks at startup, text appears a
+            // moment later" report. The saving is only worth having once the set has stopped
+            // changing, which is the case this was written for.
+            int live = (int)PrprPort.TextureCount();
+            if (live != _texPollTotal)
             {
-                return;
+                _texPollTotal = live;
+                _texPollFrame = 0;
+            }
+            else
+            {
+                _texPollFrame++;
+                if ((_texPollFrame % 3) != 0)
+                {
+                    return;
+                }
             }
 
             try
             {
-                int total = PrprPort.TextureCount();
+                int total = live;
                 if (total > 0)
                 {
                     if (_portIds == null || _portIds.Length < total)
@@ -2094,6 +2103,9 @@ namespace Phirura.Game
 
         /// <summary>Frame counter for the texture-poll gate - see `EnsurePortTextures`.</summary>
         private int _texPollFrame;
+
+        /// <summary>Registry size at the last sweep; a change forces a sweep on the next frame.</summary>
+        private int _texPollTotal = -1;
 
         // ------------------------------------------------------------------
         // Small helpers

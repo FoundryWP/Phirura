@@ -19,7 +19,7 @@ namespace Phirura
     /// gameplay. Owns the chart, the judge, the renderer and the music clock, and drives
     /// them from CompositionTarget.Rendering (WP8.1 has no XAML-native game loop).
     /// </summary>
-    public sealed partial class GamePage : Page, PrprPort.IMusicSink
+    public sealed partial class GamePage : Page, PrprPort.IMusicSink, PrprPort.ISfxSink
     {
         public static PlayResult LastResult;
         public static string LastChartTitle = string.Empty;
@@ -65,6 +65,9 @@ namespace Phirura
         private readonly Dictionary<uint, TouchInput> _active = new Dictionary<uint, TouchInput>();
         private readonly HashSet<uint> _justStarted = new HashSet<uint>();
         private readonly List<uint> _toRemove = new List<uint>();
+
+        /// <summary>Scratch for the finished-touch sweep in `PushRustTouches`; never allocated per frame.</summary>
+        private readonly List<uint> _retire = new List<uint>();
         private readonly List<TouchInput> _frameTouches = new List<TouchInput>();
 
         private bool _hooked;
@@ -135,10 +138,35 @@ namespace Phirura
         /// "the app ships a chart and phira is asked for a different one".
         private const string PhiraAutoChart = "custom/190";
 
+        /// Whether phira opens that chart by itself, instead of stopping on its own home screen.
+        ///
+        /// Off. This is what "get it to the main screen" needed: with it on, the boot drove straight
+        /// past `home.rs` into the song, so the home screen was never reachable and every tap landed
+        /// on a page under autoplay.
+        ///
+        /// It is safe to turn off even though the shell resolves the music from `PhiraAutoChart`
+        /// alone: the library contains exactly that one chart - the one the shell seeds - so whatever
+        /// the player picks *is* that chart, and the music is right by construction. **That stops
+        /// being true the moment a second chart can be imported**, and then the music has to travel
+        /// with the chart the engine actually opened: carry the name across `wp81_audio_music_new`
+        /// the same way the sfx name now rides `wp81_audio_sfx_new`.
+        private const bool PhiraAutoOpen = false;
+
         /// Whether phira starts that chart rather than stopping on its song page. Kept separate
         /// from *which* chart because they change for different reasons: which chart is what was
         /// packaged, this is whether the app drops the player straight into playing it.
-        private const bool PhiraAutoPlay = true;
+        /// Whether phira plays that chart by itself.
+        ///
+        /// This was `true`, and together with the auto-open above it is why the app appeared to have
+        /// no working buttons: the boot drove past `home.rs` into the song, and then **autoplay
+        /// played it** - and autoplay does not take input, so every tap was ignored by design.
+        /// Neither the home screen nor the buttons were ever broken; the app never stopped on the
+        /// home screen, and the one screen it did reach was under autoplay.
+        ///
+        /// Left off. The auto-open stays on for now because the shell resolves the music from
+        /// `PhiraAutoChart` and nothing else - turning it off would let the player pick a different
+        /// chart and hear this one's music, which is a worse bug than a shortcut.
+        private const bool PhiraAutoPlay = false;
 
         public GamePage()
         {
@@ -508,6 +536,16 @@ namespace Phirura
                     LoadingText.Text = "内置谱面失败：" + ex.Message;
                     return;
                 }
+                // The sound-effect voices, created here as well as on the chart path.
+                //
+                // It used to exist only there, so in phira mode `_sfx` was null and `SfxPlay`
+                // returned before playing anything - which is why the hit sounds stayed silent even
+                // after the callbacks were wired to a real sink. The sink was fine; the device
+                // behind it was never built.
+                _sfx = new SfxPlayer(SfxHost);
+                _sfx.Volume = _settings == null ? 1.0 : _settings.VolumeSfx;
+                _sfx.Enabled = true;
+
                 // Before `StartPhiraAsync`, which never yields: the music URI has to exist by the
                 // time phira first asks for the music, and phira asks from the frame thread.
                 await ResolvePhiraMusicAsync();
@@ -1186,6 +1224,14 @@ namespace Phirura
         private void OnPointerCaptureLost(object sender, PointerRoutedEventArgs e)
         {
             uint id = e.Pointer.PointerId;
+            // Logged because this and `PointerReleased` are the two ways a finger can end, and only
+            // one of them is what WP8.1 actually raises here. If releases never arrive, the finger
+            // table can only drain through the sweep - and a press that never ends is a button that
+            // draws its pressed look and never clicks.
+            if (TouchLogDue())
+            {
+                AppLog.Write("GamePage: capture lost id=" + id + " tracked=" + _active.ContainsKey(id));
+            }
             TouchInput cur;
             if (_active.TryGetValue(id, out cur))
             {
@@ -1256,13 +1302,19 @@ namespace Phirura
                 foreach (KeyValuePair<uint, TouchInput> kv in _active)
                 {
                     TouchInput touch = kv.Value;
-                    if (_justStarted.Contains(kv.Key))
+                    // Same rule as the Rust path's copy of this loop: a resolved `Ended`/`Cancelled`
+                    // is final, and forcing `Started` over it swallows a tap whose press and release
+                    // both landed inside one frame.
+                    if (touch.Phase != TouchPhase.Ended && touch.Phase != TouchPhase.Cancelled)
                     {
-                        touch.Phase = TouchPhase.Started;
-                    }
-                    else if (touch.Phase == TouchPhase.Started)
-                    {
-                        touch.Phase = TouchPhase.Stationary;
+                        if (_justStarted.Contains(kv.Key))
+                        {
+                            touch.Phase = TouchPhase.Started;
+                        }
+                        else if (touch.Phase == TouchPhase.Started)
+                        {
+                            touch.Phase = TouchPhase.Stationary;
+                        }
                     }
                     _frameTouches.Add(touch);
                 }
@@ -1396,7 +1448,9 @@ namespace Phirura
                 // relative `./data`, which is not ours here, and the boot dies before its first
                 // frame with a reason that used to be dropped on the floor.
                 PrprPort.GameResult bootResult = PrprPort.PhiraBoot(
-                    Windows.Storage.ApplicationData.Current.LocalFolder.Path, PhiraAutoChart, PhiraAutoPlay);
+                    Windows.Storage.ApplicationData.Current.LocalFolder.Path,
+                    PhiraAutoOpen ? PhiraAutoChart : null,
+                    PhiraAutoPlay);
                 boot.Stop();
                 _rustCreated = bootResult == PrprPort.GameResult.Ok;
                 // The stage is logged on every attempt and the reason whenever the boot did not
@@ -1477,13 +1531,26 @@ namespace Phirura
             foreach (KeyValuePair<uint, TouchInput> kv in _active)
             {
                 TouchInput touch = kv.Value;
-                if (_justStarted.Contains(kv.Key))
+                // A phase the pointer handler already resolved is FINAL and must pass through.
+                //
+                // A press and a release can both land between two frames - that is what a fast tap
+                // *is* - and `_justStarted` still holds the id on the frame that pushes it. Forcing
+                // `Started` here therefore threw the `Ended` away, so the engine saw a finger go
+                // down and never come up: a UI button drew its pressed look and never clicked, and a
+                // fast tap on a note was never released. A held finger was unaffected, which is why
+                // drag and long-press worked while everything else seemed dead.
+                //
+                // `_justStarted` only ever *upgrades* a touch that is still logically down.
+                if (touch.Phase != TouchPhase.Ended && touch.Phase != TouchPhase.Cancelled)
                 {
-                    touch.Phase = TouchPhase.Started;
-                }
-                else if (touch.Phase == TouchPhase.Started)
-                {
-                    touch.Phase = TouchPhase.Stationary;
+                    if (_justStarted.Contains(kv.Key))
+                    {
+                        touch.Phase = TouchPhase.Started;
+                    }
+                    else if (touch.Phase == TouchPhase.Started)
+                    {
+                        touch.Phase = TouchPhase.Stationary;
+                    }
                 }
                 double time = t;
                 // Pre-declared: the project compiles as C# 5, which has no inline `out` declarations.
@@ -1515,6 +1582,28 @@ namespace Phirura
                 _rustPressTime.Remove(_toRemove[i]);
             }
             _toRemove.Clear();
+
+            // Second sweep, and the reason `_active` was growing without bound: retirement used to
+            // depend *entirely* on `_toRemove`, so any release that did not reach it left a finger in
+            // the table for ever. The log showed `remaining=` climbing 20 -> 23 -> 30 -> 33 in three
+            // seconds, i.e. the engine was being handed thirty simultaneous fingers - and a button
+            // that thinks other fingers are still down draws its pressed look and never completes a
+            // click, which is exactly the report. Anything already finished is retired here whatever
+            // the bookkeeping says.
+            _retire.Clear();
+            foreach (KeyValuePair<uint, TouchInput> kv in _active)
+            {
+                if (kv.Value.Phase == TouchPhase.Ended || kv.Value.Phase == TouchPhase.Cancelled)
+                {
+                    _retire.Add(kv.Key);
+                }
+            }
+            for (int i = 0; i < _retire.Count; i++)
+            {
+                _active.Remove(_retire[i]);
+                _rustPressTime.Remove(_retire[i]);
+            }
+            _retire.Clear();
 
             // Consumed once per frame, exactly as the C# judge path does it (see the clear at the
             // end of that branch). Without this the set only ever grew: a pointer id stayed in it

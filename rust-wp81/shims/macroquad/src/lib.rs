@@ -625,8 +625,25 @@ impl QuadGl {
     pub fn set_blend(&self, _blend: Option<miniquad::BlendState>, _clear: bool) {}
 
     /// The projection `prpr::ui` composes its transforms against.
+    ///
+    /// Was `Mat4::IDENTITY`, and that is the one value that cannot be right. `prpr::ui` derives its
+    /// **hit-test rectangles** from this matrix while the shell draws the same geometry through its
+    /// own camera, so an identity here puts the rectangles in a different space from the pixels the
+    /// touches arrive in: everything still *looks* correctly placed, and no button ever hits. That is
+    /// exactly "the button shows its pressed look and never fires", and why drag notes (judged from
+    /// the raw touch list, no rectangle involved) worked while every UI button was dead.
+    ///
+    /// Upstream macroquad returns the camera's projection; on this platform the camera *is* the
+    /// screen, so it is the y-down pixel -> NDC ortho that `touch_transform` already assumes.
     pub fn get_projection_matrix(&self) -> Mat4 {
-        Mat4::IDENTITY
+        let w = crate::window::screen_width();
+        let h = crate::window::screen_height();
+        if w <= 0.0 || h <= 0.0 {
+            // Nothing has reported a size yet. Identity is no worse than a guess here and keeps the
+            // function total, which matters because it is called every frame.
+            return Mat4::IDENTITY;
+        }
+        Mat4::orthographic_rh(0.0, w, h, 0.0, -1.0, 1.0)
     }
 
     /// Sets a shader uniform. The value is dropped: the C# renderer owns pipelines, and prpr's
@@ -1038,6 +1055,30 @@ pub mod clock {
     pub fn set_now_micros(us: u64) {
         MICROS.store(us, Ordering::Relaxed);
     }
+
+    /// Advance the clock by a frame.
+    ///
+    /// `set_now_micros` has **no caller on this platform** - there is no miniquad event loop to call
+    /// it, because the shell owns the loop - so `MICROS` stayed 0 and `get_time()` was frozen at
+    /// 0.0 for the life of the process. Every animation driven by real time therefore never
+    /// progressed, and that is what killed the UI: `home.rs:416` gates *every button on the page*
+    /// behind `if self.char_screen_p.now(rt) < 1e-2`, an intro transition that needs `rt` to move.
+    /// The buttons were never broken - the animation that unlocks them never ran, so the touch
+    /// handler returned before reaching any of them.
+    ///
+    /// The frame entry point advances it with the `dt` the shell already passes, which is the same
+    /// quantity the scene advances its own time by.
+    pub fn advance_secs(dt: f64) {
+        if !(dt > 0.0) || !dt.is_finite() {
+            return;
+        }
+        let add = (dt * 1_000_000.0) as u64;
+        MICROS.store(
+            MICROS.load(Ordering::Relaxed).saturating_add(add),
+            Ordering::Relaxed,
+        );
+    }
+
     pub fn now_secs() -> f64 {
         MICROS.load(Ordering::Relaxed) as f64 / 1_000_000.0
     }
@@ -1093,6 +1134,10 @@ pub mod input {
         static PENDING: std::cell::RefCell<Vec<Touch>> = std::cell::RefCell::new(Vec::new());
     }
 
+    /// See `replayed_count`. Not thread-local: the replay happens on the game thread and the shell
+    /// reads it from the same one, and a plain static keeps the accessor trivial.
+    static REPLAYED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
     /// How many touch events one frame may carry.
     ///
     /// The shell sends one event per finger per frame, so a real device never comes near this.
@@ -1143,6 +1188,25 @@ pub mod input {
 
     pub fn get_touches() -> Vec<Touch> {
         PENDING.with(|q| q.borrow().clone())
+    }
+
+    /// Events queued for the frame now being built.
+    ///
+    /// With `replayed_count` this is the one measurement that separates the two halves of the input
+    /// path: the queue is what `touches()` (note judging, which works) reads, and the replay is what
+    /// fills `prpr::judge`'s `TOUCHES` (the UI's hit-test, which does not). If the queue is non-empty
+    /// while the replay never advances, the events are arriving and being dropped in between.
+    pub fn pending_len() -> usize {
+        PENDING.with(|q| q.borrow().len())
+    }
+
+    /// Events handed to a handler by `repeat_all_miniquad_input` since start.
+    pub fn replayed_count() -> usize {
+        REPLAYED.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn note_replay() {
+        REPLAYED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
 
     /// macroquad's name for the same list.
@@ -1403,6 +1467,22 @@ pub mod transform {
     pub fn project_point(v: Vec2) -> Vec2 {
         let (x, y) = project(v.x, v.y);
         Vec2::new(x, y)
+    }
+
+    /// `project`, minus the model matrix - for a caller that has already applied it.
+    ///
+    /// `prpr::particle` is that caller and the only one. `Resource::emit_at_origin` runs the
+    /// particle's position through `world_to_screen`, which *is* the model
+    /// (`resource.rs:577` -> `model_stack.last()`), and the shader it replaces applies only the
+    /// camera. Sending that position through `project` therefore applied the model twice, which is
+    /// why every hit effect landed somewhere other than the note that produced it.
+    pub fn project_world(x: f32, y: f32) -> (f32, f32) {
+        let cam = CAM.with(|c| c.get());
+        if !cam.active {
+            return (x, y);
+        }
+        let p = ndc_to_pixels(cam, cam_point(cam, Vec2::new(x, y)));
+        (p.x, p.y)
     }
 
     /// Maps a world-space direction, dropping every translation. Needed because a line's
@@ -2268,7 +2348,9 @@ pub mod draw {
         }
         unsafe {
             for i in 0..4 {
-                let (x, y) = crate::transform::project(corners[i].x, corners[i].y);
+                // `project_world`, not `project`: the caller has already applied the model - see
+                // the note on `project_world`.
+                let (x, y) = crate::transform::project_world(corners[i].x, corners[i].y);
                 VERTS[vs + i] = Vertex::new(x, y, 0.0, uvs[i][0], uvs[i][1], color);
             }
             for (i, ix) in [0u16, 1, 2, 0, 2, 3].iter().enumerate() {
@@ -2946,6 +3028,7 @@ pub mod utils {
         // a local unit value is the honest stand-in - not a null pointer nothing dereferences.
         let mut ctx = crate::miniquad::Context;
         crate::input::for_each_pending(|t| {
+            crate::input::note_replay();
             handler.touch_event(&mut ctx, t.phase, t.id, t.position.x, t.position.y, t.time);
         });
     }

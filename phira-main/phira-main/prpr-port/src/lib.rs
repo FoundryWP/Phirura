@@ -777,20 +777,27 @@ pub extern "C" fn wp81_game_frame(dt: f64) -> i32 {
     //
     // Hand-rolled decimal rather than `format!`: this crate deliberately pulls in no formatting
     // machinery (see the note on the DLL's size), and once a second is not worth changing that.
+    let (tex_new, tex_rebuilt) = macroquad::draw::render_texture_counts();
     unsafe {
-        let draws = macroquad::draw::particle_diag(0);
-        if draws.wrapping_sub(PARTICLE_LOG_AT) >= 60 {
-            PARTICLE_LOG_AT = draws;
-            let mut buf = [0u8; 96];
-            let mut n = push_str(&mut buf, 0, "particles: draws=");
+        // Gated on the frame count, NOT on `particle_diag(0)` as it first was.
+        //
+        // That counter only advances while a chart is being played, so on the home screen - exactly
+        // where the UI bugs are - the condition never became true and this line was never written.
+        // The instrument was silent precisely where it was needed, which is worse than not having it.
+        FRAME_TICK = FRAME_TICK.wrapping_add(1);
+        if FRAME_TICK % 60 == 0 {
+            let draws = macroquad::draw::particle_diag(0);
+            let mut buf = [0u8; 128];
+            let mut n = push_str(&mut buf, 0, "input: pending=");
+            n = push_u32(&mut buf, n, macroquad::input::pending_len() as u32);
+            n = push_str(&mut buf, n, " replayed=");
+            n = push_u32(&mut buf, n, macroquad::input::replayed_count() as u32);
+            n = push_str(&mut buf, n, " draws=");
             n = push_u32(&mut buf, n, draws);
-            n = push_str(&mut buf, n, " seen=");
-            n = push_u32(&mut buf, n, macroquad::draw::particle_diag(1));
             n = push_str(&mut buf, n, " pushed=");
             n = push_u32(&mut buf, n, macroquad::draw::particle_diag(3));
             n = push_str(&mut buf, n, " quads=");
             n = push_u32(&mut buf, n, macroquad::draw::particle_diag(2));
-            let (tex_new, tex_rebuilt) = macroquad::draw::render_texture_counts();
             n = push_str(&mut buf, n, " texNew=");
             n = push_u32(&mut buf, n, tex_new);
             n = push_str(&mut buf, n, " texRebuilt=");
@@ -800,10 +807,15 @@ pub extern "C" fn wp81_game_frame(dt: f64) -> i32 {
             }
         }
     }
+    // Move the shim's clock. Nothing else does - `set_now_micros` has no caller here - and while it
+    // stood still every real-time-driven animation was frozen, including the home screen's intro
+    // transition, which is the gate in front of every button on that page. Must happen *before*
+    // `host::frame`, which is where the scene reads the time.
+    macroquad::clock::advance_secs(dt);
     host::frame(dt)
 }
 
-static mut PARTICLE_LOG_AT: u32 = 0;
+static mut FRAME_TICK: u32 = 0;
 
 fn push_str(buf: &mut [u8], at: usize, s: &str) -> usize {
     let mut at = at;
