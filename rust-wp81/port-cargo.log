@@ -1,5 +1,5 @@
 ﻿cargo.exe : warning: unused workspace dependency `objc2-core-foundation`
-所在位置 E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\build-port.ps1:99 字符: 1
+所在位置 E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\build-port.ps1:127 字符: 1
 + & $cargo @cargoArgs 2>&1 | Out-File -FilePath $cargoLog -Encoding utf ...
 + ~~~~~~~~~~~~~~~~~~~~~~~~
     + CategoryInfo          : NotSpecified: (warning: unused...ore-foundation`:String) [], RemoteException
@@ -157,6 +157,221 @@ help: to clarify your intent to not inherit, add:
 13 + [lints]
    |
 warning: `phira-main` (manifest) generated 1 warning
+   Compiling windows-link v0.0.0 (C:\Users\admin\.workbuddy-ai\binaries\rust\rustup\toolchains\nightly-x86_64-pc-window
+s-msvc\lib\rustlib\src\rust\library\windows_link)
+   Compiling getrandom v0.3.4
+   Compiling getrandom v0.4.2
+   Compiling parking_lot_core v0.9.12
+   Compiling std v0.0.0 (C:\Users\admin\.workbuddy-ai\binaries\rust\rustup\toolchains\nightly-x86_64-pc-windows-msvc\li
+b\rustlib\src\rust\library\std)
+warning: linker stdout: LINK : warning LNK4044: unrecognized option '/NATVIS:C:\Users\admin\.workbuddy-ai\binaries\rust
+\rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\etc\intrinsic.natvis'; ignored鈵?         LINK : warning L
+NK4044: unrecognized option '/NATVIS:C:\Users\admin\.workbuddy-ai\binaries\rust\rustup\toolchains\nightly-x86_64-pc-win
+dows-msvc\lib\rustlib\etc\liballoc.natvis'; ignored鈵?         LINK : warning LNK4044: unrecognized option '/NATVIS:C:\U
+sers\admin\.workbuddy-ai\binaries\rust\rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\etc\libcore.natvis'
+; ignored鈵?         LINK : warning LNK4044: unrecognized option '/NATVIS:C:\Users\admin\.workbuddy-ai\binaries\rust\rus
+tup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\etc\libstd.natvis'; ignored
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `phira` (build script) generated 1 warning
+   Compiling phira v0.8.2 (E:\Users\admin\Documents\visual studio 2013\Phirura\phira-main\phira-main\phira)
+   Compiling proc_macro v0.0.0 (C:\Users\admin\.workbuddy-ai\binaries\rust\rustup\toolchains\nightly-x86_64-pc-windows-
+msvc\lib\rustlib\src\rust\library\proc_macro)
+   Compiling cfg-if v1.0.4
+   Compiling libm v0.2.16
+   Compiling zerofrom v0.1.6
+   Compiling stable_deref_trait v1.2.1
+   Compiling yoke v0.8.1
+   Compiling windows-link v0.2.1
+   Compiling bytemuck v1.25.0
+   Compiling zerovec v0.11.5
+   Compiling memchr v2.8.0
+   Compiling num-traits v0.2.19
+   Compiling serde_core v1.0.228
+   Compiling tinystr v0.8.2
+   Compiling arrayvec v0.7.6
+   Compiling log v0.4.29
+   Compiling bitflags v1.3.2
+   Compiling lazy_static v1.5.0
+   Compiling crossbeam-utils v0.8.21
+   Compiling symphonia-core v0.5.5
+   Compiling smallvec v1.15.1
+   Compiling typenum v1.19.0
+   Compiling encoding_rs v0.8.35
+   Compiling pin-project-lite v0.2.17
+   Compiling zerocopy v0.8.47
+   Compiling once_cell v1.21.4
+   Compiling generic-array v0.14.7
+   Compiling symphonia-metadata v0.5.5
+   Compiling serde v1.0.228
+   Compiling crossbeam-epoch v0.9.18
+   Compiling unic-langid-impl v0.9.6
+   Compiling simd-adler32 v0.3.8
+   Compiling itoa v1.0.18
+   Compiling unic-langid-macros v0.9.6
+   Compiling crossbeam-deque v0.8.6
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling num-integer v0.1.46
+   Compiling subtle v2.6.1
+   Compiling either v1.15.0
+   Compiling writeable v0.6.2
+   Compiling bytes v1.11.1
+   Compiling adler2 v2.0.1
+   Compiling rustc-hash v2.1.1
+   Compiling litemap v0.8.1
+   Compiling digest v0.10.7
+   Compiling icu_locale_core v2.1.1
+   Compiling rayon-core v1.13.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling unic-langid v0.9.6
+   Compiling potential_utf v0.1.4
+   Compiling zerotrie v0.2.3
+   Compiling windows-result v0.4.1
+   Compiling windows-sys v0.61.2
+   Compiling windows-strings v0.5.1
+   Compiling crc32fast v1.5.0
+   Compiling futures-core v0.3.32
+   Compiling allocator-api2 v0.2.21
+   Compiling foldhash v0.2.0
+   Compiling equivalent v1.0.2
+   Compiling windows-core v0.62.2
+   Compiling hashbrown v0.16.1
+   Compiling icu_provider v2.1.1
+   Compiling icu_collections v2.1.1
+   Compiling rayon v1.11.0
+   Compiling miniz_oxide v0.8.9
+   Compiling symphonia-utils-xiph v0.5.5
+   Compiling euclid v0.22.14
+   Compiling num-complex v0.4.6
+   Compiling ttf-parser v0.25.1
+   Compiling zlib-rs v0.6.3
+   Compiling rand_core v0.9.5
+   Compiling lyon_geom v1.0.19
+   Compiling flate2 v1.1.9
+   Compiling winapi-util v0.1.11
+   Compiling tokio v1.50.0
+   Compiling type-map v0.5.1
+   Compiling owned_ttf_parser v0.25.1
+   Compiling tracing-core v0.1.36
+   Compiling approx v0.5.1
+   Compiling icu_properties_data v2.1.2
+   Compiling zmij v1.0.21
+   Compiling futures-sink v0.3.32
+   Compiling icu_normalizer_data v2.1.1
+   Compiling thiserror v2.0.18
+   Compiling strength_reduce v0.2.4
+   Compiling ab_glyph_rasterizer v0.1.10
+   Compiling ab_glyph v0.2.32
+   Compiling transpose v0.2.3
+   Compiling fluent-syntax v0.12.0
+   Compiling icu_normalizer v2.1.1
+   Compiling futures-channel v0.3.32
+   Compiling serde_json v1.0.149
+   Compiling icu_properties v2.1.2
+   Compiling tracing v0.1.44
+   Compiling intl-memoizer v0.5.3
+   Compiling same-file v1.0.6
+   Compiling lyon_path v1.0.19
+   Compiling rand_chacha v0.9.0
+   Compiling fluent-langneg v0.13.1
+   Compiling intl_pluralrules v7.0.2
+   Compiling primal-check v0.3.4
+   Compiling fdeflate v0.3.7
+   Compiling chrono v0.4.44
+   Compiling bitflags v2.11.0
+   Compiling aho-corasick v1.1.4
+   Compiling safe_arch v0.7.4
+   Compiling windows-threading v0.2.1
+   Compiling getrandom v0.2.17
+   Compiling futures-io v0.3.32
+   Compiling regex-syntax v0.8.10
+   Compiling quick-error v2.0.1
+   Compiling pxfm v0.1.28
+   Compiling zune-core v0.5.1
+   Compiling self_cell v1.2.2
+   Compiling anyhow v1.0.102
+   Compiling slab v0.4.12
+   Compiling byteorder-lite v0.1.0
+   Compiling futures-task v0.3.32
+   Compiling weezl v0.1.12
+   Compiling color_quant v1.1.0
+   Compiling gif v0.14.1
+   Compiling futures-util v0.3.32
+   Compiling image-webp v0.2.4
+   Compiling moxcms v0.8.1
+   Compiling fluent-bundle v0.16.0
+   Compiling zune-jpeg v0.5.14
+   Compiling regex-automata v0.4.14
+   Compiling rand_core v0.6.4
+   Compiling windows-future v0.3.2
+   Compiling wide v0.7.33
+   Compiling png v0.18.1
+   Compiling rustfft v6.4.1
+   Compiling rand v0.9.2
+   Compiling idna_adapter v1.2.1
+   Compiling walkdir v2.5.0
+   Compiling uuid v1.22.0
+   Compiling indexmap v2.13.0
+   Compiling windows-collections v0.3.2
+   Compiling windows-numerics v0.3.1
+   Compiling sha2 v0.10.9
+   Compiling crossbeam-channel v0.5.15
+   Compiling percent-encoding v2.3.2
+   Compiling scopeguard v1.2.0
+   Compiling unicode-width v0.1.14
+   Compiling byteorder v1.5.0
+   Compiling hex v0.4.3
+   Compiling utf8_iter v1.0.4
+   Compiling thiserror v1.0.69
+   Compiling siphasher v1.0.2
+   Compiling rawpointer v0.2.1
+   Compiling fastrand v2.3.0
+   Compiling bumpalo v3.20.2
+   Compiling xi-unicode v0.3.0
+   Compiling linked-hash-map v0.5.6
+   Compiling float_next_after v1.0.0
+   Compiling extended v0.1.0
+   Compiling ryu v1.0.23
+   Compiling symphonia-format-riff v0.5.5
+   Compiling glyph_brush_draw_cache v0.1.6
+   Compiling lyon_tessellation v1.0.20
+   Compiling zopfli v0.8.3
+   Compiling tempfile v3.27.0
+   Compiling glyph_brush_layout v0.2.4
+   Compiling phf_shared v0.13.1
+   Compiling matrixmultiply v0.3.10
+   Compiling miette v5.10.0
+   Compiling idna v1.1.0
+   Compiling lock_api v0.4.14
+   Compiling form_urlencoded v1.2.2
+   Compiling windows v0.62.2
+   Compiling twox-hash v2.1.2
+   Compiling realfft v3.5.0
+   Compiling image v0.25.10
+   Compiling simba v0.9.1
+   Compiling regex v1.12.3
+   Compiling rand_chacha v0.3.1
+   Compiling fluent v0.17.0
+   Compiling futures-executor v0.3.32
+   Compiling lyon_algorithms v1.0.19
+   Compiling symphonia-format-mkv v0.5.5
+   Compiling symphonia-format-ogg v0.5.5
+   Compiling symphonia-codec-vorbis v0.5.5
+   Compiling symphonia-bundle-flac v0.5.5
+   Compiling lru v0.16.3
+   Compiling half v2.7.1
+   Compiling sha-1 v0.10.1
+   Compiling num-rational v0.4.2
+   Compiling symphonia-bundle-mp3 v0.5.5
+   Compiling symphonia-codec-pcm v0.5.5
+   Compiling symphonia-codec-adpcm v0.5.5
+   Compiling ordered-float v5.3.0
+   Compiling csv-core v0.1.13
+   Compiling rgb v0.8.53
+   Compiling xxhash-rust v0.8.15
+   Compiling miniquad v0.3.15 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad)
 warning: function `glTexParameteri` should have a snake case name
    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\miniquad\src\lib.rs:818:19
     |
@@ -251,17 +466,21 @@ warning: function `glFramebufferRenderbuffer` should have a snake case name
     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gl_framebuffer_renderbuf
 fer`
 
+   Compiling glam v0.30.10
 warning: `miniquad` (lib) generated 15 warnings
-warning: linker stdout: LINK : warning LNK4044: unrecognized option '/NATVIS:C:\Users\admin\.workbuddy-ai\binaries\rust
-\rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\etc\intrinsic.natvis'; ignored鈵?         LINK : warning L
-NK4044: unrecognized option '/NATVIS:C:\Users\admin\.workbuddy-ai\binaries\rust\rustup\toolchains\nightly-x86_64-pc-win
-dows-msvc\lib\rustlib\etc\liballoc.natvis'; ignored鈵?         LINK : warning LNK4044: unrecognized option '/NATVIS:C:\U
-sers\admin\.workbuddy-ai\binaries\rust\rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\etc\libcore.natvis'
-; ignored鈵?         LINK : warning LNK4044: unrecognized option '/NATVIS:C:\Users\admin\.workbuddy-ai\binaries\rust\rus
-tup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\etc\libstd.natvis'; ignored
-  |
-  = note: `#[warn(linker_messages)]` on by default
-
+   Compiling sys-locale v0.3.2
+   Compiling hashbrown v0.14.5
+   Compiling unsafe-libyaml v0.2.11
+   Compiling base64 v0.21.7
+   Compiling which v8.0.2
+   Compiling typed-path v0.12.3
+   Compiling tap v1.0.1
+   Compiling phira-mp-common v0.1.0 (https://github.com/TeamFlos/phira-mp?rev=cc822df#cc822df1)
+   Compiling zip v8.3.0
+   Compiling inputbox v0.1.5
+   Compiling ssri v9.2.0
+   Compiling macroquad v0.3.25 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad)
+   Compiling dashmap v6.1.0
 warning: unused doc comment
     --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:1083:5
      |
@@ -279,6 +498,7 @@ warning: unused doc comment
      = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
      = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
 
+   Compiling serde_yaml v0.9.34+deprecated
 warning: unnecessary `unsafe` block
     --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2446:9
      |
@@ -438,8 +658,29 @@ warning: creating a shared reference to mutable static
 g.org/reference/interior-mutability.html>
      = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
 
-warning: `phira` (build script) generated 1 warning
+   Compiling prpr-l10n v0.1.0 (E:\Users\admin\Documents\visual studio 2013\Phirura\phira-main\phira-main\prpr-l10n)
 warning: `macroquad` (lib) generated 15 warnings
+   Compiling color-thief v0.2.2
+   Compiling glyph_brush v0.7.12
+   Compiling csv v1.4.0
+   Compiling symphonia v0.5.5
+   Compiling nalgebra v0.34.1
+   Compiling lyon v1.0.19
+   Compiling futures v0.3.32
+   Compiling reflink-copy v0.1.29
+   Compiling rand v0.8.5
+   Compiling prpr-auto-offset v0.8.2 (E:\Users\admin\Documents\visual studio 2013\Phirura\phira-main\phira-main\prpr-au
+to-offset)
+   Compiling url v2.5.8
+   Compiling phf v0.13.1
+   Compiling sasa v0.1.0 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\sasa)
+   Compiling tokio-stream v0.1.18
+   Compiling http v1.4.0
+   Compiling sha1 v0.10.6
+   Compiling hmac v0.12.1
+   Compiling miniz_oxide v0.9.1
+   Compiling chardetng v0.1.17
+   Compiling rfd v0.17.2 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\rfd)
 warning: variable does not need to be mutable
    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\rfd\src\lib.rs:111:23
     |
@@ -451,6 +692,46 @@ warning: variable does not need to be mutable
     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
 warning: `rfd` (lib) generated 1 warning (run `cargo fix --lib -p rfd` to apply 1 suggestion)
+   Compiling open v5.3.3
+   Compiling obfstr v0.4.4
+   Compiling base64 v0.22.1
+   Compiling libc v0.2.183
+   Compiling hickory-resolver v0.25.2 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\hickory-reso
+lver)
+   Compiling concat-string v1.0.1
+   Compiling fastblur v0.1.1
+   Compiling phira-mp-client v0.1.0 (https://github.com/TeamFlos/phira-mp?rev=cc822df#cc822df1)
+   Compiling cacache v13.1.0
+   Compiling reqwest v0.13.2 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\reqwest)
+warning: variable does not need to be mutable
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\reqwest\src\lib.rs:936:23
+    |
+936 |     pub fn timeout<T>(mut self, _timeout: T) -> RequestBuilder {
+    |                       ----^^^^
+    |                       |
+    |                       help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `redirect` is never read
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\reqwest\src\lib.rs:728:5
+    |
+726 | pub struct Client {
+    |            ------ field in this struct
+727 |     default_headers: header::HeaderMap,
+728 |     redirect: std::sync::Arc<std::sync::Mutex<redirect::Policy>>,
+    |     ^^^^^^^^
+    |
+    = note: `Client` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analy
+sis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling prpr v0.8.2 (E:\Users\admin\Documents\visual studio 2013\Phirura\phira-main\phira-main\prpr)
+warning: `reqwest` (lib) generated 2 warnings (run `cargo fix --lib -p reqwest` to apply 1 suggestion)
+   Compiling sanitize-filename v0.6.0
+   Compiling semver v1.0.27
+   Compiling bytesize v2.3.1
+   Compiling daachorse v3.0.2
 warning: unused import: `macroquad::prelude::*`
  --> prpr\src\core\object.rs:2:5
   |
@@ -467,6 +748,25 @@ warning: use of deprecated constant `std::f32::INFINITY`: replaced by the `INFIN
     |
     = note: `#[warn(deprecated)]` on by default
 
+   Compiling arc-swap v1.9.0
+   Compiling logos v0.16.1
+   Compiling pollster v0.4.0
+   Compiling zstd v0.13.3 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\zstd)
+   Compiling wp81-compat v0.1.0 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\compat)
+warning: suspicious definition of the runtime `strlen` symbol used by the standard library
+   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\compat\src\lib.rs:889:1
+    |
+889 | pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected `unsafe extern "C" fn(*const i8) -> usize` (for the current target)
+               found `unsafe extern "C" fn(*const u8) -> usize`
+    = help: either fix the signature or remove any attributes like `#[unsafe(no_mangle)]`, `#[unsafe(export_name = "str
+len")]`, or `#[link_name = "strlen"]`
+    = help: allow this lint if the signature is compatible
+    = note: `#[warn(suspicious_runtime_symbol_definitions)]` on by default
+
+warning: `wp81-compat` (lib) generated 1 warning
 warning: variable does not need to be mutable
    --> prpr\src\core\effect.rs:159:13
     |
@@ -511,48 +811,8 @@ warning: variable does not need to be mutable
     |                 help: remove this `mut`
 
 warning: `prpr` (lib) generated 7 warnings (run `cargo fix --lib -p prpr` to apply 5 suggestions)
-warning: variable does not need to be mutable
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\reqwest\src\lib.rs:936:23
-    |
-936 |     pub fn timeout<T>(mut self, _timeout: T) -> RequestBuilder {
-    |                       ----^^^^
-    |                       |
-    |                       help: remove this `mut`
-    |
-    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-warning: field `redirect` is never read
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\reqwest\src\lib.rs:728:5
-    |
-726 | pub struct Client {
-    |            ------ field in this struct
-727 |     default_headers: header::HeaderMap,
-728 |     redirect: std::sync::Arc<std::sync::Mutex<redirect::Policy>>,
-    |     ^^^^^^^^
-    |
-    = note: `Client` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analy
-sis
-    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-   Compiling phira v0.8.2 (E:\Users\admin\Documents\visual studio 2013\Phirura\phira-main\phira-main\phira)
-warning: `reqwest` (lib) generated 2 warnings (run `cargo fix --lib -p reqwest` to apply 1 suggestion)
-   Compiling wp81-compat v0.1.0 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\compat)
-warning: suspicious definition of the runtime `strlen` symbol used by the standard library
-   --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\compat\src\lib.rs:889:1
-    |
-889 | pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
-    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    |
-    = note: expected `unsafe extern "C" fn(*const i8) -> usize` (for the current target)
-               found `unsafe extern "C" fn(*const u8) -> usize`
-    = help: either fix the signature or remove any attributes like `#[unsafe(no_mangle)]`, `#[unsafe(export_name = "str
-len")]`, or `#[link_name = "strlen"]`
-    = help: allow this lint if the signature is compatible
-    = note: `#[warn(suspicious_runtime_symbol_definitions)]` on by default
-
 warning: dropping unsupported crate type `cdylib` for target `thumbv7a-pc-windows-msvc-11203888916865665807`
 
-warning: `wp81-compat` (lib) generated 1 warning
 warning: use of deprecated constant `std::f32::NAN`: replaced by the `NAN` associated constant on `f32`
    --> phira\src\scene\song.rs:439:33
     |
@@ -1082,4 +1342,4 @@ help: first cast to a pointer `as *const ()`
     |                               ++++++++++++
 
 warning: `prpr-port` (lib) generated 44 warnings (run `cargo fix --lib -p prpr-port` to apply 42 suggestions)
-    Finished `release` profile [optimized] target(s) in 2m 46s
+    Finished `release` profile [optimized] target(s) in 11m 23s

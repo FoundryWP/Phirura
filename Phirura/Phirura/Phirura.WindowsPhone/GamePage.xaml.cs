@@ -79,6 +79,30 @@ namespace Phirura
         /// needs the moment the finger actually went down - up to a frame of error otherwise.
         private readonly Dictionary<uint, double> _rustPressTime = new Dictionary<uint, double>();
 
+        // --- phira mode -----------------------------------------------------
+        //
+        // Phira mode is what "launched without a chart" means. `App.OnLaunched` navigates here
+        // with `MainPage.PendingChart` still null, and this page then runs phira's own front end
+        // instead of a chart from the list.
+        //
+        // `_chart`, `_judge` and `_clock` stay null for the entire session, which is why every one
+        // of them sits behind this flag rather than merely behind an "unlikely" branch: a phira
+        // build that reached `_chart.Duration` or `_clock.Resync` would throw in the render loop,
+        // i.e. inside `CompositionTarget.Rendering`, where the exception takes down the frame loop
+        // rather than the operation that caused it.
+        private bool _phiraMode;
+
+        /// phira's timeline in seconds - the value `host::CLOCK` holds, advanced by `dt`.
+        ///
+        /// The chart path takes this from `MusicClock`, anchored to the audio. There is no audio
+        /// on this path: phira's menu, its animations and prpr's note timings are all integrated
+        /// from `dt`, so the shell is the one keeping the number. Touch stamps come from here for
+        /// the same reason `prpr` ages a press with `t - (uptime - time) * speed` - the press time
+        /// and the frame time have to be counting the same seconds, or every judgement is late by
+        /// however long ago the finger went down.
+        private double _phiraTime;
+        private DateTime _phiraLastFrameUtc;
+
         public GamePage()
         {
             this.InitializeComponent();
@@ -101,6 +125,14 @@ namespace Phirura
             Window.Current.Activated += OnWindowActivated;
             Application.Current.Resuming += OnAppResuming;
             _entry = MainPage.PendingChart;
+            // `null` is both "cold start" and "nobody picked anything", and on this page they mean
+            // the same thing: run phira. The timeline is reset here too rather than in the field
+            // initializer, because it has to be re-zeroed on every arrival - the back-and-forth
+            // between the chart list and this page reuses the same navigation stack, and a second
+            // phira run inheriting the first one's accumulated time would start every judgement
+            // against a clock that never went back to zero.
+            _phiraMode = (_entry == null);
+            _phiraTime = 0.0;
             _settings = GameSettings.Load();
             this.Loaded += OnPageLoaded;
         }
@@ -358,6 +390,23 @@ namespace Phirura
         private void OnBackPressed(object sender, BackPressedEventArgs e)
         {
             e.Handled = true;
+            // phira mode: there is no `_clock` to pause against, phira owns its own screens, and
+            // the XAML pause overlay is collapsed - so `DoPause` here would raise a menu over a
+            // game that keeps running underneath it. Back leaves instead. Going *forward* to
+            // `MainPage` rather than only `GoBack` matters because this page can be the first one
+            // in the stack (that is how a launch arrives), where `CanGoBack` is false.
+            if (_phiraMode)
+            {
+                if (this.Frame.CanGoBack)
+                {
+                    this.Frame.GoBack();
+                }
+                else
+                {
+                    this.Frame.Navigate(typeof(MainPage));
+                }
+                return;
+            }
             if (!_paused && !_finished)
             {
                 DoPause();
@@ -384,6 +433,14 @@ namespace Phirura
 
         private async Task StartAsync()
         {
+            // phira mode has no chart to parse, so it is decided first: the `_entry` guard below
+            // would otherwise reject the launch outright, which is exactly the "no chart selected"
+            // screen this page used to show.
+            if (_phiraMode)
+            {
+                StartPhiraAsync();
+                return;
+            }
             if (_entry == null)
             {
                 LoadingText.Text = "没有选中的谱面。";
@@ -500,6 +557,75 @@ namespace Phirura
             {
                 AppLog.Write("GamePage.StartAsync", ex);
                 LoadingText.Text = "载入失败：" + ex.Message;
+            }
+        }
+
+        /// <summary>
+        /// Boots phira's own front end instead of parsing a chart.
+        ///
+        /// Everything the chart path does above is either phira's job or not on this path: phira
+        /// loads its own textures through `load_texture`, owns its own `Judge` and HUD, and has no
+        /// music to anchor a `MusicClock` to. So the chart parse, the five note textures, the
+        /// judge-line textures, `_judge` and `_clock` are all simply absent, and what remains is
+        /// the geometry, the renderer that rasterises the port frame, and the engine.
+        ///
+        /// Synchronous, and called without `await`, because everything in it is: `PhiraBoot`
+        /// blocks on the UI thread by design (see its own doc - it polls phira's `the_main` until
+        /// it parks, and phira is served entirely by synchronous shell hooks), so there is no point
+        /// pretending to yield.
+        /// </summary>
+        private void StartPhiraAsync()
+        {
+            try
+            {
+                LoadingText.Text = "正在启动 phira…";
+
+                double w = GameSurface.ActualWidth;
+                double h = GameSurface.ActualHeight;
+                if (w < 10 || h < 10)
+                {
+                    w = Window.Current.Bounds.Width;
+                    h = Window.Current.Bounds.Height;
+                }
+                _aspectRatio = (float)Math.Min(16.0 / 9.0, w / h);
+
+                // Null textures. The five are what the *C#* chart path draws with, and `OnDraw`
+                // cannot reach that path while a port frame is set - it replays the port frame and
+                // returns - nor crash when there is neither, because it bails out on
+                // `_chart == null` before touching any of them. The constructor tolerates the
+                // nulls too: `BitmapOf(null)` is null and `Tint` only runs behind a `!= null`, so
+                // this also drops five PNG decodes between the launch and the first frame.
+                _renderer = new Win2DChartRenderer(GameCanvas, w, h, _aspectRatio, null, null, null, null, null);
+                _renderer.FlipVertical = _settings.FlipVertical;
+                _renderer.NoteWidth = (float)(Consts.NoteWidthRatioBase * _settings.NoteScale);
+                _renderer.NoteScale = _settings.NoteScale;
+                _renderer.LineThickness = 0.01 * _settings.LineThickness;
+
+                // prpr draws all three of these itself, and the XAML copies of them are only ever
+                // written from the chart branch of `OnRendering` - so left up they would sit on
+                // top of phira's HUD at whatever they were initialised to ("0", "100.00%").
+                HudRoot.Visibility = Visibility.Collapsed;
+                PauseButton.Visibility = Visibility.Collapsed;
+
+                StartRustEngine();
+                if (!_rustCreated)
+                {
+                    LoadingText.Text = "phira 启动失败：" + PrprPort.GameLastError();
+                    return;
+                }
+
+                // Before the first frame: the overlay is a sibling of `GameSurface`, so it would
+                // otherwise cover whatever phira is drawing behind it.
+                LoadingOverlay.Visibility = Visibility.Collapsed;
+                AppLog.Write("GamePage: phira mode, ar=" + _aspectRatio.ToString("0.###")
+                    + " screen=" + _rustW + "x" + _rustH + " px @ " + _rustScale.ToString("0.0"));
+                _phiraLastFrameUtc = DateTime.UtcNow;
+                HookLoop();
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("GamePage.StartPhiraAsync", ex);
+                LoadingText.Text = "启动失败：" + ex.Message;
             }
         }
 
@@ -636,9 +762,14 @@ namespace Phirura
             // reads that field and treats `NegativeInfinity` as "now" (`Judge.cs:368`) - writing a
             // real time there would change the fallback path's behaviour. A stale entry is harmless:
             // the next press of the same id overwrites it before it can be read.
-            if (UseRustEngine && _clock != null)
+            if (UseRustEngine)
             {
-                _rustPressTime[id] = _clock.Now;
+                // `_clock` is null in phira mode, where the timeline is `_phiraTime` instead. The
+                // stamp has to happen either way: `PushRustTouches` falls back to the *frame's*
+                // time when it finds no entry, which is up to a frame late, and `prpr` ages the
+                // touch from the stamp - so phira would judge every press one frame late while the
+                // chart path judged it on time.
+                _rustPressTime[id] = (_clock != null) ? _clock.Now : _phiraTime;
             }
             try
             {
@@ -703,6 +834,18 @@ namespace Phirura
             if (_calibrating)
             {
                 UpdateCalibration();
+                return;
+            }
+
+            if (_phiraMode)
+            {
+                // phira owns its judge, its clock and its HUD, so none of the guards below apply:
+                // there is no `_chart` to wait for, no `_clock` to resync against the audio, no
+                // duration to finish at, and nothing to resync. `_paused` is deliberately not
+                // tested either - it is only ever set by `DoPause`, which phira mode cannot reach
+                // (the pause button is collapsed and Back leaves instead), and honouring it would
+                // freeze the frame loop while phira kept animating in its own future.
+                RenderPhiraFrame();
                 return;
             }
 
@@ -854,6 +997,24 @@ namespace Phirura
             _rustH = (uint)Math.Max(1.0, Math.Round(h * _rustScale));
             PrprPort.GameSetScreen(_rustW, _rustH);
 
+            if (_phiraMode)
+            {
+                // The screen size is the only thing this path has in common with the chart one:
+                // `PhiraBoot` pumps phira's own `the_main` future rather than building a
+                // `GameScene`, so there is no folder and no chart file - and `_entry` must not be
+                // read here, because in phira mode there is not one. Its `BasePath` would be the
+                // NRE this branch exists to avoid.
+                var boot = System.Diagnostics.Stopwatch.StartNew();
+                AppLog.WriteSync("GamePage: phira boot (screen " + _rustW + "x" + _rustH + " px @ "
+                    + _rustScale.ToString("0.0") + ")");
+                PrprPort.GameResult bootResult = PrprPort.PhiraBoot();
+                boot.Stop();
+                _rustCreated = bootResult == PrprPort.GameResult.Ok;
+                AppLog.WriteSync("GamePage: phira boot -> " + (int)bootResult + " in " + boot.ElapsedMilliseconds
+                    + " ms" + (_rustCreated ? "" : " (" + PrprPort.GameLastError() + ")"));
+                return;
+            }
+
             // `BasePath` is a URI ("ms-appx:///Assets/charts/190") or a StorageFolder path, and the
             // engine wants the chart's directory *name* under `charts\` - the last segment of
             // either form.
@@ -892,7 +1053,26 @@ namespace Phirura
         private void RenderRustFrame(double t)
         {
             PrprPort.GameSetTime(t);
+            PushRustTouches(t);
 
+            PrprPort.DrainFrame frame = PrprPort.GameFrameSized(0.0);
+            _renderer.DrawPortFrame(frame);
+            _renderer.Present();
+        }
+
+        /// <summary>
+        /// Queues this frame's pointers for the Rust engine, and retires the released ones.
+        ///
+        /// Shared verbatim by both Rust paths, and split out of <c>RenderRustFrame</c> because the
+        /// only thing that differs between them is which number is used as the press time - the
+        /// music clock on one side, <c>_phiraTime</c> on the other - and that difference is
+        /// already resolved by the time either caller gets here.
+        ///
+        /// It has to run <em>before</em> the frame call: <c>prpr</c> reads the queue during
+        /// <c>update</c>, which happens inside it, so a pointer pushed afterwards is a frame late.
+        /// </summary>
+        private void PushRustTouches(double t)
+        {
             // Every finger still down gets an event this frame, not only the ones that moved:
             // `prpr` takes the touch *state* from `touches()` and the *events* from its own queue,
             // and a frame with no event for a finger reads as "nothing is holding that note".
@@ -937,6 +1117,52 @@ namespace Phirura
             _toRemove.Clear();
 
             PrprPort.DrainFrame frame = PrprPort.GameFrameSized(0.0);
+            _renderer.DrawPortFrame(frame);
+            _renderer.Present();
+        }
+
+        /// <summary>
+        /// Drives phira's own loop for one frame.
+        ///
+        /// The mirror of <c>RenderRustFrame</c>, and every difference is the clock.
+        ///
+        ///   1. There is no <c>GameSetTime</c>. That call exists to pin the engine timeline to the
+        ///      music, and phira has none: <c>host::frame(dt)</c> advances `CLOCK` itself from
+        ///      wherever it already is. Setting it as well would rewind the timeline to the value
+        ///      it had a frame ago, and the game would advance at half the rate the shell thinks it
+        ///      is running at.
+        ///   2. `GameFrameSized(dt)` instead of `0` for the same reason - the chart path hands the
+        ///      engine an absolute time and asks it not to move, this path hands it a delta and
+        ///      asks it to integrate.
+        ///   3. `dt` is measured here rather than taken from `GetFrameTime`, which answers a
+        ///      hard-coded 1/60 on this target (miniquad's `set_now_micros` has no caller, so the
+        ///      macroquad clock never runs).
+        /// </summary>
+        private void RenderPhiraFrame()
+        {
+            DateTime now = DateTime.UtcNow;
+            double dt = (now - _phiraLastFrameUtc).TotalSeconds;
+            _phiraLastFrameUtc = now;
+            if (!(dt > 0.0))
+            {
+                dt = 1.0 / 60.0;
+            }
+            else if (dt > 0.05)
+            {
+                // 50 ms - twice the 30 fps period. Anything longer is a hitch, and the very first
+                // frame is the worst of them: it follows a boot that took seconds, so without this
+                // clamp phira would open by integrating one enormous step, jumping its animations
+                // and eating whatever input window fell inside it.
+                dt = 0.05;
+            }
+            _phiraTime += dt;
+
+            // `_phiraTime` rather than a separate "now": it has just been advanced, which is
+            // exactly where `host::CLOCK` now points, so a press stamped with it is measured
+            // against the same origin `prpr` will read.
+            PushRustTouches(_phiraTime);
+
+            PrprPort.DrainFrame frame = PrprPort.GameFrameSized(dt);
             _renderer.DrawPortFrame(frame);
             _renderer.Present();
         }

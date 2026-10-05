@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-r"""Two textual patches applied to third-party crates in the cargo registry.
+r"""Textual patches applied to third-party crates in the cargo registry.
 
   1. Strip `raw-dylib` link attributes (which/getrandom) - see below.
   2. Give `windows-sys` its missing `target_arch = "arm"` struct definitions.
+  3. Textual substitutions (xxhash-rust's NEON cfg) - see `TEXT_REPLACEMENTS`.
+  4. Drop `kind = "raw-dylib"` from the binding macros of `windows-link`/`windows-targets`.
 
-Both are the same shape of problem: a dependency is written for a target we are not using, and no
-patch point exists between `cargo` and the extracted source. Pass 1 lives at the bottom of this
-docstring's original scope; pass 2 is described next to `ARM_CFG_TARGETS`.
+All four are the same shape of problem: a dependency is written for a target we are not using,
+and no patch point exists between `cargo` and the extracted source. Pass 1 lives at the bottom
+of this docstring's original scope; pass 2 is described next to `ARM_CFG_TARGETS`; pass 4 next
+to `RAW_DYLIB_CLAUSES`.
 
 Why pass 1 exists, and why it is separate from `wp81_std_patch.py`
 ----------------------------------------------------------------
@@ -50,6 +53,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import os
 import re
 import sys
@@ -120,6 +124,38 @@ TEXT_REPLACEMENTS = (
 
 # Derived so `targets()` and the substitution loop cannot drift apart.
 TEXT_CRATES = tuple(p for p, _f, _r in TEXT_REPLACEMENTS)
+
+# Pass 4: attributes to delete from the Windows binding *macros* of these crates.
+#
+# `windows-link` (and `windows-targets` under its `windows_raw_dylib` cfg) define `link!` as
+# a macro that expands to `#[link(name = $library, kind = "raw-dylib", ...)]`. Every caller -
+# `chrono`, `parking_lot_core`, `libloading` and the whole `windows-sys 0.61` surface - is
+# therefore bound with raw-dylib, and raw-dylib makes rustc synthesise an *import descriptor*
+# into the caller's object no matter what the linker later decides about duplicate symbols.
+# That is what puts `__imp_Sleep`, `__imp_QueryDosDeviceW`, `__imp_GetTimeZoneInformationForYear`
+# and `__imp_NtCreateFile` in the finished image: `wp81-compat` defines all four as plain
+# `#[no_mangle]` functions, but a plain definition never satisfies an `__imp_` reference, so
+# `kernel32.dll` and `ntdll.dll` stay on the import table and WP8.1 refuses to load the DLL.
+#
+# Rust's own `std` does NOT have this problem, because `windows_raw_dylib` is an opt-in cargo
+# feature of `library/windows_link` that `-Zbuild-std-features=compiler-builtins-mem` never
+# enables - so `std` takes `link_dylib` and emits a plain `#[link(name = "...")]`.
+#
+# Deleting only the `kind`/`modifiers`/`import_name_type` clauses keeps `#[link(name = $library)]`,
+# which is the point: the declaration still tells the linker where the symbol may come from, so
+# a symbol `wp81-compat` does not implement resolves from the import library instead of failing
+# the link. `check_imports.py` is then the thing that reports it, by name, in the next round -
+# a failed link would report nothing but a symbol count.
+#
+# The clauses are listed longest-coupling first only by accident of ordering: each is removed
+# independently and none of them appears in the replacement, so the pass is idempotent by
+# construction - a re-run finds 0 occurrences.
+RAW_DYLIB_CRATES = ("windows-link-", "windows-targets-")
+RAW_DYLIB_CLAUSES = (
+    ', kind = "raw-dylib"',
+    ', modifiers = "+verbatim"',
+    ', import_name_type = "undecorated"',
+)
 
 ARM_CFG_OLD = '#[cfg(target_arch = "x86")]'
 ARM_CFG_NEW = '#[cfg(any(target_arch = "x86", target_arch = "arm"))]'
@@ -256,7 +292,8 @@ def targets():
             roots.append(sub)
     for base in roots:
         for entry in sorted(os.listdir(base)):
-            if not entry.startswith(TARGET_CRATES + ARM_CFG_CRATES + TEXT_CRATES):
+            if not entry.startswith(TARGET_CRATES + ARM_CFG_CRATES + TEXT_CRATES
+                                     + RAW_DYLIB_CRATES):
                 continue
             root = os.path.join(base, entry)
             if not os.path.isdir(root):
@@ -266,6 +303,52 @@ def targets():
                     if f.endswith(".rs"):
                         out.append(os.path.join(dirpath, f))
     return out
+
+
+# Extra packages that must be cleaned alongside `windows-link`/`windows-targets`.
+#
+# Pass 4 patches a *macro*, and a macro's expansion is baked into whichever crate called it. The
+# wrong expansion therefore lives in chrono (which calls `link!` for
+# `GetTimeZoneInformationForYear`), in parking_lot_core (`Sleep`) and in the `windows-sys` users
+# (`CloseHandle`, `GetModuleHandleA`, `MoveFileExW`, `SetFileAttributesW`,
+# `GetFileInformationByHandle`) - cleaning the macro crate alone rewrites a file nothing links.
+DEPENDENT_PACKAGES = ("chrono", "libloading", "parking_lot_core", "windows-sys")
+
+
+def package_name(dirname):
+    """`windows-link-0.2.1` -> `windows-link`: the `-p` spec `cargo clean` accepts.
+
+    The regex is anchored at the end so only a trailing version suffix is removed; `re.sub`
+    scans left to right, so `xxhash-rust-0.8.17` loses `-0.8.17` and not `-rust`.
+    """
+    return re.sub(r"-\d[\w.\-+]*$", "", dirname)
+
+
+def target_packages():
+    """Every cargo package this script can modify, plus the ones that embed its macros.
+
+    Stable across runs - it depends on which crates are *targeted*, not on whether this run
+    happened to change anything - because `build-port.ps1` compares a content hash against the
+    one from the last build to decide whether to run it at all.
+    """
+    pkgs = set()
+    macro_patched = False
+    for entry in sorted(os.listdir(REGISTRY_SRC)):
+        base = os.path.join(REGISTRY_SRC, entry)
+        if not os.path.isdir(base):
+            continue
+        for name in sorted(os.listdir(base)):
+            if not name.startswith(TARGET_CRATES + ARM_CFG_CRATES + TEXT_CRATES
+                                   + RAW_DYLIB_CRATES):
+                continue
+            if not os.path.isdir(os.path.join(base, name)):
+                continue
+            pkgs.add(package_name(name))
+            if name.startswith(RAW_DYLIB_CRATES):
+                macro_patched = True
+    if macro_patched:
+        pkgs.update(DEPENDENT_PACKAGES)
+    return sorted(pkgs)
 
 
 def main(argv):
@@ -283,7 +366,12 @@ def main(argv):
     total = 0
     arm_total = 0
     text_total = 0
+    macro_total = 0
     touched = []
+    # Content of every target file *after* this script is done with it. See the note next to the
+    # marker lines at the end of `main` for why this - and not "did this run change anything" -
+    # is what decides whether cargo has to be told to rebuild.
+    sha = hashlib.sha256()
     for p in files:
         try:
             with open(p, "r", encoding="utf-8") as fh:
@@ -293,10 +381,15 @@ def main(argv):
 
         rel = os.path.relpath(p, REGISTRY_SRC)
         new_text = text
+        segs = re.split(r"[/\\]", p)
 
-        # Pass 1 - raw-dylib. `which-`/`getrandom-` have it, `windows-sys-` does not.
+        # Pass 1 - raw-dylib. Scoped to `which-`/`getrandom-` by crate prefix rather than by
+        # "the file mentions raw-dylib": pass 4 below targets crates whose raw-dylib lives
+        # inside a macro, and letting pass 1 reach those would delete the whole `#[link(..)]`
+        # attribute instead of just its `kind`, turning every binding into an unresolved
+        # extern. Which of the two a crate needs is a property of the crate, not of the text.
         n = 0
-        if "raw-dylib" in new_text:
+        if any(s.startswith(TARGET_CRATES) for s in segs) and "raw-dylib" in new_text:
             new_text, n = strip_all_attrs(new_text)
 
         # Pass 2 - arch cfg. Indexed off the normalized path rather than off the crate prefix so it
@@ -314,7 +407,6 @@ def main(argv):
         # in the crates listed in TEXT_REPLACEMENTS, and only in `.rs` files.
         t = 0
         if p.endswith(".rs"):
-            segs = re.split(r"[/\\]", p)
             for prefix, find, repl in TEXT_REPLACEMENTS:
                 if not any(s.startswith(prefix) for s in segs):
                     continue
@@ -329,7 +421,25 @@ def main(argv):
                 new_text, added = rx.subn(lambda _m: repl, new_text)
                 t += added
 
-        if n == 0 and m == 0 and t == 0:
+        # Pass 4 - raw-dylib inside a binding macro. See RAW_DYLIB_CLAUSES for why the
+        # attribute is reduced rather than deleted.
+        g = 0
+        if p.endswith(".rs") and any(s.startswith(RAW_DYLIB_CRATES) for s in segs):
+            for clause in RAW_DYLIB_CLAUSES:
+                count = new_text.count(clause)
+                if count:
+                    new_text = new_text.replace(clause, "")
+                    g += count
+
+        # Hashed unconditionally and *before* the early-out below: a file the passes leave alone
+        # still has to contribute, or a patch applied by hand since the last build would be
+        # invisible here and cargo would never be told to rebuild it.
+        sha.update(rel.encode("utf-8"))
+        sha.update(b"\0")
+        sha.update(new_text.encode("utf-8", "replace"))
+        sha.update(b"\0")
+
+        if n == 0 and m == 0 and t == 0 and g == 0:
             continue
 
         if n:
@@ -338,10 +448,13 @@ def main(argv):
             print("%-58s %d arch cfg(s) widened for arm" % (rel, m))
         if t:
             print("%-58s %d substitution(s) for arm" % (rel, t))
+        if g:
+            print("%-58s %d raw-dylib clause(s) dropped from binding macro" % (rel, g))
         touched.append(rel)
         total += n
         arm_total += m
         text_total += t
+        macro_total += g
         if new_text != text and args.apply:
             try:
                 os.chmod(p, 0o666)
@@ -356,12 +469,34 @@ def main(argv):
         print("%d arch cfg(s) %s" % (arm_total, "widened for arm" if args.apply else "would be widened for arm"))
     if text_total:
         print("%d substitution(s) %s" % (text_total, "applied" if args.apply else "would be applied"))
+    if macro_total:
+        print("%d raw-dylib clause(s) %s in binding macros"
+              % (macro_total, "dropped" if args.apply else "would be dropped"))
 
-    if args.check and total == 0 and arm_total == 0 and text_total == 0:
+    if args.check and total == 0 and arm_total == 0 and text_total == 0 and macro_total == 0:
         print("\nNOTE: nothing to strip. Either the patch is already applied, or the crates' "
               "attribute text changed shape and this script no longer recognises it - which "
               "would put kernel32.dll back in the import table. Verify with check_imports.py "
               "after the next link.", file=sys.stderr)
+
+    # Machine-readable tail for build-port.ps1, printed unconditionally.
+    #
+    # `cargo` fingerprints a *registry* dependency by package identity, not by the bytes it was
+    # extracted with - which is precisely why this script can rewrite those bytes in place and
+    # cargo goes on compiling the old ones. Editing a file is therefore not enough on its own:
+    # chrono keeps the macro expansion it built hours earlier, `link.exe` keeps finding
+    # `__imp_GetTimeZoneInformationForYear` in a raw-dylib descriptor, and `check_imports.py`
+    # keeps naming `kernel32.dll` even though every other symbol it used to name is gone.
+    #
+    # So the consumer needs two facts: what the registry is *meant* to contain, and what to throw
+    # away so cargo notices. The hash covers the post-patch content of every target file rather
+    # than "what this run changed", because a patch applied by hand - or by a previous version of
+    # this script - changes the hash too, and would otherwise be silently skipped. `build-port.ps1`
+    # compares it against the hash recorded by the last successful build and runs
+    # `cargo clean -p` on the listed packages when they differ; that clean is the only step that
+    # actually breaks the link between the patched source and the compiled crate.
+    print("REGISTRY_PATCH_HASH=" + sha.hexdigest())
+    print("REGISTRY_PATCH_CLEAN=" + ",".join(target_packages()))
     return 0
 
 

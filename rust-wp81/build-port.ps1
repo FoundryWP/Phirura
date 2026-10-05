@@ -78,6 +78,54 @@ $py = "C:\Users\admin\.workbuddy-ai\binaries\python\versions\3.13.12\python.exe"
 & $py (Join-Path $here "wp81_registry_patch.py") --apply
 if ($LASTEXITCODE -ne 0) { throw "registry patch failed ($LASTEXITCODE)" }
 
+# Second half of the same pass, and the one that has to run before cargo rather than after:
+# `phira-mp` is the only crate asking tokio for `net`, and that single feature line is what
+# enables `mio` - whose Windows IOCP/AFD path links ws2_32.dll, kernel32.dll and ntdll.dll into
+# the image whether or not any of it is called. The registry patch above cannot reach a git
+# checkout, so this is its counterpart: drop `net` from the tokio table and stand a failing
+# `TcpStream` in for the type the two phira-mp crates import. Idempotent, and `--check` is the
+# same assertion `wp81_registry_patch.py --check` makes.
+& $py (Join-Path $here "wp81_phira_mp_patch.py") --check
+if ($LASTEXITCODE -ne 0) {
+    & $py (Join-Path $here "wp81_phira_mp_patch.py") --apply
+    if ($LASTEXITCODE -ne 0) { throw "phira-mp patch failed ($LASTEXITCODE)" }
+}
+
+# NOTE, if step 3 ever reports `kernel32.dll` after a patch above has changed: re-running the
+# two scripts is NOT enough, and neither is `cargo clean -p`.
+#
+# cargo fingerprints a registry dependency by package identity, not by the bytes it was extracted
+# with, so a crate compiled before a patch goes on linking against the old expansion for ever. That
+# is not a theory: `windows-link` was patched at 14:26 on 2026-10-05, chrono's rlib was still the
+# one built at 12:57, `port-cargo.log` showed only `phira` and `prpr-port` being compiled, and
+# `link.exe` kept emitting `prpr_port.lib(kernel32.dll)` with `__imp_GetTimeZoneInformationForYear`
+# in it while every other symbol had already moved to an API set.
+#
+# `cargo clean -p` is the obvious repair and it does not work here: this cargo keeps the rlib *and*
+# its fingerprint together under
+#
+#   target\thumbv7a-pc-windows-msvc\release\build\<package>\<hash>\
+#
+# and `cargo clean -p <package>` does not remove that directory - a second run reported
+# "Removed 0 files" with `libchrono-*.rlib` still dated 12:57. What makes the unit dirty is the
+# directory being gone. So the repair is to *move* it (moved, not deleted, so it can be put back),
+# starting from `phira-main\phira-main`:
+#
+#   $b    = 'target\thumbv7a-pc-windows-msvc\release\build'
+#   $park = 'target\thumbv7a-pc-windows-msvc\build-parked'
+#   foreach ($p in 'windows-link','windows-targets','windows-sys','chrono',
+#                  'parking_lot_core','libloading','which','getrandom','xxhash-rust') {
+#       Move-Item (Join-Path $b $p) (Join-Path $park $p) -Force
+#   }
+#
+# The list is also printed by the scripts above as `REGISTRY_PATCH_CLEAN=<csv>` / `PHIRA_MP_CLEAN`
+# - use that rather than this literal, so it cannot drift. Downstream crates (chrono, windows-sys,
+# parking_lot_core) go dirty on their own once `windows-link` recompiles to a different metadata
+# hash, but they are in the list too so a partial failure does not leave one of them stale.
+#
+# Deliberately not automatic: `check_imports.py` in step 3 catches this exact failure, and moving
+# the directories costs a recompile of ~40 crates on every patch change.
+
 Write-Host "`n=== 1. cargo build -p prpr-port (staticlib) ==="
 # Every -Z argument containing a comma MUST be quoted: unquoted, the shell parses `std,panic_abort`
 # as an array literal and fails to parse the whole script, so nothing runs at all.

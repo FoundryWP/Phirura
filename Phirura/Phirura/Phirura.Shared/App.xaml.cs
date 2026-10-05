@@ -168,18 +168,24 @@ namespace Phirura
                 rootFrame.Navigated += this.RootFrame_FirstNavigated;
 #endif
 
-                // When the navigation stack isn't restored navigate to the first page,
-                // configuring the new page by passing required information as a navigation
-                // parameter
+                // First page. On Windows Phone that is `GamePage` booting straight into Rust
+                // phira's own front end - not the chart list.
                 //
-                // The Stage 1 shortcut that used to land straight on `RustStage1Page` is gone:
-                // Stage 1 has passed acceptance on device (60 fps, 154 commands per frame, 76
-                // textures - the same numbers the desktop harness reports), and while it was in
-                // place every redeploy put the acceptance harness on screen instead of the chart
-                // list, so a run could never reach `GamePage` without a manual back-press. The
-                // harness stays reachable from `MainPage`, which is where a redeploy should start
-                // now that the thing being exercised is chart playback rather than the renderer.
-                if (!rootFrame.Navigate(typeof(MainPage), e.Arguments))
+                // `MainPage.PendingChart` is what GamePage reads to decide what to play, and null
+                // is the only signal it has for "play nothing, run phira instead": a cold start
+                // and "nobody picked anything" are indistinguishable from outside. It is assigned
+                // here rather than left to the field default because a value left behind by an
+                // earlier navigation in the same process would silently launch into a chart nobody
+                // chose.
+                //
+                // The list is still reachable - GamePage's back button goes back to it - which is
+                // also where the Stage 1 acceptance harness is linked from.
+                Type firstPage = typeof(MainPage);
+#if WINDOWS_PHONE_APP
+                MainPage.PendingChart = null;
+                firstPage = typeof(GamePage);
+#endif
+                if (!rootFrame.Navigate(firstPage, e.Arguments))
                 {
                     throw new Exception("Failed to create initial page");
                 }

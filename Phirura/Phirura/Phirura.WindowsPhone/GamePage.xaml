@@ -37,8 +37,9 @@
             <win2d:CanvasControl x:Name="GameCanvas" ClearColor="#FF07070B" UseSharedDevice="True" />
         </Grid>
 
-        <!-- HUD -->
-        <Grid IsHitTestVisible="False" Margin="18,10,18,10">
+        <!-- HUD. Collapsed in phira mode: prpr draws its own score/combo, so leaving this up
+             would put a second, frozen set of numbers over the real ones. -->
+        <Grid x:Name="HudRoot" IsHitTestVisible="False" Margin="18,10,18,10">
             <TextBlock x:Name="ScoreText" Text="0" FontSize="26" Foreground="#FFF2F2F6"
                        HorizontalAlignment="Right" VerticalAlignment="Top" />
             <TextBlock x:Name="AccText" Text="100.00%" FontSize="13" Foreground="#FF9A9AAA"

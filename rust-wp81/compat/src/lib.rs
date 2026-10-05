@@ -1284,6 +1284,68 @@ pub unsafe extern "system" fn GetActiveProcessorCount(_groupNumber: u16) -> u32 
 }
 
 // ===========================================================================
+// two bindings that still reached the import table after everything else moved here
+//
+// `std` binds `QueryDosDeviceW` through its own `windows_link::link!`, whose `windows_raw_dylib`
+// feature `-Zbuild-std-features=compiler-builtins-mem` never enables - so the expansion is a
+// plain `#[link(name = "kernel32")] extern` and the reference is a *direct* symbol. `chrono`
+// binds `GetTimeZoneInformationForYear` the same way through the `windows-link` crate (whose
+// `kind = "raw-dylib"` pass 4 of `wp81_registry_patch.py` deletes).
+//
+// Both matter for the same reason: `/FORCE:MULTIPLE` decides nothing until a symbol is actually
+// unresolved. Every other name `kernel32.dll` used to carry was already implemented here, but a
+// single one that was not is enough for link.exe to pull that library's descriptor member - and
+// the descriptor, not the symbol, is what WP8.1's loader refuses. `check_imports.py` names it.
+//
+// `QueryDosDeviceW` is the `canonicalize` fallback, querying DOS device namespaces. A phone has
+// none, so "no such device" (a zero-length result) is the truthful answer and std degrades to
+// "path not found" rather than to an error.
+//
+// `GetTimeZoneInformationForYear` is chrono's entire Windows time-zone path. Answering 1 with an
+// all-zero `TIME_ZONE_INFORMATION` is the UTC answer: `Bias`, `StandardBias` and `DaylightBias`
+// of 0 give an offset of 0 minutes, and a zeroed `SYSTEMTIME` is the documented "no transition"
+// marker, so `TzInfo::for_year` yields one fixed offset of 0 instead of `MappedLocalTime::None`.
+// Answering 0 would be shorter, but it pushes every local-time conversion onto the fallback path
+// rather than giving it a correct answer.
+
+/// Layout of Win32's `TIME_ZONE_INFORMATION` on a 32-bit target. Named rather than written as
+/// 172 raw bytes so `write_bytes` above cannot silently zero the wrong amount if a field moves.
+///
+/// The two dates are `SYSTEMTIME` - eight `WORD`s, hence `[u16; 8]` and not `[u16; 16]`, a
+/// mistake the assertion below turns into a compile error instead of a 204-byte zeroing of a
+/// 172-byte caller buffer.
+#[repr(C)]
+struct TimeZoneInformation {
+    bias: i32,
+    standard_name: [u16; 32],
+    standard_date: [u16; 8],
+    standard_bias: i32,
+    daylight_name: [u16; 32],
+    daylight_date: [u16; 8],
+    daylight_bias: i32,
+}
+
+const _: () = assert!(core::mem::size_of::<TimeZoneInformation>() == 172);
+
+#[no_mangle]
+pub unsafe extern "system" fn QueryDosDeviceW(_lp_device_name: *const u16,
+                                              _lp_target_path: *mut u16,
+                                              _ucch_max: u32) -> u32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn GetTimeZoneInformationForYear(_w_reserved: u16,
+                                                            _p_dynamic: *const c_void,
+                                                            ptzi: *mut u8) -> i32 {
+    if ptzi.is_null() {
+        return 0;
+    }
+    core::ptr::write_bytes(ptzi as *mut TimeZoneInformation, 0, 1);
+    1
+}
+
+// ===========================================================================
 // process creation - absent by design on WP8.1
 //
 // These two appeared only once the game host existed, because `catch_unwind` pulls in std's panic
