@@ -96,12 +96,24 @@ opt-level = 2
 # the port's own manifest.
 # ===========================================================================
 
-# rfd binds the Win32 common dialogs through windows-sys, and windows-sys 0.61.2 is the only crate
-# in the whole graph that fails to compile for this target (its Win32_UI_Shell module references
-# APPBARDATA / SHFILEOPSTRUCTW / NOTIFYICONDATAW and friends, which its feature gating does not
-# define). Removing rfd removes windows-sys.
+# rfd binds the Win32 common dialogs through windows-sys, and those dialogs do not exist on
+# Windows Phone 8.1 - a WP app shows `FileOpenPicker`/`FileSavePicker` instead, which the C#
+# side already drives. So rfd is replaced by a shim that forwards to the shell's pickers rather
+# than merely compiling.
+#
+# (windows-sys itself no longer fails to build: its per-architecture struct definitions omit
+# `target_arch = "arm"`, which `rust-wp81/wp81_registry_patch.py` adds. That patch is what let
+# `windows-sys` stop being the blocker; rfd would still have nothing to call.)
 [patch.crates-io]
 rfd = { path = "../../rust-wp81/shims/rfd" }
+
+# `phira`'s entire API layer sits on reqwest, whose `rustls` feature pulls `aws-lc-sys` - a C
+# library whose build script reports `No target-specific source found: windows-arm` and fails to
+# compile `stdalign_check.c`. There is no source for this architecture, so the crate cannot be
+# built here at all. Beyond that, the port's rule is that networking belongs to the shell: this
+# shim keeps reqwest's type surface and leaves `send` unimplemented until an `http_request`
+# callback exists on the C# side.
+reqwest = { path = "../../rust-wp81/shims/reqwest" }
 
 # macroquad and miniquad are GL-only abstractions with no D3D or Metal backend, and WP8.1 has no
 # OpenGL at all. Rendering is already solved by Win2D on the C# side, so these record draw commands

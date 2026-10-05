@@ -172,19 +172,16 @@ namespace Phirura
                 // configuring the new page by passing required information as a navigation
                 // parameter
                 //
-                // **Stage 1 bring-up shortcut**: land straight on the Rust renderer test page rather
-                // than on MainPage, so every redeploy starts on the acceptance test with no menu
-                // round-trip in between. The type is resolved by name because this file is shared
-                // with the Windows head, where `Phirura.WindowsPhone.RustStage1Page` does not exist
-                // (`typeof` there would not compile); when it is absent the launch is unchanged.
-                var stage1 = Type.GetType(
-                    "Phirura.RustStage1Page, Phirura.WindowsPhone", false);
-                if (stage1 == null || !rootFrame.Navigate(stage1, e.Arguments))
+                // The Stage 1 shortcut that used to land straight on `RustStage1Page` is gone:
+                // Stage 1 has passed acceptance on device (60 fps, 154 commands per frame, 76
+                // textures - the same numbers the desktop harness reports), and while it was in
+                // place every redeploy put the acceptance harness on screen instead of the chart
+                // list, so a run could never reach `GamePage` without a manual back-press. The
+                // harness stays reachable from `MainPage`, which is where a redeploy should start
+                // now that the thing being exercised is chart playback rather than the renderer.
+                if (!rootFrame.Navigate(typeof(MainPage), e.Arguments))
                 {
-                    if (!rootFrame.Navigate(typeof(MainPage), e.Arguments))
-                    {
-                        throw new Exception("Failed to create initial page");
-                    }
+                    throw new Exception("Failed to create initial page");
                 }
             }
 

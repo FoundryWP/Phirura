@@ -356,6 +356,18 @@ pub trait Scene {
     fn next_scene(&mut self, _tm: &mut TimeManager) -> NextScene {
         NextScene::None
     }
+
+    /// Downcast hook, for a host that must read a concrete scene's state after it has been boxed
+    /// into `Main::scenes`.
+    ///
+    /// Returns `None` by default, and that default is what makes this non-breaking: the scenes in
+    /// `phira` and `phira-monitor` do not opt in and compile untouched. Only `GameScene` overrides
+    /// it, for the port's `wp81_game_result` - the shell has no other way to reach `GameScene`'s
+    /// judge, because `prpr-port` builds the scene, hands it over as `Box<dyn Scene>` and never
+    /// sees it again.
+    fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
+        None
+    }
 }
 
 pub trait RenderTargetChooser {

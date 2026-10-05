@@ -831,6 +831,13 @@ impl GameScene {
 }
 
 impl Scene for GameScene {
+    // See `Scene::as_any_mut`: the only scene that opts in, so the port's `wp81_game_result` can
+    // reach `self.judge` after this was boxed. Without it the shell's result page would read the
+    // judge it never advances and report a flawless zero-score play.
+    fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
+        Some(self)
+    }
+
     fn enter(&mut self, tm: &mut TimeManager, target: Option<RenderTarget>) -> Result<()> {
         #[cfg(target_arch = "wasm32")]
         on_game_start();

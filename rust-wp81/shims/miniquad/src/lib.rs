@@ -194,7 +194,47 @@ pub mod macroquad_compat_types {
     /// The context `prpr` passes around. The shell owns the real one; nothing here dereferences it.
     pub struct Context;
 
+    /// The display object, which does not exist: the C# shell owns the surface.
+    ///
+    /// Returned by value from [`Context::display_mut`] rather than by reference, because there is
+    /// no long-lived object to borrow - `phira`'s single use is the chained call
+    /// `.display_mut().set_pause_resume_listener(on_pause_resume)`, and returning owned avoids
+    /// standing up a `static mut` for something that holds no state.
+    #[derive(Debug, Default)]
+    pub struct Display;
+
+    impl Context {
+        pub fn display_mut(&mut self) -> Display {
+            Display
+        }
+    }
+
+    impl Display {
+        /// Accepted and dropped. The listener is how upstream learns the app was backgrounded, and
+        /// `phira` only installs it so its `MESSAGES_TX` channel can pause `Main` - but that
+        /// channel is read by `the_main`, which this build never runs. Lifecycle changes reach the
+        /// shell through its own callbacks instead.
+        pub fn set_pause_resume_listener<F>(&mut self, _listener: F)
+        where
+            F: FnMut(bool) + 'static,
+        {
+        }
+    }
+
     pub mod conf {
+        /// Window icons, sized the way upstream `miniquad` declares them (16/32/64 squared, RGBA).
+        ///
+        /// Needed only so `phira`'s `build_global_window_conf` type-checks: `phira` fills it from
+        /// `include_bytes!("../icon/..")`, and the array lengths must match those files exactly or
+        /// the struct literal will not coerce. Nothing on WP8.1 ever reads it - there is no window
+        /// chrome to put an icon on - so the 21 KB are carried into the `Conf` and dropped.
+        #[derive(Clone, Debug)]
+        pub struct Icon {
+            pub small: [u8; 16 * 16 * 4],
+            pub medium: [u8; 32 * 32 * 4],
+            pub big: [u8; 64 * 64 * 4],
+        }
+
         #[derive(Clone, Debug)]
         pub struct Conf {
             pub window_title: String,

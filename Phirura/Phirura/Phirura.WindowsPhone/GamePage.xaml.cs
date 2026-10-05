@@ -53,6 +53,32 @@ namespace Phirura
         private double _judgeTextUntil;
         private string _judgeText = string.Empty;
 
+        // --- Rust engine (M3) ----------------------------------------------
+        //
+        // `prpr` runs its own judge and draws its own HUD (`scene/game.rs` reads
+        // `self.judge.score()` at :432 and `self.judge.combo()` at :468), so the C# judge and the
+        // C# chart renderer cannot stay on this path: that would be two judges, two HUDs and two
+        // sets of hit sounds. The C# half is kept behind `UseRustEngine` because it is the only
+        // reference implementation to compare a first device run against - without it there is no way
+        // to tell "the engine is wrong" from "the wiring is wrong".
+        private const bool UseRustEngine = true;
+
+        /// Viewport in **pixels**, which is what `wp81_game_set_screen` wants: `prpr` projects
+        /// through `screen_width`/`screen_height`, and the recorded frame is 768x1229 px while
+        /// `GameSurface.ActualWidth` is in DIPs.
+        private double _rustScale = 1.0;
+        private uint _rustW;
+        private uint _rustH;
+        private bool _rustCreated;
+
+        /// Chart time of each finger's press, for the Rust path only.
+        ///
+        /// `TouchInput.Time` cannot be reused: `Judge.cs:368` reads it and treats `NegativeInfinity`
+        /// as "now", so writing a real time into it would silently change the C# judge on the
+        /// fallback path. `prpr` instead ages a touch with `t - (uptime - time) * speed`, which
+        /// needs the moment the finger actually went down - up to a frame of error otherwise.
+        private readonly Dictionary<uint, double> _rustPressTime = new Dictionary<uint, double>();
+
         public GamePage()
         {
             this.InitializeComponent();
@@ -102,6 +128,19 @@ namespace Phirura
             {
                 _renderer.Detach();
                 _renderer = null;
+            }
+            // `host::GAME` is a `thread_local!`, so this has to be the thread that created it - which
+            // is this one, because `StartRustEngine` ran on the UI thread and so did every frame.
+            if (UseRustEngine && _rustCreated)
+            {
+                try
+                {
+                    PrprPort.GameDestroy();
+                }
+                catch (Exception)
+                {
+                }
+                _rustCreated = false;
             }
             try
             {
@@ -434,6 +473,11 @@ namespace Phirura
                 _clock.Offset = -StartDelay - _chart.Offset + _settings.Offset;
                 Player.Volume = _settings.VolumeMusic;
 
+                if (UseRustEngine)
+                {
+                    StartRustEngine();
+                }
+
                 SongText.Text = _entry.Title + "  ·  " + _entry.LevelDisplay;
 
                 // Positive-path trace. Without this the log says nothing between "launched" and
@@ -588,6 +632,14 @@ namespace Phirura
             uint id = e.Pointer.PointerId;
             _active[id] = MakeTouch(id, TouchPhase.Started, e.GetCurrentPoint(GameSurface).Position);
             _justStarted.Add(id);
+            // The Rust path's press timestamp. Kept out of `TouchInput.Time` because the C# judge
+            // reads that field and treats `NegativeInfinity` as "now" (`Judge.cs:368`) - writing a
+            // real time there would change the fallback path's behaviour. A stale entry is harmless:
+            // the next press of the same id overwrites it before it can be read.
+            if (UseRustEngine && _clock != null)
+            {
+                _rustPressTime[id] = _clock.Now;
+            }
             try
             {
                 GameSurface.CapturePointer(e.Pointer);
@@ -679,8 +731,174 @@ namespace Phirura
 
             double t = _clock.Now;
 
-            // Snapshot active touches for this frame.
-            _frameTouches.Clear();
+            if (UseRustEngine)
+            {
+                RenderRustFrame(t);
+            }
+            else
+            {
+                // Snapshot active touches for this frame.
+                _frameTouches.Clear();
+                foreach (KeyValuePair<uint, TouchInput> kv in _active)
+                {
+                    TouchInput touch = kv.Value;
+                    if (_justStarted.Contains(kv.Key))
+                    {
+                        touch.Phase = TouchPhase.Started;
+                    }
+                    else if (touch.Phase == TouchPhase.Started)
+                    {
+                        touch.Phase = TouchPhase.Stationary;
+                    }
+                    _frameTouches.Add(touch);
+                }
+
+                _events.Clear();
+                _judge.Update(_chart, t, 1.0, _frameTouches, _badNotes, _settings.Autoplay, _events);
+                for (int i = 0; i < _events.Count; i++)
+                {
+                    ShowJudgement(_events[i]);
+                }
+
+                for (int i = 0; i < _toRemove.Count; i++)
+                {
+                    _active.Remove(_toRemove[i]);
+                }
+                _toRemove.Clear();
+
+                // Expire ghost notes.
+                for (int i = _badNotes.Count - 1; i >= 0; i--)
+                {
+                    if (t > _badNotes[i].Time + Win2DChartRenderer.BadNoteLifetime)
+                    {
+                        _badNotes.RemoveAt(i);
+                    }
+                }
+
+                _renderer.Render(_chart, t, 1f);
+                RenderBadNotes(t);
+                // Render()/RenderBadNote() only record the frame; this schedules the Win2D
+                // Draw callback that rasterises it.
+                _renderer.Present();
+            }
+            _justStarted.Clear();
+
+            _frameCount++;
+            if (_frameCount % 4 == 0 && !UseRustEngine)
+            {
+                // `prpr` draws its own score, combo and judgement text (`scene/game.rs` reads
+                // `self.judge.score()`), so the C# HUD would be a second one disagreeing with it.
+                UpdateHud(t);
+            }
+
+            if (t > _chart.Duration + 1.2)
+            {
+                Finish();
+            }
+        }
+
+        /// <summary>
+        /// Maps this page's <see cref="TouchPhase"/> onto `prpr`'s encoding.
+        ///
+        /// By name, never by number. This enum is declared <c>Started, Moved, Stationary, Ended,
+        /// Cancelled</c> while <c>miniquad::TouchPhase</c> - which is what <c>wp81_game_touch</c>
+        /// documents and what <c>prpr</c> matches on - is <c>Started, Stationary, Moved, Ended,
+        /// Cancelled</c>. <c>Stationary</c> and <c>Moved</c> are swapped between the two, so a numeric
+        /// cast would report every held finger as moving on every frame that it did not move.
+        /// </summary>
+        private static uint RustPhase(TouchPhase phase)
+        {
+            switch (phase)
+            {
+                case TouchPhase.Started: return 0;
+                case TouchPhase.Stationary: return 1;
+                case TouchPhase.Moved: return 2;
+                case TouchPhase.Ended: return 3;
+                default: return 4; // Cancelled
+            }
+        }
+
+        /// <summary>
+        /// Creates the Rust game and tells it the screen size.
+        ///
+        /// Called from the load path rather than the render loop because <c>wp81_game_create</c>
+        /// blocks for seconds - it parses the chart, builds the scene and uploads the textures - and
+        /// doing that inside <c>CompositionTarget.Rendering</c> would freeze the UI thread mid-frame.
+        ///
+        /// <c>host::GAME</c> is a <c>thread_local!</c>, so this has to run on the same thread as every
+        /// later <c>wp81_game_frame</c>. <c>OnRendering</c> is the UI thread and so is this, which is
+        /// why there is no background task here - unlike <c>RustStage1Page</c>, which needed one.
+        /// </summary>
+        private void StartRustEngine()
+        {
+            double w = GameSurface.ActualWidth;
+            double h = GameSurface.ActualHeight;
+            if (w < 1)
+            {
+                w = Window.Current.Bounds.Width;
+            }
+            if (h < 1)
+            {
+                h = Window.Current.Bounds.Height;
+            }
+            try
+            {
+                _rustScale = Windows.Graphics.Display.DisplayInformation.GetForCurrentView().RawPixelsPerViewPixel;
+            }
+            catch (Exception)
+            {
+                // A pre-layout read can fail. 1.0 keeps the projection self-consistent rather than
+                // degenerate, and the log line below carries the numbers that were actually used.
+            }
+            _rustW = (uint)Math.Max(1.0, Math.Round(w * _rustScale));
+            _rustH = (uint)Math.Max(1.0, Math.Round(h * _rustScale));
+            PrprPort.GameSetScreen(_rustW, _rustH);
+
+            // `BasePath` is a URI ("ms-appx:///Assets/charts/190") or a StorageFolder path, and the
+            // engine wants the chart's directory *name* under `charts\` - the last segment of
+            // either form.
+            string s = _entry.BasePath;
+            int slash = s.LastIndexOfAny(new[] { '/', '\\' });
+            string folder = slash >= 0 ? s.Substring(slash + 1) : s;
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            AppLog.WriteSync("GamePage: rust create " + folder + " / " + _entry.ChartFile
+                + " (screen " + _rustW + "x" + _rustH + " px @ " + _rustScale.ToString("0.0") + ")");
+            PrprPort.GameResult r = PrprPort.GameCreate(folder, _entry.ChartFile);
+            sw.Stop();
+            _rustCreated = r == PrprPort.GameResult.Ok;
+            AppLog.WriteSync("GamePage: rust create -> " + (int)r + " in " + sw.ElapsedMilliseconds + " ms"
+                + (_rustCreated ? "" : " (" + PrprPort.GameLastError() + ")"));
+        }
+
+        /// <summary>
+        /// Drives the real <c>prpr</c> engine for one frame.
+        ///
+        /// The order is a contract, and each step depends on the one before it:
+        ///
+        ///   1. <c>GameSetTime(t)</c> - the engine timeline is set *absolutely* from the music clock.
+        ///      <c>wp81_game_frame</c> advances it by <c>dt</c> internally, so the frame call must pass
+        ///      0 or the chart would run ahead of the music.
+        ///   2. push this frame's touches - <c>prpr</c> reads them during <c>update</c>, which happens
+        ///      inside the frame call, so they have to be queued already.
+        ///   3. <c>GameFrameSized(0)</c> - advances, renders, and drains at exactly the size the frame
+        ///      produced. The capacities cannot be guessed: <c>Drain</c> reads exactly
+        ///      <c>vertexCapacity</c> elements, so a larger one copies arena bytes no command refers to
+        ///      and <c>OnPortDraw</c> rasterises those.
+        ///   4. <c>DrawPortFrame</c> then <c>Present</c> - the frame is only stored by the first; the
+        ///      drawing happens in <c>OnPortDraw</c> on the UI thread, because a Win2D session is not
+        ///      valid outside the draw callback.
+        /// </summary>
+        private void RenderRustFrame(double t)
+        {
+            PrprPort.GameSetTime(t);
+
+            // Every finger still down gets an event this frame, not only the ones that moved:
+            // `prpr` takes the touch *state* from `touches()` and the *events* from its own queue,
+            // and a frame with no event for a finger reads as "nothing is holding that note".
+            //
+            // `Ndc` is converted here rather than in `MakeTouch` because the C# path needs NDC and
+            // `prpr` needs pixels, and `MakeTouch` is shared with the fallback.
             foreach (KeyValuePair<uint, TouchInput> kv in _active)
             {
                 TouchInput touch = kv.Value;
@@ -692,48 +910,35 @@ namespace Phirura
                 {
                     touch.Phase = TouchPhase.Stationary;
                 }
-                _frameTouches.Add(touch);
+                double time = t;
+                // Pre-declared: the project compiles as C# 5, which has no inline `out` declarations.
+                double pressed;
+                if (touch.Phase == TouchPhase.Started
+                    && _rustPressTime.TryGetValue(kv.Key, out pressed))
+                {
+                    time = pressed;
+                }
+                PrprPort.GameTouch(
+                    kv.Key,
+                    RustPhase(touch.Phase),
+                    (float)((touch.Ndc.X + 1.0) * 0.5) * _rustW,
+                    (float)((touch.Ndc.Y + 1.0) * 0.5) * _rustH,
+                    time);
             }
-            _justStarted.Clear();
 
-            _events.Clear();
-            _judge.Update(_chart, t, 1.0, _frameTouches, _badNotes, _settings.Autoplay, _events);
-            for (int i = 0; i < _events.Count; i++)
-            {
-                ShowJudgement(_events[i]);
-            }
-
+            // Released pointers are retired here, not by the C# branch's copy of this loop: the
+            // Rust path never enters that branch, so without this `_active` would never empty and
+            // every frame would keep pushing `Ended` for a finger that is already gone - and when
+            // the OS reuses that pointer id, `MakeTouch` would find stale state waiting for it.
             for (int i = 0; i < _toRemove.Count; i++)
             {
                 _active.Remove(_toRemove[i]);
             }
             _toRemove.Clear();
 
-            // Expire ghost notes.
-            for (int i = _badNotes.Count - 1; i >= 0; i--)
-            {
-                if (t > _badNotes[i].Time + Win2DChartRenderer.BadNoteLifetime)
-                {
-                    _badNotes.RemoveAt(i);
-                }
-            }
-
-            _renderer.Render(_chart, t, 1f);
-            RenderBadNotes(t);
-            // Render()/RenderBadNote() only record the frame; this schedules the Win2D
-            // Draw callback that rasterises it.
+            PrprPort.DrainFrame frame = PrprPort.GameFrameSized(0.0);
+            _renderer.DrawPortFrame(frame);
             _renderer.Present();
-
-            _frameCount++;
-            if (_frameCount % 4 == 0)
-            {
-                UpdateHud(t);
-            }
-
-            if (t > _chart.Duration + 1.2)
-            {
-                Finish();
-            }
         }
 
         private void RenderBadNotes(double t)
@@ -845,6 +1050,25 @@ namespace Phirura
             JudgeText.Text = t < _judgeTextUntil ? _judgeText : string.Empty;
         }
 
+        /// <summary>
+        /// The play's result, from whichever judge actually ran.
+        ///
+        /// On the Rust path the shell's <see cref="Judge"/> was never advanced, so its
+        /// <c>Result()</c> would describe a flawless zero-score play - a result page reading
+        /// "0 points, 100% accuracy" after a real play is worse than one reading nothing, because
+        /// it looks like a real verdict. <c>GamePlayResult</c> carries the whole thing, counts and
+        /// early/late included, because <c>ResultPage</c> displays all of them.
+        /// </summary>
+        private PlayResult RustResult()
+        {
+            PlayResult rust;
+            if (!UseRustEngine || PrprPort.GamePlayResult(out rust) != 0)
+            {
+                return _judge.Result();
+            }
+            return rust;
+        }
+
         private void Finish()
         {
             if (_finished)
@@ -860,7 +1084,7 @@ namespace Phirura
             catch (Exception)
             {
             }
-            LastResult = _judge.Result();
+            LastResult = RustResult();
             LastChartTitle = _entry.Title + "  ·  " + _entry.LevelDisplay;
             this.Frame.Navigate(typeof(ResultPage));
         }

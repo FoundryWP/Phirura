@@ -212,6 +212,7 @@ $exports = @(
     "wp81_draw_vertices",
     "wp81_draw_indices",
     "wp81_draw_reset",
+    "wp81_draw_counts",
     "wp81_draw_selftest",
     # the texture registry - see `wp81_texture_*`, which lets the shell rebuild an id as a bitmap
     "wp81_texture_count",
@@ -227,6 +228,7 @@ $exports = @(
     "wp81_game_frame",
     "wp81_game_destroy",
     "wp81_game_frames",
+    "wp81_game_result",
     "wp81_game_running",
     "wp81_game_set_screen",
     # Sampled from a timer while `wp81_game_create` runs - see the note on the export. Without it a

@@ -1,0 +1,39 @@
+[package]
+name = "reqwest"
+# Must satisfy `reqwest = { version = "0.13.2", ... }` in the phira workspace, or `[patch]` will
+# refuse the substitution instead of failing somewhere obvious.
+version = "0.13.2"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# An `reqwest` replacement for Windows Phone 8.1. See `src/lib.rs` for why this cannot be the real
+# crate, and `rust-wp81/shims/rfd` for the pattern this follows.
+
+[lib]
+path = "src/lib.rs"
+
+# `phira` and `phira-monitor` both enable a fixed list of features on `reqwest`. `[patch]` substitutes
+# the *package*, and cargo validates the requested feature names against the replacement - so every
+# name below has to exist even though none of them does anything here. Omitting one is a resolution
+# error ("package does not have feature `gzip`") rather than a compile error, which makes it look
+# like a manifest problem instead of a porting gap.
+[features]
+default = []
+json = []
+stream = []
+gzip = []
+charset = []
+http2 = []
+system-proxy = []
+rustls = []
+query = []
+
+[dependencies]
+# `Response::bytes` has to return the same `bytes::Bytes` `phira` names in its own signatures
+# (`File::fetch -> Result<Bytes>`), not a lookalike: the two meet at `cacache::write(&url, &bytes)`.
+bytes = "1"
+serde = "1"
+serde_json = "1"
+# `reqwest::Url` *is* `url::Url` upstream, and `phira::deeplink` uses the `url` crate directly while
+# `phira::page::settings` reaches it as `reqwest::Url`. Re-exporting keeps those one type.
+url = "2"

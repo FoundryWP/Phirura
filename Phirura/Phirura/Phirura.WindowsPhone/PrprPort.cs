@@ -52,6 +52,18 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern void wp81_draw_reset();
 
+        /// <summary>
+        /// How many vertices and indices the last <c>wp81_draw_encode</c> produced.
+        ///
+        /// Read this *before* <see cref="Drain"/>, not after: <c>Drain</c> reads exactly
+        /// <c>vertexCapacity</c> elements, so a capacity larger than the truth copies arena bytes no
+        /// command refers to - and <c>OnPortDraw</c> rasterises those, which makes the result a frame
+        /// of garbage geometry rather than a shorter frame - while a smaller one truncates a batch
+        /// mid-triangle. Neither shows up in a command count.
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void wp81_draw_counts(out uint vertices, out uint indices);
+
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern void wp81_draw_selftest();
 
@@ -144,6 +156,48 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern long wp81_game_frames();
 
+        /// <summary>
+        /// FFI mirror of Rust's <c>host::PlayResultAbi</c>.
+        ///
+        /// **Field order is the ABI.** It is deliberately not the order <c>PlayResult</c> uses, and
+        /// reordering either side would not fail anywhere - it would land values on the wrong
+        /// columns of the result screen.
+        ///
+        /// Every field is 4 bytes: the accuracy is carried as a <c>float</c> on purpose, which
+        /// makes the struct 72 bytes with no padding at all, so neither side has to agree on an
+        /// alignment rule first. That is the whole point - the usual way an <c>double</c> in the
+        /// middle of an FFI struct goes wrong is C rounding its offset to 8 and .NET to 4 (or the
+        /// other way), and there is nothing here to round.
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential)]
+        public struct PlayResultAbi
+        {
+            public float Accuracy;
+            public uint Score;
+            public uint MaxCombo;
+            public uint NumOfNotes;
+            public uint Count0;
+            public uint Count1;
+            public uint Count2;
+            public uint Count3;
+            public uint Early;
+            public uint Late;
+            public uint EarlyKind0;
+            public uint EarlyKind1;
+            public uint EarlyKind2;
+            public uint EarlyKind3;
+            public uint LateKind0;
+            public uint LateKind1;
+            public uint LateKind2;
+            public uint LateKind3;
+        }
+
+        /// <summary>
+        /// The running game's full result. See <see cref="GamePlayResult"/>.
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_game_result(out PlayResultAbi result);
+
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_game_running();
 
@@ -157,6 +211,42 @@ namespace Phirura
         // same `uint` the texture path already uses for it.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int wp81_game_last_error(IntPtr buf, uint cap);
+
+        /// <summary>
+        /// Queues one touch event for the frame about to be built. Must be called before
+        /// <see cref="GameFrame"/> - the frame drains the queue, so anything pushed after
+        /// it arrives a frame late.
+        ///
+        /// <paramref name="phase"/> is a plain number because the shell is C#: 0=Started,
+        /// 1=Stationary, 2=Moved, 3=Ended, 4=Cancelled - <c>miniquad::TouchPhase</c>'s
+        /// declaration order, which differs from this shell's own <c>TouchPhase</c> enum
+        /// (there Moved precedes Stationary). <paramref name="x"/> and <paramref name="y"/>
+        /// are screen pixels in the same space as <see cref="GameSetScreen"/>, because
+        /// that is what <c>prpr::judge</c> divides by <c>screen_width()</c> /
+        /// <c>screen_height()</c> to reach NDC. <paramref name="time"/> is uptime in the
+        /// same units as <see cref="GameSetTime"/> - effectively the chart time the
+        /// finger was at - because <c>prpr</c> ages the touch with
+        /// <c>t - (uptime - time) * speed</c> to rewind it to the chart moment it occurred.
+        ///
+        /// Returns 0, -1 for an unknown phase, or -2 when this frame's queue is full.
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_game_touch(uint id, uint phase, float x, float y, double time);
+
+        /// <summary>
+        /// Sets the engine timeline to an absolute time, before the next
+        /// <see cref="GameFrame"/>.
+        ///
+        /// The shell owns the music clock (it has the audio position), so the Rust side
+        /// must not invent one. Call this and then <see cref="GameFrame"/> with
+        /// <c>0.0</c> - not <c>dt</c> - because <c>host::frame</c> advances
+        /// <c>CLOCK</c> by <c>dt</c> itself, and passing both would advance the chart
+        /// twice as fast as the music. Absolute rather than differential because a
+        /// cumulative sum starts drifting the moment the shell misses a frame, and a
+        /// rhythm game cannot be restarted after a seek without one anyway.
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void wp81_game_set_time(double t);
 
         // --- the Rust -> C# direction -------------------------------------
 
@@ -420,6 +510,42 @@ namespace Phirura
             return Drain(vertexCapacity, indexCapacity);
         }
 
+        /// <summary>
+        /// Advances and renders one frame, then drains it at exactly the size that frame needs.
+        ///
+        /// The capacities are not the caller's to choose. <see cref="Drain"/> reads exactly
+        /// <c>vertexCapacity</c> elements, so a capacity larger than the frame's own vertex count
+        /// copies arena bytes no command refers to - and <c>Win2DChartRenderer.OnPortDraw</c>
+        /// **rasterises** those, which makes the symptom a frame of garbage geometry rather than a
+        /// shorter frame - while a smaller one truncates a batch mid-triangle. Both are invisible in
+        /// a command count, which is the only thing a caller could otherwise check.
+        ///
+        /// The counts are read *after* <c>wp81_game_frame</c> because that is the only moment they
+        /// exist: <c>wp81_draw_reset</c> zeroes them at the end of the previous drain.
+        /// </summary>
+        public static DrainFrame GameFrameSized(double dt)
+        {
+            int n = wp81_game_frame(dt);
+            if (n < 0)
+            {
+                return new DrainFrame
+                {
+                    Count = 0,
+                    Commands = new PortCmd[0],
+                    Vertices = new PortVertex[0],
+                    Indices = new ushort[0],
+                };
+            }
+            // The counts are read *after* `wp81_game_frame` because that is the only moment they
+            // exist: `wp81_draw_reset` zeroes them at the end of the previous drain. Locals are
+            // pre-declared because the WP8.1 project compiles as C# 5, which has no inline `out`
+            // declarations - a C# 7 syntax error here parses as a cascade starting at the call site.
+            uint vcap;
+            uint icap;
+            wp81_draw_counts(out vcap, out icap);
+            return Drain(vcap, icap);
+        }
+
         public static void GameDestroy()
         {
             wp81_game_destroy();
@@ -436,6 +562,43 @@ namespace Phirura
         }
 
         /// <summary>
+        /// The running game's full result.
+        ///
+        /// `prpr` owns the judge on this path, so the shell's own <c>Judge</c> is never advanced and
+        /// its <c>Result()</c> would describe a flawless zero-score play - a result page reading
+        /// "0 points, 100% accuracy" after a real play is worse than one reading nothing, because it
+        /// looks like a real verdict.
+        ///
+        /// Everything the result screen shows comes back here, counts included: <c>ResultPage</c>
+        /// reads <c>Score</c>, <c>MaxCombo</c>, <c>NumOfNotes</c>, <c>Counts</c> and
+        /// <c>Early</c>/<c>Late</c>, so a partial answer would put a real score next to "0 notes"
+        /// and read as a bug rather than as a known gap.
+        ///
+        /// Named <c>GamePlayResult</c> rather than <c>GameResult</c> because that name is already
+        /// taken by the status enum <see cref="GameCreate"/> returns - two members called
+        /// <c>GameResult</c> is CS0102, not an overload.
+        /// </summary>
+        /// <returns>0 when a game is running, -1 when there is none.</returns>
+        public static int GamePlayResult(out Phirura.Game.PlayResult result)
+        {
+            PlayResultAbi abi;
+            int rc = wp81_game_result(out abi);
+            result = new Phirura.Game.PlayResult
+            {
+                Score = abi.Score,
+                Accuracy = abi.Accuracy,
+                MaxCombo = abi.MaxCombo,
+                NumOfNotes = abi.NumOfNotes,
+                Counts = new uint[] { abi.Count0, abi.Count1, abi.Count2, abi.Count3 },
+                Early = abi.Early,
+                Late = abi.Late,
+                EarlyKind = new uint[] { abi.EarlyKind0, abi.EarlyKind1, abi.EarlyKind2, abi.EarlyKind3 },
+                LateKind = new uint[] { abi.LateKind0, abi.LateKind1, abi.LateKind2, abi.LateKind3 },
+            };
+            return rc;
+        }
+
+        /// <summary>
         /// Reports the shell's surface size to the Rust renderer.
         ///
         /// Must be called once after the drawing surface is measured and before the first frame:
@@ -445,6 +608,32 @@ namespace Phirura
         public static void GameSetScreen(float width, float height)
         {
             wp81_game_set_screen(width, height);
+        }
+
+        /// <summary>
+        /// Sets the engine timeline to an absolute time. See <see cref="GameSetTime"/>.
+        ///
+        /// Absolute rather than differential because <c>host::frame</c> advances <c>CLOCK</c> by
+        /// <c>dt</c> itself: the shell owns the music clock (it has the audio position), so it writes
+        /// the real time here and then calls the frame with <c>0.0</c>. A cumulative sum would start
+        /// drifting the moment the shell missed a frame, and a chart cannot be restarted after a seek
+        /// without one anyway.
+        /// </summary>
+        public static void GameSetTime(double t)
+        {
+            wp81_game_set_time(t);
+        }
+
+        /// <summary>
+        /// Queues one finger event for the frame about to render. See <c>wp81_game_touch</c>.
+        ///
+        /// Returns 0 on success, -1 for an unknown <paramref name="phase"/>, or -2 when this frame's
+        /// queue is full (the shell drops the event and the finger is absent from that frame's touch
+        /// state, which is recoverable; a `static mut` write past the end would not be).
+        /// </summary>
+        public static int GameTouch(uint id, uint phase, float x, float y, double time)
+        {
+            return wp81_game_touch(id, phase, x, y, time);
         }
 
         /// <summary>

@@ -564,6 +564,86 @@ pub fn frames() -> i64 {
     GAME.with(|slot| slot.borrow().as_ref().map(|g| g.frames as i64).unwrap_or(-1))
 }
 
+/// The running game's score, combo and accuracy, or -1 when nothing is running.
+///
+/// `scene::Main` owns the judge (`scene/game.rs:123`, `pub judge: Judge`), so this is the only way
+/// for the shell to learn how a play went. The shell's own `Judge` is never advanced on this path
+/// and would report a flawless zero-score run - a result page that says "0 points, 100% accuracy"
+/// after a real play is worse than one that says nothing, because it looks like a real verdict.
+/// The shell's result, laid out for FFI.
+///
+/// A port of `prpr::judge::PlayResult` rather than that type itself, because `PlayResult` has no
+/// `#[repr(C)]` - its field order and padding are Rust's to choose, so a C# mirror could not
+/// promise to match them. Copying field by field confines the risk to this one struct literal:
+/// a field added upstream breaks here at compile time, not silently on a result screen.
+///
+/// Every field is 4 bytes, `accuracy` carried as `f32` rather than the original `f64` on purpose.
+/// That makes the layout 72 bytes of `u32`/`f32` with no padding anywhere, which in turn means the
+/// two sides never have to agree on an alignment rule first - the usual way an `f64` in the middle
+/// of an FFI struct goes wrong is that C and .NET round its offset differently, and there is no
+/// offset to round here. The precision loss is irrelevant: the shell prints two decimal places of
+/// a ratio spanning 0..1, and `f32` carries seven significant digits.
+#[repr(C)]
+pub struct PlayResultAbi {
+    pub accuracy: f32,
+    pub score: u32,
+    pub max_combo: u32,
+    pub num_of_notes: u32,
+    pub counts: [u32; 4],
+    pub early: u32,
+    pub late: u32,
+    pub early_kind: [u32; 4],
+    pub late_kind: [u32; 4],
+}
+
+/// Fills `out` with the running game's result, or returns -1 when there is none.
+pub fn result(out: *mut PlayResultAbi) -> i32 {
+    GAME.with(|slot| {
+        let mut guard = slot.borrow_mut();
+        let game = match guard.as_mut() {
+            Some(g) => g,
+            None => return -1,
+        };
+        // The judge lives on `GameScene`, which `create` handed to `Main::new` as a
+        // `Box<dyn Scene>` - this is the only route back to it. Every step returns -1 rather than
+        // a default because there is no safe default: reporting "0 points, 0 notes" after a real
+        // play is worse than reporting nothing, since it looks like a real verdict. A loading or
+        // ending scene on top simply has no judge and reports -1, which the shell handles.
+        let scene = match game.main.scenes.last_mut() {
+            Some(s) => s,
+            None => return -1,
+        };
+        let any = match scene.as_any_mut() {
+            Some(a) => a,
+            None => return -1,
+        };
+        let gs = match any.downcast_mut::<GameScene>() {
+            Some(g) => g,
+            None => return -1,
+        };
+        let r = gs.judge.result();
+        // The only `unsafe`, and deliberately as small as it can be: `r` was already read through
+        // entirely safe code, so what the block needs is exactly what `wp81_game_result`
+        // documents - `out` writable for one `PlayResultAbi` when non-null.
+        if !out.is_null() {
+            unsafe {
+                *out = PlayResultAbi {
+                    accuracy: r.accuracy as f32,
+                    score: r.score,
+                    max_combo: r.max_combo,
+                    num_of_notes: r.num_of_notes,
+                    counts: r.counts,
+                    early: r.early,
+                    late: r.late,
+                    early_kind: r.early_kind,
+                    late_kind: r.late_kind,
+                };
+            }
+        }
+        0
+    })
+}
+
 /// Register the shell's screen size before the first frame.
 ///
 /// `prpr` projects through `screen_width`/`screen_height`/`screen_aspect`, all of which read the

@@ -652,7 +652,8 @@ pub mod window {
         pub fullscreen: bool,
         pub sample_count: i32,
         pub window_resizable: bool,
-        pub icon: Option<()>,
+        /// Upstream is `Option<miniquad::conf::Icon>`; `prpr` never sets it, `phira` does.
+        pub icon: Option<miniquad::conf::Icon>,
         pub platform: Platform,
     }
 
@@ -669,6 +670,24 @@ pub mod window {
                 icon: None,
                 platform: Platform::default(),
             }
+        }
+    }
+
+    /// The window handle upstream builds a real OS window around.
+    ///
+    /// [`Window::from_config`] is what `phira`'s `quad_main` calls: it constructs the window and
+    /// runs `the_main`'s own `'app` loop inside it, with `main.update()` / `main.render()` called
+    /// from that loop. There is no window here, and running a second frame loop would be actively
+    /// wrong - `prpr-port` already drives frames from the shell through `wp81_game_frame` on the
+    /// UI thread, against the same `thread_local` `GAME`. So `fut` is dropped unpolled: `quad_main`
+    /// compiles, is never entered, and the shell keeps sole ownership of the frame loop.
+    pub struct Window;
+
+    impl Window {
+        pub fn from_config<F>(_conf: Conf, _fut: F)
+        where
+            F: core::future::Future<Output = ()>,
+        {
         }
     }
 
@@ -2091,6 +2110,12 @@ pub mod draw {
         b: 0.0,
     }; PORT_VTX_CAP];
     static PORT_CMD_LEN: AtomicU32 = AtomicU32::new(0);
+    /// Vertices `encode` actually wrote. Deliberately not `VLEN`: `VLEN` is the batcher's arena
+    /// high-water mark, and `encode` stops copying at `PORT_VTX_CAP`, so on a frame that overflowed
+    /// the two differ - and the shell indexes `port_vertices()` directly through each `Geometry`
+    /// record's `vstart`/`vcount`, so a count taken from the wrong arena has it read past the
+    /// vertices this frame produced.
+    static PORT_VTX_LEN: AtomicU32 = AtomicU32::new(0);
 
     /// Translate the recorded `Cmd` arena into the flat records the shell reads.
     ///
@@ -2219,6 +2244,7 @@ pub mod draw {
         }
 
         PORT_CMD_LEN.store(cout as u32, Ordering::Relaxed);
+        PORT_VTX_LEN.store(vout as u32, Ordering::Relaxed);
         cout as u32
     }
 
@@ -2235,6 +2261,25 @@ pub mod draw {
     /// Index arena, which the shell reads for `Geometry` records. Never null.
     pub fn port_indices() -> *const u16 {
         unsafe { core::ptr::addr_of!(INDICES) as *const u16 }
+    }
+
+    /// How many vertices and indices the last `encode` produced.
+    ///
+    /// The shell needs both *before* it copies anything. `PrprPort.Drain` reads exactly
+    /// `vertexCapacity` elements, so a capacity larger than the truth copies arena bytes no command
+    /// refers to - and `Win2DChartRenderer.OnPortDraw` **rasterises** those, which makes the result
+    /// not a shorter frame but a frame containing garbage geometry - while a smaller one truncates
+    /// a batch mid-triangle.
+    ///
+    /// Indices come from `ILEN` rather than a second encoded counter because the shell reads them
+    /// straight out of the `INDICES` arena, so the batcher's high-water mark *is* the count there.
+    /// Vertices have no such luck: `encode` re-bases them into `PORT_VERTS` and can stop early at
+    /// `PORT_VTX_CAP`, which is why `PORT_VTX_LEN` exists separately.
+    pub fn port_counts() -> (u32, u32) {
+        (
+            PORT_VTX_LEN.load(Ordering::Relaxed),
+            ILEN.load(Ordering::Relaxed),
+        )
     }
 }
 

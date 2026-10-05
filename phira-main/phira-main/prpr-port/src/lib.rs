@@ -428,6 +428,27 @@ pub extern "C" fn wp81_draw_reset() {
     macroquad::draw::drain_reset();
 }
 
+/// How many vertices and indices the last `wp81_draw_encode` produced.
+///
+/// The shell must know both *before* it copies anything. `PrprPort.Drain` reads exactly
+/// `vertexCapacity` elements, so a capacity larger than the truth copies arena bytes no command
+/// refers to - and `Win2DChartRenderer.OnPortDraw` **rasterises** those, which makes the result not
+/// a shorter frame but a frame containing garbage geometry - while a smaller one truncates a batch
+/// mid-triangle.
+///
+/// # Safety
+/// `vertices` and `indices` must each be writable for one `u32` when non-null.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_draw_counts(vertices: *mut u32, indices: *mut u32) {
+    let (v, i) = macroquad::draw::port_counts();
+    if !vertices.is_null() {
+        *vertices = v;
+    }
+    if !indices.is_null() {
+        *indices = i;
+    }
+}
+
 // ===========================================================================
 // the texture registry
 //
@@ -657,6 +678,27 @@ pub unsafe extern "C" fn wp81_game_last_error(buf: *mut u8, cap: usize) -> i32 {
 #[no_mangle]
 pub extern "C" fn wp81_game_frames() -> i64 {
     host::frames()
+}
+
+/// The running game's full result: score, accuracy, combo, per-judgement counts, early/late split.
+///
+/// Exists because `prpr` owns the judge on this path: the shell's own `Judge` is never advanced, so
+/// its `Result()` would report a flawless zero-score play. `scene/game.rs` reads the same fields to
+/// draw the HUD (`self.judge.score()` at :432, `self.judge.combo()` at :468), which is why the HUD
+/// cannot simply be kept - it would be a second, disagreeing one.
+///
+/// Everything comes back in one struct rather than a dozen out-parameters: the result page reads
+/// nine of them (`Counts`, `Early`, `Late`, `NumOfNotes` included), and a call with that many
+/// arguments is a place where a single transposed pair would land on the wrong column without
+/// failing anywhere.
+///
+/// Returns 0 when a game is running, -1 when there is none.
+///
+/// # Safety
+/// `out` must be writable for one [`host::PlayResultAbi`] when non-null.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_game_result(out: *mut host::PlayResultAbi) -> i32 {
+    host::result(out)
 }
 
 /// Whether a game is currently hosted.

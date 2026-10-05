@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
-r"""Strip `raw-dylib` link attributes from third-party crates in the cargo registry.
+r"""Two textual patches applied to third-party crates in the cargo registry.
 
-Why this exists, and why it is separate from `wp81_std_patch.py`
+  1. Strip `raw-dylib` link attributes (which/getrandom) - see below.
+  2. Give `windows-sys` its missing `target_arch = "arm"` struct definitions.
+
+Both are the same shape of problem: a dependency is written for a target we are not using, and no
+patch point exists between `cargo` and the extracted source. Pass 1 lives at the bottom of this
+docstring's original scope; pass 2 is described next to `ARM_CFG_TARGETS`.
+
+Why pass 1 exists, and why it is separate from `wp81_std_patch.py`
 ----------------------------------------------------------------
 `wp81_std_patch.py` rewrites bindings in Rust's own `rust-src/library/` tree. That covers every
 declaration `std` makes, but it cannot reach a declaration made by a *dependency*: `cargo` compiles
@@ -54,6 +61,35 @@ REGISTRY_SRC = os.path.join(CARGO_HOME, "registry", "src")
 # crates whose `raw-dylib` binding must be dropped. Matched by directory *prefix* so a patch bump
 # (`which-8.0.2` -> `which-8.1.0`) keeps working without editing this file.
 TARGET_CRATES = ("which-", "getrandom-")
+
+# crates that need pass 2. Same prefix-matching rationale as TARGET_CRATES.
+ARM_CFG_CRATES = ("windows-sys-",)
+
+# Pass 2: (file suffix relative to the crate root, struct name).
+#
+# windows-sys 0.61.2 emits architecture-split definitions for these three - one under
+# `#[cfg(target_arch = "x86")]`, one under
+# `#[cfg(any(target_arch = "aarch64", target_arch = "arm64ec", target_arch = "x86_64"))]` - and
+# lists no third architecture. `aarch64` is 64-bit ARM; thumbv7a is `target_arch = "arm"`, which
+# appears in neither cfg (it appears nowhere in the crate at all), so the type simply does not
+# exist for this target and every `link!` declaration taking a pointer to it fails to resolve:
+# four errors, at WSAStartup, getservbyname, getservbyport and the delay-load struct. That is an
+# omission, not a deliberate restriction - which is why patching is safe rather than papering over
+# a design decision.
+#
+# The 32-bit (`x86`) variant is the one to widen. Windows decides these layouts on `_WIN64` and
+# ARM32 does not define it, so the correct layout is the one in the x86 branch: the 5-field
+# `WSADATA`, `IMAGE_THUNK_DATA32` in `DELAYLOAD_INFO`. Widening the 64-bit variant would compile
+# just as happily and then read the fields at the wrong offsets - a failure that shows up on the
+# device, never in the build.
+ARM_CFG_TARGETS = (
+    ("Networking/WinSock/mod.rs", "WSADATA"),
+    ("Networking/WinSock/mod.rs", "SERVENT"),
+    ("System/WindowsProgramming/mod.rs", "DELAYLOAD_INFO"),
+)
+
+ARM_CFG_OLD = '#[cfg(target_arch = "x86")]'
+ARM_CFG_NEW = '#[cfg(any(target_arch = "x86", target_arch = "arm"))]'
 
 # A `#[link(name = "...", kind = "raw-dylib", ...)]` attribute, possibly wrapped in
 # `#[cfg_attr(<pred>, link(...))]`, possibly spanning lines.
@@ -133,6 +169,40 @@ def strip_all_attrs(text):
         n += 1
 
 
+def widen_arm_cfgs(text, name):
+    """Add `arm` to the x86 arch cfg guarding `name`. Returns (text, count).
+
+    The cfg is not necessarily adjacent: for a struct it sits above `#[repr(C)]` and
+    `#[derive(Clone, Copy)]`, for the `impl Default` it is directly above. So rather than matching
+    a fixed shape, walk back from the item and accept the nearest x86-only cfg provided nothing
+    but attributes lies between them - a real gap (statements, another item's body) means the cfg
+    belongs to something else and widening it would change code we did not intend to touch.
+    """
+    n = 0
+    for needle in ("pub struct %s {" % name, "impl Default for %s {" % name):
+        start = 0
+        while True:
+            i = text.find(needle, start)
+            if i < 0:
+                break
+            start = i + len(needle)
+            base = max(0, i - 300)
+            m = text[base:i].rfind(ARM_CFG_OLD)
+            if m < 0:
+                continue
+            abs_m = base + m
+            gap = text[abs_m + len(ARM_CFG_OLD):i]
+            # A second cfg in the gap means this item is already guarded by a different predicate,
+            # so the one we found belongs to its predecessor.
+            if "#[cfg(" in gap:
+                continue
+            if gap and not re.fullmatch(r'[\s#\[\]()",\w]*', gap):
+                continue
+            text = text[:abs_m] + ARM_CFG_NEW + text[abs_m + len(ARM_CFG_OLD):]
+            n += 1
+    return text, n
+
+
 def targets():
     """Every .rs file under a targeted registry crate.
 
@@ -153,7 +223,7 @@ def targets():
             roots.append(sub)
     for base in roots:
         for entry in sorted(os.listdir(base)):
-            if not entry.startswith(TARGET_CRATES):
+            if not entry.startswith(TARGET_CRATES + ARM_CFG_CRATES):
                 continue
             root = os.path.join(base, entry)
             if not os.path.isdir(root):
@@ -174,10 +244,11 @@ def main(argv):
     files = targets()
     if not files:
         print("no targeted crates under " + REGISTRY_SRC, file=sys.stderr)
-        print("(expected which-* and getrandom-*; is CARGO_HOME set?)", file=sys.stderr)
+        print("(expected which-*, getrandom-* or windows-sys-*; is CARGO_HOME set?)", file=sys.stderr)
         return 1
 
     total = 0
+    arm_total = 0
     touched = []
     for p in files:
         try:
@@ -185,16 +256,37 @@ def main(argv):
                 text = fh.read()
         except (UnicodeDecodeError, OSError):
             continue
-        if "raw-dylib" not in text:
-            continue
-        new_text, n = strip_all_attrs(text)
-        if n == 0:
-            continue
+
         rel = os.path.relpath(p, REGISTRY_SRC)
-        print("%-58s %d raw-dylib attr(s)" % (rel, n))
+        new_text = text
+
+        # Pass 1 - raw-dylib. `which-`/`getrandom-` have it, `windows-sys-` does not.
+        n = 0
+        if "raw-dylib" in new_text:
+            new_text, n = strip_all_attrs(new_text)
+
+        # Pass 2 - arch cfg. Indexed off the normalized path rather than off the crate prefix so it
+        # can never fire for `which-`/`getrandom-`, which have no such structs. No `break` on
+        # success: WinSock/mod.rs carries two of these structs (WSADATA and SERVENT) and stopping
+        # at the first leaves the second unresolved.
+        m = 0
+        norm = p.replace("\\", "/")
+        for suffix, name in ARM_CFG_TARGETS:
+            if norm.endswith(suffix):
+                new_text, added = widen_arm_cfgs(new_text, name)
+                m += added
+
+        if n == 0 and m == 0:
+            continue
+
+        if n:
+            print("%-58s %d raw-dylib attr(s)" % (rel, n))
+        if m:
+            print("%-58s %d arch cfg(s) widened for arm" % (rel, m))
         touched.append(rel)
         total += n
-        if args.apply:
+        arm_total += m
+        if new_text != text and args.apply:
             try:
                 os.chmod(p, 0o666)
             except OSError:
@@ -204,8 +296,10 @@ def main(argv):
 
     print("\n%d file(s), %d raw-dylib attribute(s) %s"
           % (len(touched), total, "stripped" if args.apply else "would be stripped"))
+    if arm_total:
+        print("%d arch cfg(s) %s" % (arm_total, "widened for arm" if args.apply else "would be widened for arm"))
 
-    if args.check and total == 0:
+    if args.check and total == 0 and arm_total == 0:
         print("\nNOTE: nothing to strip. Either the patch is already applied, or the crates' "
               "attribute text changed shape and this script no longer recognises it - which "
               "would put kernel32.dll back in the import table. Verify with check_imports.py "

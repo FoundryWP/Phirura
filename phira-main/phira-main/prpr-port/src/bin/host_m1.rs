@@ -362,6 +362,75 @@ fn dump_textures() {
 ///
 /// `vhi`/`ihi` are the watermarks `drain_stats` measured - the *live* extent of the arenas, which
 /// can be far smaller than their capacity and is what the replay must size itself from.
+/// Exercises the touch queue on the desktop, where no finger will ever arrive.
+///
+/// The phone is the only place a real touch can be produced, which makes this the one part of the
+/// port that cannot be verified without a device round - and a device round is where a plumbing bug
+/// is most expensive to find, because "the chart does not respond to my finger" has about six
+/// candidate causes. So the three halves of the path are checked here instead:
+///
+///   1. `push_touch` -> `touches()`: the *state* `Judge::update` reads.
+///   2. `push_touch` -> `repeat_all_miniquad_input`: the *event stream* that fills `prpr::judge`'s
+///      `TOUCHES` store, and with it everything `get_touches()` reaches.
+///   3. `clear_touches`: the frame boundary. A queue that is not cleared leaks one frame of events
+///      into the next, which reads as a note hit one frame early, every frame.
+///
+/// The handler is a real `EventHandler` impl rather than a hand-rolled loop, because the point is
+/// that `repeat_all_miniquad_input` calls the *trait method* `prpr` implements - a loop pushing
+/// straight into a `Vec` would pass even if that dispatch were broken.
+struct TouchRecorder {
+    events: Vec<(u64, u32, f32, f32, f64)>,
+}
+
+impl macroquad::miniquad::EventHandler for TouchRecorder {
+    fn touch_event(
+        &mut self,
+        _ctx: &mut macroquad::miniquad::Context,
+        phase: macroquad::miniquad::TouchPhase,
+        id: u64,
+        x: f32,
+        y: f32,
+        time: f64,
+    ) {
+        // A fieldless enum casts to its declaration order - the same encoding `wp81_game_touch`
+        // documents for the shell, so the two sides cannot drift apart.
+        self.events.push((id, phase as u32, x, y, time));
+    }
+}
+
+fn dump_touches() {
+    use macroquad::input::TouchPhase;
+
+    // One finger pressed and held, plus a second that just went down: the two shapes a real frame
+    // produces, and the pair that separates "state" from "event" - the held finger has no event this
+    // frame, only state, so a reader that only looked at events would lose it.
+    macroquad::input::push_touch(1001, TouchPhase::Started, 100.0, 200.0, 1.5);
+    macroquad::input::push_touch(1001, TouchPhase::Stationary, 100.0, 200.0, 1.516);
+    macroquad::input::push_touch(2002, TouchPhase::Started, 300.0, 400.0, 1.52);
+
+    let state = macroquad::input::touches();
+    eprintln!("[m1] touches() -> {} events", state.len());
+    for t in &state {
+        eprintln!(
+            "       id={} phase={:?} pos=({},{}) time={}",
+            t.id, t.phase, t.position.x, t.position.y, t.time
+        );
+    }
+
+    let mut rec = TouchRecorder { events: Vec::new() };
+    macroquad::utils::repeat_all_miniquad_input(&mut rec, 0);
+    eprintln!("[m1] repeat_all_miniquad_input -> {} events", rec.events.len());
+    for (id, phase, x, y, time) in &rec.events {
+        eprintln!("       id={} phase={} pos=({},{}) time={}", id, phase, x, y, time);
+    }
+
+    macroquad::input::clear_touches();
+    eprintln!(
+        "[m1] after clear_touches -> {} events",
+        macroquad::input::touches().len()
+    );
+}
+
 fn dump_fixture(
     path: &str,
     frame: i32,
@@ -536,6 +605,9 @@ fn main() {
             );
             if f == 0 {
                 dump_textures();
+                // The touch path has no other desktop coverage: no finger reaches this harness, so
+                // without this the first evidence of a broken queue would be a phone round.
+                dump_touches();
             }
             // One fixture, taken from the first frame that actually produced something - frame 0
             // for an autoplay chart, but a chart whose music has not started yet draws nothing, so
@@ -572,6 +644,41 @@ fn main() {
         nonzero_frames
     );
     eprintln!("[m1] game frames = {}", prpr_port::wp81_game_frames());
+
+    // The shell's result page reads it through `wp81_game_result`, which walks `Main::scenes` ->
+    // `Scene::as_any_mut` -> `downcast_mut::<GameScene>` -> `judge.result()`. Every step of that
+    // chain answers -1 rather than failing loudly, so a hook that silently returns `None` would
+    // show up only on the phone as a result page reading "0 notes, 0 perfect". Calling it here is
+    // what turns that into a build-time failure.
+    //
+    // The counts are all expected to be 0 after two seconds of lead-in (no note judged yet);
+    // `rc == 0` and `num_of_notes > 0` are the measurements, because together they mean the walk
+    // both reached `GameScene::judge` and read the whole chart out of it.
+    let mut res = prpr_port::host::PlayResultAbi {
+        accuracy: 0.0,
+        score: 0,
+        max_combo: 0,
+        num_of_notes: 0,
+        counts: [0; 4],
+        early: 0,
+        late: 0,
+        early_kind: [0; 4],
+        late_kind: [0; 4],
+    };
+    let rc = unsafe { prpr_port::wp81_game_result(&mut res) };
+    eprintln!(
+        "[m1] game_result -> {rc} score={} acc={:.4} notes={} counts={:?} early={} late={}",
+        res.score, res.accuracy, res.num_of_notes, res.counts, res.early, res.late
+    );
+    if rc != 0 {
+        eprintln!("[m1] FAILED: as_any_mut/downcast never reached GameScene::judge");
+        std::process::exit(1);
+    }
+    if res.num_of_notes == 0 {
+        eprintln!("[m1] FAILED: judge reports 0 notes, so nothing was read out of it");
+        std::process::exit(1);
+    }
+
     prpr_port::wp81_game_destroy();
     eprintln!("[m1] destroyed, running = {}", prpr_port::wp81_game_running() != 0);
 
