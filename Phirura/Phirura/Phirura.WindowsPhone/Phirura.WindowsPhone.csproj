@@ -148,6 +148,19 @@
     <Content Include="Assets\game\hit_fx.png" />
     <Content Include="Assets\game\hold.png" />
     <Content Include="Assets\game\phigros.ttf" />
+
+    <!--
+        The whole phira asset tree, so a build is self-contained.
+
+        Without it the chart, the respack and every shared UI image had to be pushed from the PC with
+        `stage-chart.ps1 -Push` before the app would do anything at all - and a missing push showed up
+        on the device as "asset not found", not as a build error.
+
+        A recursive glob rather than 114 explicit items on purpose: this tree is generated output of
+        that push, so listing it by hand would mean a csproj edit for every asset ever added, and the
+        failure mode of forgetting one is a device-only symptom.
+    -->
+    <Content Include="Assets\charts\**\*" />
   </ItemGroup>
   <ItemGroup>
     <!--

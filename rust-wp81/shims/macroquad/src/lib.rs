@@ -2229,6 +2229,46 @@ pub mod draw {
         });
     }
 
+    /// Emits one rotated, atlas-sourced sprite quad with an explicit texture id.
+    ///
+    /// `prpr::particle` is the only caller, and it is here because that module cannot use anything
+    /// else: it drives miniquad's `Context` directly, and every method of that shim is a no-op - so
+    /// its instanced quads were uploaded to a buffer nobody read and submitted with a `draw` call
+    /// that did nothing. The entire hit effect was therefore invisible, and no amount of work in the
+    /// C# renderer could have found it, because nothing about a particle ever entered the command
+    /// stream the renderer replays. This is the replacement path: `prpr` keeps the per-particle
+    /// maths (rotation, size, atlas rectangle) and this records the four corners as geometry.
+    ///
+    /// Positions arrive in the same space `push_geometry` expects - `prpr` has already applied its
+    /// model by the time it emits a particle (`Resource::world_to_screen`), so the projection here
+    /// is the one every other vertex goes through, and the sprite lands where the particle is.
+    pub fn push_sprite_quad(tex: u32, corners: &[Vec2; 4], uvs: &[[f32; 2]; 4], color: Color) {
+        let vs = VLEN.load(Ordering::Relaxed) as usize;
+        let is = ILEN.load(Ordering::Relaxed) as usize;
+        if vs + 4 > VCAP || is + 6 > ICAP {
+            return;
+        }
+        unsafe {
+            for i in 0..4 {
+                let (x, y) = crate::transform::project(corners[i].x, corners[i].y);
+                VERTS[vs + i] = Vertex::new(x, y, 0.0, uvs[i][0], uvs[i][1], color);
+            }
+            for (i, ix) in [0u16, 1, 2, 0, 2, 3].iter().enumerate() {
+                INDICES[is + i] = *ix;
+            }
+        }
+        VLEN.store((vs + 4) as u32, Ordering::Relaxed);
+        ILEN.store((is + 6) as u32, Ordering::Relaxed);
+        push(Cmd::Geometry {
+            tex,
+            mode: DrawMode::Triangles,
+            vstart: vs as u32,
+            vcount: 4,
+            istart: is as u32,
+            icount: 6,
+        });
+    }
+
     pub fn vertex_slice(start: u32, count: u32) -> &'static [Vertex] {
         unsafe { &VERTS[start as usize..(start + count) as usize] }
     }

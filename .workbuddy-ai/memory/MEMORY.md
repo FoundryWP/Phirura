@@ -110,11 +110,43 @@ the UI thread). **`edit` is flaky on `GamePage.xaml.cs`** — retry 1–4 times,
 5. **AppLog rotation** used to delete and recreate past 256 KB, losing the *beginning* of a long
    run. It keeps the tail now.
 
-**`rust-wp81/tail-log.ps1` is the runtime-log answer** (no debugger on WP8.1): poll `ISETool ts`,
-print the delta. Each attempt needs a **fresh** destination directory (a failed attempt leaves one
-behind, so reusing a name makes every retry fail identically), and the lock correlates with logging
-activity, so it retries 10× per poll. It copies the whole 22 MB store per poll — 5 s is the sane
-interval.
+**Logging on device (R55).** `rust-wp81/tail-log.ps1` follows the log: poll `ISETool ts`, print the
+delta. It reads **`appxfolder:Temp`**, not Local — `AppLog` mirrors every line into the temp store —
+because `ts` on Local copies the whole 22 MB store and **aborts on the first unreadable file, which is
+the chart's mp3 held by the `MediaElement`**, so the log was never reached and pulls failed with a
+misleading sharing violation. Each attempt also needs a **fresh** destination directory. `AppLog` now
+keeps the tail on rotation instead of starting over, and there is an **on-screen log panel** in
+`GamePage` (a `LOG` button beside pause; `AppLog.Remember`/`RecentText` ring buffer) so no pull is
+needed at all. Verified: `fps=46…52` in gameplay, `touch down … live=True`, `wire layout ok=True
+vertexStride=36/36`, `119 registered, 0 dropped`, `noCarrier=0`.
+
+## R56 — assets packaged; two open items
+
+**The app is self-contained now: `stage-chart.ps1 -Push` is not needed.** `Assets/charts/` (114
+files, 22 MB, copied from `E:\_phirura_m1\charts`) is packaged via a **recursive glob**
+`<Content Include="Assets\charts\**\*" />`, and `EnsureBundledAssetsAsync()`/`CopyTreeAsync()` seed
+`LocalFolder\charts` from `ms-appx:` behind a `.seeded` marker before the chart bootstrap runs.
+Verified with `-Deploy -Launch` and **no push**: `seeded 114 packaged assets`, `phira boot -> 0`.
+**Keep `E:\_phirura_m1\charts` and `Assets/charts` in sync** — that dir is now the packaging source,
+not just the push mirror.
+
+**Sprite drawing is exact for rotated quads now.** `FillPortTriangle`'s axis-aligned bounding box
+stretched rotated notes (a vertical note on a tilted line). `TryDrawPortQuad` takes the 6 vertices of
+a triangle pair, finds the 4 uv corners, requires a parallelogram (prpr sprites always are), and
+draws once via an affine `Matrix3x2` from the source rect onto the quad.
+
+**Hit sounds are stubs — not a regression.** `PrprPort.OnSfxNew` returns 0 and `OnSfxPlay` only logs;
+there is no `ISfxSink`. Rust requests them (`audio sfx_play id=0`), so the fix is C#-side and has the
+same shape as the music one: carry `clip.length()` across `wp81_audio_sfx_new`, identify by duration,
+implement an `ISfxSink` in `GamePage` over `SfxPlayer`.
+
+**The hit *effect* cannot appear at all — architectural, not a regression.** `prpr::particle` drives
+miniquad's `Context` directly (`Emitter::draw` → `apply_bindings`/`apply_uniforms`/`draw`, instanced
+quads uploaded via `Buffer::update`), and **every one of those is a no-op in the shim** — the file
+says so. So particle geometry, its texture and its MVP are all discarded and never reach the port's
+`Cmd` arena. Fix: have the shim *record* that pass (`Buffer::update` keeps the bytes,
+`apply_bindings` keeps the texture, `Context::draw` expands instances into `Cmd::Geometry`). The same
+change unlocks `JudgeLineKind::Paint`, the other raw-render-pass path.
 
 ## Next steps
 Stage 3: port prpr scene draw calls — vertex stride **36 B** (`pos3(12)+uv2(8)+rgba4(16)`, `z` kept 0),

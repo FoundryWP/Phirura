@@ -797,9 +797,76 @@ impl Emitter {
 
         self.update(ctx, dt);
 
-        self.setup_render_pass(quad_gl, ctx);
-        self.perform_render_pass(quad_gl, ctx);
-        self.end_render_pass(quad_gl, ctx);
+        // On the phone the shell owns the renderer and replays macroquad's recorded draw commands.
+        // The raw miniquad sequence below records nothing there - every `Context` method is a no-op -
+        // so the hit effect was invisible: the particles were uploaded into a buffer nothing read and
+        // "drawn" by a call that did nothing, and no work in the C# renderer could have found them
+        // because nothing about a particle ever entered the command stream. Emit them as ordinary
+        // textured quads instead.
+        //
+        // Gated on the target rather than a feature so the desktop harness (`build-m1.ps1`, x86_64)
+        // keeps the GL path and stays a faithful reference for what the shader does.
+        #[cfg(target_arch = "arm")]
+        {
+            let _ = quad_gl;
+            self.draw_port_particles();
+        }
+
+        #[cfg(not(target_arch = "arm"))]
+        {
+            self.setup_render_pass(quad_gl, ctx);
+            self.perform_render_pass(quad_gl, ctx);
+            self.end_render_pass(quad_gl, ctx);
+        }
+    }
+
+    /// The particle pass, expressed as four textured corners per particle.
+    ///
+    /// This mirrors `shaders/particles.glsl` and the instance layout exactly, because there is no
+    /// other way for the shell to see a particle - see the note in `draw`.
+    ///
+    /// * `pos.xy` is the particle position, `pos.z` its rotation in radians, `pos.w` its size.
+    /// * `uv.xy`/`uv.zw` are the atlas cell's offset and size - rewritten every frame by the
+    ///   animation update - and the shader maps the unit quad into that cell.
+    /// * `color` is the per-particle RGBA, already run through `colors_curve` by `update`.
+    ///
+    /// The base quad is `ParticleShape::Rectangle { aspect_ratio: 1.0 }`, the `EmitterConfig`
+    /// default and what `Resource` builds both emitters with, so its corners are `(+/-1, +/-1)` and
+    /// the shader's `attr_pos * size` is what gives the particle its extent. An emitter given another
+    /// shape would need the aspect carried through with it.
+    #[cfg(target_arch = "arm")]
+    fn draw_port_particles(&self) {
+        let tex = match self.config.texture {
+            Some(t) => t.id,
+            None => return,
+        };
+        for p in &self.gpu_particles {
+            let (c, s) = (p.pos.z.cos(), p.pos.z.sin());
+            // `rot2d(pos.z) * attr_pos.xy * pos.w + pos.xy`, with `attr_pos` over (+/-1, +/-1).
+            let corner = |ax: f32, ay: f32| {
+                let (x, y) = (ax * p.pos.w, ay * p.pos.w);
+                Vec2::new(p.pos.x + c * x - s * y, p.pos.y + s * x + c * y)
+            };
+            let corners = [
+                corner(-1.0, -1.0),
+                corner(1.0, -1.0),
+                corner(1.0, 1.0),
+                corner(-1.0, 1.0),
+            ];
+            let (u0, v0, uw, vh) = (p.uv.x, p.uv.y, p.uv.z, p.uv.w);
+            let uvs = [
+                [u0, v0],
+                [u0 + uw, v0],
+                [u0 + uw, v0 + vh],
+                [u0, v0 + vh],
+            ];
+            macroquad::draw::push_sprite_quad(
+                tex,
+                &corners,
+                &uvs,
+                Color::new(p.color.x, p.color.y, p.color.z, p.color.w),
+            );
+        }
     }
 }
 

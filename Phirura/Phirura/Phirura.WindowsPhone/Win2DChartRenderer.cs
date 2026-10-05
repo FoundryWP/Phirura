@@ -1225,6 +1225,17 @@ namespace Phirura.Game
                 if (mode == 0)
                 {
                     if (i2 >= frame.Indices.Length) break;
+
+                    // A prpr sprite is a quad emitted as two triangles, and the bounding-box
+                    // approximation below cannot express a rotated one - it comes out stretched,
+                    // which is exactly what a vertical note looked like on the device. Try the exact
+                    // affine path first; it consumes six indices (both triangles) when it succeeds.
+                    if (hasTex && TryDrawPortQuad(ds, frame, c, t))
+                    {
+                        t += 3;
+                        continue;
+                    }
+
                     PrprPort.PortVertex v2 = Vert(frame, (int)c.vstart + (int)frame.Indices[i2]);
                     FillPortTriangle(ds, v0, v1, v2, c.flags, hasTex);
                 }
@@ -1259,6 +1270,137 @@ namespace Phirura.Game
         /// the carrier was built, and asking the image how big it is would silently re-derive that
         /// from its metrics the moment the two ever disagreed.
         /// </summary>
+        /// <summary>
+        /// Draws the triangle pair at <paramref name="t"/> as one textured quad, exactly.
+        ///
+        /// <see cref="FillPortTriangle"/> can only approximate a sprite by its axis-aligned bounding
+        /// box, which is right for an upright note and visibly wrong for a rotated one - a note on a
+        /// tilted judge line came out stretched, because the box of a tilted quad is larger than the
+        /// quad and the texture is stretched to fill it. Win2D has no arbitrary-triangle texture
+        /// fill, but it does have an affine draw transform, and a prpr sprite is always a
+        /// rotated-and-scaled rectangle - a *parallelogram*, which an affine map represents exactly.
+        ///
+        /// The four corners are found by their uv extremes rather than by de-duplicating positions:
+        /// there is no tolerance to tune and it cannot be confused by two vertices landing on the
+        /// same pixel. Anything that is not a parallelogram (or has no carrier) is left to the
+        /// caller's fallback.
+        /// </summary>
+        private bool TryDrawPortQuad(CanvasDrawingSession ds, PrprPort.DrainFrame frame,
+                                     PrprPort.PortCmd c, int t)
+        {
+            if (t + 5 >= (int)c.icount || frame.Indices == null)
+            {
+                return false;
+            }
+
+            PortTexture tex;
+            if (!_portTextures.TryGetValue(c.flags, out tex) || tex == null || tex.Target == null)
+            {
+                return false;
+            }
+
+            int istart = (int)c.istart;
+            int vbase = (int)c.vstart;
+            _quadVerts[0] = Vert(frame, vbase + (int)frame.Indices[istart + t]);
+            _quadVerts[1] = Vert(frame, vbase + (int)frame.Indices[istart + t + 1]);
+            _quadVerts[2] = Vert(frame, vbase + (int)frame.Indices[istart + t + 2]);
+            _quadVerts[3] = Vert(frame, vbase + (int)frame.Indices[istart + t + 3]);
+            _quadVerts[4] = Vert(frame, vbase + (int)frame.Indices[istart + t + 4]);
+            _quadVerts[5] = Vert(frame, vbase + (int)frame.Indices[istart + t + 5]);
+
+            float minU = _quadVerts[0].u, maxU = _quadVerts[0].u;
+            float minV = _quadVerts[0].v, maxV = _quadVerts[0].v;
+            for (int i = 1; i < 6; i++)
+            {
+                float u = _quadVerts[i].u, v = _quadVerts[i].v;
+                if (u < minU) minU = u;
+                if (u > maxU) maxU = u;
+                if (v < minV) minV = v;
+                if (v > maxV) maxV = v;
+            }
+            if (maxU - minU <= 0f || maxV - minV <= 0f)
+            {
+                return false;
+            }
+
+            // One vertex per uv corner: (min,min) (max,min) (max,max) (min,max).
+            int ia = -1, ib = -1, ic = -1, id = -1;
+            float sa = float.MaxValue, sb = float.MaxValue, sc = float.MaxValue, sd = float.MaxValue;
+            for (int i = 0; i < 6; i++)
+            {
+                float u = _quadVerts[i].u, v = _quadVerts[i].v;
+                float da = (u - minU) + (v - minV);
+                float db = (maxU - u) + (v - minV);
+                float dc = (maxU - u) + (maxV - v);
+                float dd = (u - minU) + (maxV - v);
+                if (da < sa) { sa = da; ia = i; }
+                if (db < sb) { sb = db; ib = i; }
+                if (dc < sc) { sc = dc; ic = i; }
+                if (dd < sd) { sd = dd; id = i; }
+            }
+            if (ia < 0 || ib < 0 || ic < 0 || id < 0)
+            {
+                return false;
+            }
+
+            PrprPort.PortVertex a = _quadVerts[ia];
+            PrprPort.PortVertex b = _quadVerts[ib];
+            PrprPort.PortVertex cc = _quadVerts[ic];
+            PrprPort.PortVertex d = _quadVerts[id];
+
+            // Affine only if the fourth corner follows from the other three; a perspective quad would
+            // need the 4x4 overload and prpr never emits one.
+            float ex = (a.x + cc.x) - (b.x + d.x);
+            float ey = (a.y + cc.y) - (b.y + d.y);
+            float qw = Math.Abs(b.x - a.x) + Math.Abs(d.x - a.x);
+            float qh = Math.Abs(b.y - a.y) + Math.Abs(d.y - a.y);
+            float tol = 0.01f * (qw + qh + 1f);
+            if (Math.Abs(ex) > tol || Math.Abs(ey) > tol)
+            {
+                return false;
+            }
+
+            float sx = minU * tex.PixelWidth;
+            float sy = minV * tex.PixelHeight;
+            float sw = (maxU - minU) * tex.PixelWidth;
+            float sh = (maxV - minV) * tex.PixelHeight;
+            if (sw <= 0f || sh <= 0f)
+            {
+                return false;
+            }
+
+            float alpha = (a.a + b.a + cc.a + d.a) / 4f;
+            if (alpha > 1f)
+            {
+                alpha = 1f;
+            }
+            if (alpha <= 0.003f)
+            {
+                // Consumed: the quad is real but invisible, and letting the caller fall back would
+                // draw its two triangles as boxes.
+                return true;
+            }
+
+            // Maps the source rectangle onto the quad. `* saved` keeps the px -> DIP scale that
+            // `OnPortDraw` installs, exactly as the flip path above does.
+            float m11 = (b.x - a.x) / sw;
+            float m12 = (b.y - a.y) / sw;
+            float m21 = (d.x - a.x) / sh;
+            float m22 = (d.y - a.y) / sh;
+            Matrix3x2 quadMap = new Matrix3x2(
+                m11, m12, m21, m22,
+                a.x - m11 * sx - m21 * sy,
+                a.y - m12 * sx - m22 * sy);
+
+            Matrix3x2 saved = ds.Transform;
+            ds.Transform = quadMap * saved;
+            // Drawn at the source rectangle in pre-transform space, so the map lands it on the quad.
+            ds.DrawImage(tex.Target, new Rect(sx, sy, sw, sh), new Rect(sx, sy, sw, sh),
+                         alpha, CanvasImageInterpolation.Linear);
+            ds.Transform = saved;
+            return true;
+        }
+
         private void FillPortTriangle(CanvasDrawingSession ds, PrprPort.PortVertex a,
                                       PrprPort.PortVertex b, PrprPort.PortVertex c,
                                       uint texId, bool hasTex)
@@ -1875,6 +2017,11 @@ namespace Phirura.Game
         private bool _hasLastQuad;
         private Rect _lastQuad;
         private Rect _lastSrc;
+
+        // Scratch for the six vertices of one quad, reused rather than allocated: `TryDrawPortQuad`
+        // runs once per sprite per frame, and a fresh array there would be the same per-frame garbage
+        // the drain buffers were changed to avoid.
+        private readonly PrprPort.PortVertex[] _quadVerts = new PrprPort.PortVertex[6];
 
         // ------------------------------------------------------------------
         // Small helpers

@@ -1,0 +1,17 @@
+# Chart manifest, in the format `prpr::fs::load_info` reads first.
+#
+# The demo folder shipped with the app has only `chart.json` + `demo.wav` and no metadata anywhere:
+# the C# engine keeps title/level/artist in code, and this chart's RPE `META` carries nothing but
+# `offset` and `RPEVersion`. Without this file `ChartInfo::default()` supplies its placeholder file
+# names instead - `music: song.mp3` - and `GameScene::new` fails with `asset not found: demo/song.mp3`.
+#
+# `illustration` is empty on purpose: the host passes a placeholder texture for the background, and
+# an empty name stops the loading scene from asking for `background.png`, which the folder has not.
+name: Demo
+level: IN Lv.?
+charter: Phirura
+composer: "-"
+illustrator: "-"
+chart: chart.json
+music: demo.wav
+illustration: ""

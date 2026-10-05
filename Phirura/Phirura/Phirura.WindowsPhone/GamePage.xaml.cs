@@ -495,6 +495,7 @@ namespace Phirura
                 LoadingText.Text = "正在内置谱面…";
                 try
                 {
+                    await EnsureBundledAssetsAsync();
                     await EnsureBundledChartAsync();
                 }
                 catch (Exception ex)
@@ -723,6 +724,64 @@ namespace Phirura
         /// the folder copied and the path handed to <c>PhiraBoot</c> are the same string by
         /// construction. The failure this avoids is shipping a chart under one name and asking
         /// phira for another, which presents as "it opened the menu instead of the chart".
+        ///
+        /// <summary>
+        /// Seeds `LocalFolder\charts` from the copy packaged inside the appx, once.
+        ///
+        /// phira reads its assets with real `std::fs` at paths under `LocalFolder\charts`, and the
+        /// chart bootstrap below reads the same tree - so bytes that exist only as packaged
+        /// `ms-appx:` content are invisible to both. This is what makes `stage-chart.ps1 -Push`
+        /// unnecessary: identical layout, identical consumers, only the source of the bytes changed.
+        ///
+        /// A marker file makes it idempotent, and its absence is the only trustworthy signal - a
+        /// half-copied tree counts the same as a whole one. `rs` replaces LocalFolder, which wipes
+        /// both the tree and the marker, so a pushed build simply re-seeds on the next launch.
+        /// </summary>
+        private static async Task EnsureBundledAssetsAsync()
+        {
+            Windows.Storage.StorageFolder local = Windows.Storage.ApplicationData.Current.LocalFolder;
+            Windows.Storage.StorageFolder dest = await local.CreateFolderAsync(
+                "charts", Windows.Storage.CreationCollisionOption.OpenIfExists);
+            try
+            {
+                await dest.GetFileAsync(".seeded");
+                return;
+            }
+            catch (Exception)
+            {
+                // Not seeded (or wiped by a push) - fall through and copy.
+            }
+
+            Windows.Storage.StorageFolder pkg =
+                await Windows.ApplicationModel.Package.Current.InstalledLocation.GetFolderAsync("Assets");
+            pkg = await pkg.GetFolderAsync("charts");
+
+            int n = await CopyTreeAsync(pkg, dest);
+            await dest.CreateFileAsync(".seeded", Windows.Storage.CreationCollisionOption.ReplaceExisting);
+            AppLog.WriteSync("GamePage: seeded " + n + " packaged assets -> " + dest.Path);
+        }
+
+        /// <summary>Recursive copy. `StorageFolder` has no one-call equivalent on this profile.</summary>
+        private static async Task<int> CopyTreeAsync(Windows.Storage.StorageFolder src,
+                                                     Windows.Storage.StorageFolder dest)
+        {
+            int n = 0;
+            foreach (Windows.Storage.StorageFile file in await src.GetFilesAsync())
+            {
+                await file.CopyAsync(dest, file.Name, Windows.Storage.NameCollisionOption.ReplaceExisting);
+                n++;
+            }
+            foreach (Windows.Storage.StorageFolder sub in await src.GetFoldersAsync())
+            {
+                Windows.Storage.StorageFolder child = await dest.CreateFolderAsync(
+                    sub.Name, Windows.Storage.CreationCollisionOption.OpenIfExists);
+                n += await CopyTreeAsync(sub, child);
+            }
+            return n;
+        }
+
+        /// <summary>
+        /// Copies the bundled chart into phira's own library, once per install.
         ///
         /// The completion marker - not "the folder is non-empty" - is what makes it idempotent: a
         /// copy interrupted by a crash leaves a full-looking folder missing the largest file, and
