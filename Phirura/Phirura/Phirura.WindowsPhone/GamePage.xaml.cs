@@ -19,7 +19,7 @@ namespace Phirura
     /// gameplay. Owns the chart, the judge, the renderer and the music clock, and drives
     /// them from CompositionTarget.Rendering (WP8.1 has no XAML-native game loop).
     /// </summary>
-    public sealed partial class GamePage : Page, PrprPort.IMusicSink, PrprPort.ISfxSink
+    public sealed partial class GamePage : Page, PrprPort.IMusicSink, PrprPort.ISfxSink, PrprPort.ITextInputSink
     {
         public static PlayResult LastResult;
         public static string LastChartTitle = string.Empty;
@@ -155,7 +155,6 @@ namespace Phirura
         /// Whether phira starts that chart rather than stopping on its song page. Kept separate
         /// from *which* chart because they change for different reasons: which chart is what was
         /// packaged, this is whether the app drops the player straight into playing it.
-        /// Whether phira plays that chart by itself.
         ///
         /// This was `true`, and together with the auto-open above it is why the app appeared to have
         /// no working buttons: the boot drove past `home.rs` into the song, and then **autoplay
@@ -163,9 +162,12 @@ namespace Phirura
         /// Neither the home screen nor the buttons were ever broken; the app never stopped on the
         /// home screen, and the one screen it did reach was under autoplay.
         ///
-        /// Left off. The auto-open stays on for now because the shell resolves the music from
-        /// `PhiraAutoChart` and nothing else - turning it off would let the player pick a different
-        /// chart and hear this one's music, which is a worse bug than a shortcut.
+        /// Left off, and so is the auto-open above it. The comment used to claim auto-open stayed on
+        /// so that the music would follow `PhiraAutoChart`; both are false now, and the risk that
+        /// note described is still real: the shell resolves the music from `PhiraAutoChart` and
+        /// nothing else, so a *second* imported chart would play this one's music. Fix that by
+        /// carrying the name across `wp81_audio_music_new`, the way the sfx name rides
+        /// `wp81_audio_sfx_new` - not by leaving auto-open switched on.
         private const bool PhiraAutoPlay = false;
 
         public GamePage()
@@ -249,7 +251,9 @@ namespace Phirura
                 // After `GameDestroy`, so no frame can still be inside a callback whose sink is
                 // the page being torn down - and cleared rather than left pointing, because the
                 // table is static and outlives this page by a long way.
-                PrprPort.MusicSink = null;
+                PrprPort.TextInputSink = null;
+            CancelOpenTextInput();
+            PrprPort.MusicSink = null;
                 PrprPort.SfxSink = null;
             }
             try
@@ -1674,9 +1678,27 @@ namespace Phirura
             // against the same origin `prpr` will read.
             PushRustTouches(_phiraTime);
 
+            // Split into its three parts. A single fps number cannot say *which* of them got
+            // slower, and that question is exactly what came up when the scissor landed: the same
+            // screen went 26 -> 13 fps with essentially the same command census, so the cost is
+            // either Rust's update, the Win2D replay, or the present - three completely different
+            // fixes. Each part is timed separately and reported as a per-frame average in ms.
+            System.Diagnostics.Stopwatch part = System.Diagnostics.Stopwatch.StartNew();
+            long t0 = part.ElapsedTicks;
+
             PrprPort.DrainFrame frame = PrprPort.GameFrameSized(dt);
+            long t1 = part.ElapsedTicks;
+
             _renderer.DrawPortFrame(frame);
+            long t2 = part.ElapsedTicks;
+
             _renderer.Present();
+            long t3 = part.ElapsedTicks;
+
+            _sumRust += t1 - t0;
+            _sumDraw += t2 - t1;
+            _sumPresent += t3 - t2;
+            if (t3 - t0 > _maxFrame) _maxFrame = t3 - t0;
 
             // One line a second, and it is the shell's own number. The Rust side logs its frame
             // counter, but that only says the engine is being ticked - it cannot see how long the
@@ -1689,14 +1711,28 @@ namespace Phirura
             {
                 double secs = (nowTick - _fpsTick) / 1000.0;
                 _fpsTick = nowTick;
-                AppLog.Write("GamePage: fps=" + (_frames / secs).ToString("0.#")
+                double fps = _frames / secs;
+                double ticksPerMs = System.Diagnostics.Stopwatch.Frequency / 1000.0;
+                double rustMs = _frames > 0 ? (_sumRust / ticksPerMs) / _frames : 0.0;
+                double drawMs = _frames > 0 ? (_sumDraw / ticksPerMs) / _frames : 0.0;
+                double presMs = _frames > 0 ? (_sumPresent / ticksPerMs) / _frames : 0.0;
+                double maxMs = _maxFrame / ticksPerMs;
+                AppLog.Write("GamePage: fps=" + fps.ToString("0.#")
+                    + " rustMs=" + rustMs.ToString("0.0")
+                    + " drawMs=" + drawMs.ToString("0.0")
+                    + " presMs=" + presMs.ToString("0.0")
+                    + " worstMs=" + maxMs.ToString("0.0")
                     + " touches=" + _active.Count + " paused=" + _paused);
                 _frames = 0;
+                _sumRust = 0; _sumDraw = 0; _sumPresent = 0; _maxFrame = 0;
             }
         }
 
         private int _frames;
         private int _fpsTick = Environment.TickCount;
+
+        /// <summary>Per-second accumulators for the three phases of one frame, in Stopwatch ticks.</summary>
+        private long _sumRust, _sumDraw, _sumPresent, _maxFrame;
 
         private void RenderBadNotes(double t)
         {

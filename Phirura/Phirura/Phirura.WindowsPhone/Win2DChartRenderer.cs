@@ -978,17 +978,24 @@ namespace Phirura.Game
             // region it opens, so this is normally already false. Popping here is what stops a frame
             // that ever ended mid-clip from carrying that clip into the next one - which would hide
             // part of the next frame outright rather than merely draw it wrong.
-            if (_portClipActive)
+            if (_portClipLayer != null)
             {
-                ds.PopAxisAlignedClip();
-                _portClipActive = false;
+                _portClipLayer.Dispose();
+                _portClipLayer = null;
             }
 
             ds.Transform = portTransform;
         }
 
-        /// <summary>Whether a <c>PortKind.Scissor</c> clip is currently pushed on the session.</summary>
-        private bool _portClipActive;
+        /// <summary>
+        /// The clip currently open on the session, or null.
+        ///
+        /// Win2D.win81 has no <c>PushAxisAlignedClip</c> - a clip is a *layer*, an object that has
+        /// to be disposed to end it - so the flag that used to say "one is pushed" is now the layer
+        /// itself. Holding the layer rather than a bool is what makes the release safe: there is no
+        /// way to forget which clip to end, because the thing that ends it is the field.
+        /// </summary>
+        private IDisposable _portClipLayer;
 
         /// <summary>
         /// Applies one <c>PortKind.Scissor</c> record: <c>flags</c> 1 to clip, 0 to release.
@@ -1002,8 +1009,9 @@ namespace Phirura.Game
         ///   build uses on top of the conversion already done here. Identity makes both
         ///   conventions agree, so the result does not depend on which one it is.
         /// * *Replace, do not accumulate.* `prpr::ui::scissor` already intersects a nested clip
-        ///   with its parent before emitting it, so pushing a second clip on top of the first would
-        ///   clip twice - and `glScissor` (what this replaces) never stacked in the first place.
+        ///   with its parent before emitting it, so opening a second layer on top of the first
+        ///   would clip twice - and `glScissor` (what this replaces) never stacked in the first
+        ///   place. Every entry starts by closing the previous layer, so at most one is live.
         ///
         /// An empty rectangle means "clip everything", which is what prpr emits when a region has
         /// scrolled fully out of view; negatives are clamped because the tuple is a difference of
@@ -1011,10 +1019,10 @@ namespace Phirura.Game
         /// </summary>
         private void ApplyPortClip(CanvasDrawingSession ds, PrprPort.PortCmd c, float pxToDip)
         {
-            if (_portClipActive)
+            if (_portClipLayer != null)
             {
-                ds.PopAxisAlignedClip();
-                _portClipActive = false;
+                _portClipLayer.Dispose();
+                _portClipLayer = null;
             }
 
             if (c.flags == 0)
@@ -1027,12 +1035,10 @@ namespace Phirura.Game
 
             Matrix3x2 saved = ds.Transform;
             ds.Transform = Matrix3x2.Identity;
-            ds.PushAxisAlignedClip(
-                new Rect(c.f0 * pxToDip, c.f1 * pxToDip, w * pxToDip, h * pxToDip),
-                CanvasAntialiasing.Aliased);
+            _portClipLayer = ds.CreateLayer(
+                1f,
+                new Rect(c.f0 * pxToDip, c.f1 * pxToDip, w * pxToDip, h * pxToDip));
             ds.Transform = saved;
-
-            _portClipActive = true;
         }
 
         /// <summary>Rate gate for <see cref="PortFrameStats"/>.</summary>

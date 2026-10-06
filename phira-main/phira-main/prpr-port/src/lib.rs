@@ -370,6 +370,14 @@ impl InputBackend for ShellInput {
             None => 1,
         };
         if accepted != 0 {
+            // Logged here rather than left to prpr: the `Err` it produces is only ever surfaced by
+            // a `warn!`, and `tracing` has no subscriber on this target, so without this line a
+            // shell with no dialog would look exactly like a phira build where `request_input` is
+            // never called. That is precisely the ambiguity this whole change exists to remove.
+            log_line(&format!(
+                "input: req={req} refused by the shell (callbacks={}, sink gone or old DLL)",
+                cb().text_input.is_some()
+            ));
             take_input_callback(req);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,

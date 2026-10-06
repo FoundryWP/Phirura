@@ -4,9 +4,10 @@ Running the real **phira** (Rust rhythm game) on a **Windows Phone 8.1** device.
 Device: **Lumia 925 / RM-910**, Adreno 225, WDDM 1.2, FL 9.3 (`0x9300`),
 product id `fa2c9634-5ad8-487e-be3c-9893871fda9f`.
 
-> **Read `REFERENCE.md` (project root) first** — vtable slots, IIDs, constants, the eliminated-hypothesis
-> log, tool/env catalogues. Then `.workbuddy-ai/memory/2026-10-05.md`, which has the blow-by-blow
-> evidence for everything below. This file is the summary; those two are the detail.
+> **Read `.workbuddy-ai/memory/REFERENCE.md` first** — vtable slots, IIDs, constants, the
+> eliminated-hypothesis log, tool/env catalogues. It is *not* at the project root; it lives under
+> `.workbuddy-ai/memory/`. Then `.workbuddy-ai/memory/2026-10-05.md`, which has the blow-by-blow
+> evidence for the older work. This file is the summary; those two are the detail.
 
 ---
 
@@ -61,9 +62,9 @@ store. (`ts` on Local copies the whole 22 MB store and aborts on the chart's mp3
 
 ---
 
-## 3. THE OPEN BUG — UI touches arrive with position (0, 0)
+## 3. CLOSED — UI touches arriving with position (0, 0)
 
-**This is where the next agent starts. It is measured, not guessed.**
+**Do not re-investigate this.** It was measured, fixed, and re-measured on the device.
 
 Symptoms the user sees: **on `home.rs` almost every button is dead** (one, the resource-pack button,
 used to work — that was a coincidence of its rect containing the origin). During gameplay, **drag
@@ -110,7 +111,23 @@ is at fault. **Add probes; do not change behaviour until the numbers say which l
 
 **Proven-good upstream of this** (all measured): touches reach the shell and the DLL (`pn` counts up),
 the C# finger table drains (`remaining` returns to 1), `PointerReleased` is the only release event that
-fires (`PointerCaptureLost` never does), and the `home.rs` gate is **open** (`thr=0`).
+fires, and the `home.rs` gate is **open** (`thr=0`).
+
+**Root cause and closure.** The release path was the fault, not `touch_transform`: the shell never saw
+`PointerCaptureLost`, so the finger table was never drained on the release that actually happened, and
+whatever `prpr::ui` replayed came from a stale/zero entry. The fix is a handler on
+`OnPointerCaptureLost` (present now in `GamePage.xaml`, `GamePage.xaml.cs` and
+`RustStage1Page.xaml.cs`).
+
+Re-measured on the device after the fix (`_phirura_log_pull_124208`, §5's `input:` line):
+
+```
+tx=+726 ty=-15 / tx=+154 ty=-64 / tx=+134 ty=+65      (gate=0 once warm, thr=0)
+ph=s1/n0/m1/e8/c0   rph=s1/n0/m1/e8/c0                 (identical)
+```
+
+`tx`/`ty` now carry real coordinates instead of `0`, and `ph` (pushed to the DLL) equals `rph`
+(replayed into `prpr::judge`) census for census — the transform and the store agree.
 
 ---
 
@@ -187,8 +204,7 @@ Currently `home.rs`'s `touch` parks `(rt, char_screen_p.now(rt), touch.position.
 
 ## 7. Remaining work, in priority order
 
-1. **UI touch position (0,0)** — §3. This blocks every menu. Highest value: it is also why
-   `chart_info.rs`'s buttons and the song list are dead.
+1. ~~**UI touch position (0,0)**~~ — **done**, see §3. Menus respond; don't reopen it.
 2. **SFX cuts the music off.** Almost certainly WP8.1's **single media session** — `SfxPlayer`'s
    `MediaElement` pool and the music's `MediaElement` compete for it. **Do not fix this by adding
    another `MediaElement`.** Needs a different audio path.

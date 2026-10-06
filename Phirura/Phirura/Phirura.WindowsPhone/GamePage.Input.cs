@@ -1,6 +1,5 @@
 using System;
 using Phirura.Core;
-using Phirura.Port;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
 
@@ -94,9 +93,9 @@ namespace Phirura
                 InputField.AcceptsReturn = _inputMultiline;
                 InputField.TextWrapping = _inputMultiline ? TextWrapping.Wrap : TextWrapping.NoWrap;
                 InputField.Height = _inputMultiline ? 120 : double.NaN;
-                InputField.VerticalScrollBarVisibility = _inputMultiline
+                ScrollViewer.SetVerticalScrollBarVisibility(InputField, _inputMultiline
                     ? ScrollBarVisibility.Auto
-                    : ScrollBarVisibility.Hidden;
+                    : ScrollBarVisibility.Hidden);
 
                 InputField.Text = defaultValue ?? string.Empty;
                 InputSecretField.Password = defaultValue ?? string.Empty;
