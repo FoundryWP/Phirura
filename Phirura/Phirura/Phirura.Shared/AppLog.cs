@@ -20,7 +20,14 @@ namespace Phirura
     public static class AppLog
     {
         private const string FileName = "phirura.log";
-        private const ulong MaxBytes = 256 * 1024;
+        // 4 MB rather than 256 KB. Rotation keeps only the tail, so at this build's write rate
+        // 256 KB discarded roughly the first eight minutes of every session - which is exactly
+        // where a reproduction lands. The run that was pulled to investigate "the hit sound cuts
+        // the music" had already rotated: what survived was the chart *browser*, with no gameplay,
+        // no hits and no `sfx_play` in it at all, so the moment the report describes was
+        // unrecoverable by construction. A log that cannot contain the event it is meant to
+        // capture is not a diagnostic.
+        private const ulong MaxBytes = 4 * 1024 * 1024;
 
         private static readonly object Gate = new object();
         private static Task _tail = Task.FromResult(0);

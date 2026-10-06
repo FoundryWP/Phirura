@@ -1321,15 +1321,34 @@ namespace Phirura.Game
             // glyph quad solid white. This is the white-block report: a race between the first
             // frames and texture construction, not a font, an asset or an alpha problem.
             //
-            // Skipped rather than waited for, and gated on the registry rather than on the shell:
-            // an id the registry does not hold is a stale binding, not a pending one, and that
-            // case must keep flat-filling because prpr's untextured note bodies and judge-line
-            // strokes are drawn exactly this way.
+            // Skipped rather than waited for, and gated on the registry rather than on the shell.
+            //
+            // The old rule here - "an id the registry no longer holds is stale, so keep
+            // flat-filling" - is what the device falsified. prpr's untextured note bodies and
+            // judge-line strokes carry `c.flags == 0` and never reach this branch at all, so a
+            // non-zero id that nothing can produce pixels for is *only ever* a textured draw the
+            // shell has lost: flat-filling it is not a fallback, it is the wrong picture. And the
+            // wrong picture is not subtle - prpr keeps a glyph's shape in the atlas and puts
+            // nothing but the fade in the vertex colour (`prpr/src/ui/text.rs:349`), so every
+            // affected quad becomes one solid white rectangle.
+            //
+            // There are two ways to get here and both are refused:
+            //   pending - the registry still holds the id; the carrier is still being built and
+            //             the next frame or three draws normally.
+            //   miss    - the registry does not hold it, which `text.rs:367` does on purpose:
+            //             growing the glyph atlas calls `cache_texture.delete()` on an id that
+            //             this very frame's batches still name. Those quads are unrecoverable by
+            //             definition - prpr pushes the next frame against the new id - so drawing
+            //             nothing is the entire recovery. On the device this was not a frame or
+            //             three: `noCarrier=161` stood for 101 seconds, because a miss is stable
+            //             until prpr rebinds, and flat-filling is what made it a screen of white.
             bool carrierPending = false;
+            bool registryMiss = false;
             if (c.flags != 0 && !hasTex)
             {
                 uint pendingW, pendingH;
                 carrierPending = PrprPort.TextureSize(c.flags, out pendingW, out pendingH);
+                registryMiss = !carrierPending;
             }
 
             // The duplicate-quad memo is per command: it exists to fold the two triangles of one
@@ -1363,21 +1382,30 @@ namespace Phirura.Game
                         continue;
                     }
 
-                    if (carrierPending)
+                    if (carrierPending || registryMiss)
                     {
-                        // Named a texture whose carrier does not exist yet. Draw nothing for this
-                        // frame rather than a solid white block in its place; the carrier arrives
-                        // a frame or three later and the text then appears normally.
+                        // Named a texture this shell cannot draw textured, so draw nothing at all
+                        // rather than a solid white block in its place. The two reasons differ only
+                        // in when the picture comes back, never in whether flat-filling was right.
                         //
                         // Counted, because the point of this branch is that it stops being taken:
                         // a count that never moves says the race is gone, and one that keeps
                         // climbing says a carrier is being built and lost again, which would be a
-                        // different bug wearing the same symptom.
+                        // different bug wearing the same symptom. The reason rides along - "pending"
+                        // and "registry miss" are different bugs and this is the only place that
+                        // can tell them apart from the log.
                         _carrierPendingSkipped++;
-                        if (_carrierPendingSkipped == 1 || (_carrierPendingSkipped % 64) == 0)
+                        // Every 5000th, not every 64th. A miss happens once per textured batch
+                        // per frame - about 1400/second here - so a 64-wide stride logged ~23
+                        // lines/second and rolled the 256 KB log every three minutes, taking the
+                        // music and sfx lines with it. The per-frame `noCarrier=` on the `port
+                        // frame` line already tracks this continuously; this one only has to
+                        // prove the reason and that the count still moves.
+                        if (_carrierPendingSkipped == 1 || (_carrierPendingSkipped % 5000) == 0)
                         {
                             AppLog.WriteSync("Win2D: geometry id=" + c.flags
-                                + " skipped, carrier pending (#" + _carrierPendingSkipped + ")");
+                                + " skipped, " + (carrierPending ? "carrier pending" : "registry miss")
+                                + " (#" + _carrierPendingSkipped + ")");
                         }
                         continue;
                     }

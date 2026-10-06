@@ -144,6 +144,8 @@
       hit_fx.png is its 8x7 hit-particle atlas.
     -->
     <Content Include="Assets\game\bold.ttf" />
+    <Content Include="Assets\game\button.wav" />
+    <Content Include="Assets\game\button_large.wav" />
     <Content Include="Assets\game\cali.wav" />
     <Content Include="Assets\game\cali_hit.wav" />
     <Content Include="Assets\game\click.png" />
@@ -155,6 +157,7 @@
     <Content Include="Assets\game\hit_fx.png" />
     <Content Include="Assets\game\hold.png" />
     <Content Include="Assets\game\phigros.ttf" />
+    <Content Include="Assets\game\switch.wav" />
 
     <!--
         The whole phira asset tree, so a build is self-contained.

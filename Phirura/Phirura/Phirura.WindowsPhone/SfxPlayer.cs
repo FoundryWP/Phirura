@@ -54,13 +54,24 @@ namespace Phirura
                 MediaElement m = new MediaElement();
                 m.AutoPlay = false;
                 m.IsHitTestVisible = false;
-                // GameEffects, not GameMedia. The platform documents `GameMedia` as "background
-                // (non-event or ambient) audio for games" - the category a game's *music* takes,
-                // and the one `Player` above already holds - and `GameEffects` as "audio for
-                // game-specific sound effects", which is what these six voices are. With both on
-                // `GameMedia` every hit was competing with the music for the same category rather
-                // than sitting beside it as an effect.
-                m.AudioCategory = Windows.UI.Xaml.Media.AudioCategory.GameEffects;
+                // `Other`, matching `Player` - the last pairing that had not been tried.
+                //
+                // Three configurations have been tested on this device and the music was cut in
+                // all three: (music GameMedia + sfx GameMedia), (music GameMedia + sfx
+                // GameEffects), and (music Other + sfx GameEffects). What the move to `GameEffects`
+                // could not do is remove the asymmetry, because the *effects* stream is the one
+                // carrying event privilege: Microsoft documents `GameMedia` as background audio
+                // that "mutes automatically", and singles out only `GameChat` as a category that
+                // "will not attenuate other streams" - which says nothing reassuring about
+                // `GameEffects` and a great deal about which side of the pair gets to decide.
+                //
+                // Leaving only the music as an ordinary stream still left an effects stream
+                // opposite it. With both on `Other` neither carries background or event
+                // privilege, so there is nothing for the engine to arbitrate between two peer
+                // streams. This is not about loudness: the hit sounds measure 11-17 dB *below*
+                // the music (click -22.5 dB, drag -28.6 dB against the track at -11.0 dB), so
+                // they cannot drown it - only stop it.
+                m.AudioCategory = Windows.UI.Xaml.Media.AudioCategory.Other;
                 m.MediaOpened += OnVoiceOpened;
                 // Without this an effect the platform refuses to open fails *silently*:
                 // `MediaOpened` never fires, `_pending` stays set, and the sound simply never

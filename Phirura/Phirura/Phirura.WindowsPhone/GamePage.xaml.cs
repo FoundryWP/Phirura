@@ -1034,10 +1034,20 @@ namespace Phirura
         /// <summary>
         /// Where an effect lives.
         ///
-        /// The packaged `.wav` wins for the sounds this project ships, so the hit sounds survive a
-        /// missing resource pack - they are the ones a player notices. Everything else (the UI
-        /// clicks, the ending sting) is phira's own `.ogg`, which the seeded asset tree puts under
-        /// `charts\`.
+        /// Everything phira registers now resolves to a packaged `.wav`: the three note sounds,
+        /// the calibration pair, and - as of this change - the three UI clicks as well. That last
+        /// group used to fall through to `charts\<name>.ogg`, because that is where the seeded
+        /// asset tree keeps them, and WP8.1's MediaElement refuses Vorbis outright
+        /// (`MF_MEDIA_ENGINE_ERR_SRC_NOT_SUPPORTED`, 0xC00D36C4). Every button press therefore
+        /// logged `Catastrophic failure` from `MediaElement.Play()` and produced nothing: the
+        /// main menu had no click sound at all, and the log said so six times over. The `.ogg`
+        /// files are still the source; `button.wav`, `button_large.wav` and `switch.wav` are
+        /// their decodable copies, made with ffmpeg and shipped in the package so they survive a
+        /// `-Push` (which REPLACES LocalFolder).
+        ///
+        /// The default branch stays as it is for chart-supplied hit sounds, whose names cannot be
+        /// known here - and a miss there is still worth reporting, because it yields a MediaFailed
+        /// line naming the exact URI that failed.
         /// </summary>
         private static string SfxUri(string name)
         {
@@ -1058,6 +1068,9 @@ namespace Phirura
                 case "flick":
                 case "cali":
                 case "cali_hit":
+                case "button":
+                case "button_large":
+                case "switch":
                     return "ms-appx:///Assets/game/" + bare + ".wav";
                 default:
                     return "ms-appdata:///local/charts/" + bare + ".ogg";
@@ -1727,7 +1740,20 @@ namespace Phirura
                     + " drawMs=" + drawMs.ToString("0.0")
                     + " presMs=" + presMs.ToString("0.0")
                     + " worstMs=" + maxMs.ToString("0.0")
-                    + " touches=" + _active.Count + " paused=" + _paused);
+                    + " touches=" + _active.Count + " paused=" + _paused
+                    // The music's own state, sampled every second: a hit sound that takes the BGM
+                    // with it shows up as `music=Paused`/`Stopped` from the next second on, and a
+                    // quiet volume or a dead element shows up as `mv=0`. Without this the report
+                    // and "the log shows nothing wrong" are indistinguishable.
+                    + " music=" + Player.CurrentState
+                    + " mv=" + Player.Volume.ToString("0.##")
+                    // Cumulative count of sounds this pool has been asked to play. `music=` is a
+                    // one-per-second sample of the element's state; this is how many sounds went
+                    // out during that same second. Together they attribute a `music=Playing ->
+                    // Paused` flip to a hit or rule one out, instead of leaving the two facts
+                    // known separately. It is a counter, so it adds no lines to a log that has
+                    // already proven too small.
+                    + " sfxN=" + (_sfx == null ? 0 : _sfx.Played));
                 _frames = 0;
                 _sumRust = 0; _sumDraw = 0; _sumPresent = 0; _maxFrame = 0;
             }
@@ -1983,7 +2009,13 @@ namespace Phirura
         {
             PhiraEndingMusicUri = null;
             string[] roots = { "", "respack\\" };
-            string[] exts = { ".ogg", ".mp3", ".wav" };
+            // `.ogg` deliberately absent. This list is probed in order and `ending.ogg`
+            // is present in the seeded asset tree, so it won every time - the result page
+            // then asked MediaElement to open a source it cannot decode and played
+            // silence, while `ending.mp3`, which it can decode, sat beside it. Ordering
+            // cannot help while an undecodable extension is listed at all; only the
+            // formats this profile actually plays belong here.
+            string[] exts = { ".mp3", ".wav" };
             foreach (string root in roots)
             {
                 foreach (string ext in exts)
@@ -2331,7 +2363,12 @@ namespace Phirura
         private void OnMediaFailed(object sender, ExceptionRoutedEventArgs e)
         {
             _mediaReady = false;
-            System.Diagnostics.Debug.WriteLine("MediaElement failed: " + e.ErrorMessage);
+            // Into the log rather than `Debug.WriteLine`, which is discarded in a release build.
+            // "the music stopped" and "the music element failed" look identical on screen, and
+            // this is the only line that separates them - so it is worth the same treatment
+            // `SfxPlayer.OnVoiceFailed` already gets.
+            AppLog.WriteSync("GamePage: MediaFailed state=" + Player.CurrentState
+                + " :: " + (e == null ? "(no args)" : e.ErrorMessage));
         }
 
         /// <summary>

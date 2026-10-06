@@ -10,8 +10,22 @@
     Background="#FF07070B">
 
     <Grid x:Name="RootGrid" Background="#FF07070B">
+        <!--
+            `Other`, not `GameMedia`.
+
+            Microsoft documents `GameMedia` as "background (non-event or ambient) audio for
+            games" and says music in that category "mutes automatically" - it is the *background*
+            slot, and the platform is entitled to silence it when a higher-priority stream starts.
+            This chart BGM is the primary stream of the page, not ambient filler behind an effect.
+
+            That is what "the hit sound pushes the music out" was. Two category pairings were
+            tried (effects on `GameMedia`, then effects on `GameEffects`) and the music was cut in
+            both, because the one thing that never changed was the music itself being background:
+            the first hit sound to start is a stream that outranks it. `Other` is the neutral
+            category and carries no such policy.
+        -->
         <MediaElement x:Name="Player" AutoPlay="False" Opacity="0" IsHitTestVisible="False"
-                      AudioCategory="GameMedia"
+                      AudioCategory="Other"
                       MediaOpened="OnMediaOpened"
                       MediaFailed="OnMediaFailed"
                       MediaEnded="OnMediaEnded" />
@@ -126,8 +140,10 @@
             plays, and the game loop keeps ticking (see OnRendering).
         -->
         <Grid x:Name="CalibOverlay" Background="#F207070B" Visibility="Collapsed">
+            <!-- Same reason as `Player` above: a background category gets muted by the very
+                 `cali_hit` sound this overlay exists to time. -->
             <MediaElement x:Name="CaliPlayer" AutoPlay="False" Opacity="0" IsHitTestVisible="False"
-                          AudioCategory="GameMedia" MediaEnded="OnCaliMediaEnded" />
+                          AudioCategory="Other" MediaEnded="OnCaliMediaEnded" />
 
             <Grid x:Name="CaliSurface" Background="Transparent" PointerPressed="OnCaliPointerPressed">
                 <Canvas x:Name="CaliBoard">

@@ -131,6 +131,57 @@ $staged = Get-ChildItem $Out -Recurse -File
 }
 
 # ---------------------------------------------------------------------------
+# 1b. Keep `LocalState\data` across the wipe.
+#
+# Both destructive steps above and below really are destructive: step 2 is uninstall +
+# install ("a clean app AND a clean LocalFolder", per its own comment) and step 3 is
+# `ISETool rs`, which replaces LocalFolder. `data\` lives inside LocalFolder, so every
+# deploy threw away `data.json` - the login - and `data\charts\download\`, every chart
+# fetched from the server.
+#
+# That is not a nuisance, it is the experiment destroying its own subject: the storage
+# and network rounds exist to prove that a login and a downloaded chart survive and
+# play, and one `-Deploy -Push` reduced `data.json` to its default (`"me": null`) and
+# deleted the downloaded chart outright - re-establishing either means the user logs in
+# and downloads again by hand. Staged here, before step 2, and put back after step 3 so
+# it survives both wipes rather than whichever one happens to run.
+#
+# Through `ISETool ts` rather than by path. The phone's package folder
+# (`C:\Data\Users\DefApps\APPDATA\Local\Packages\<ProductId>_...`) is not reachable from
+# this machine at all - `C:\Data` does not exist here - so the first version of this block
+# probed it, found nothing, printed "nothing to preserve" and walked straight into the wipe
+# it was written to prevent. The store's own transport is the only thing that has ever
+# worked on this setup: `ts` is what `-PullLog` reads with and `rs` is what step 3 writes
+# with, so both halves go through the same tool and neither depends on a mount that comes
+# and goes.
+#
+# Taken before step 2 because step 2 uninstalls, which is the moment the data stops existing.
+# ---------------------------------------------------------------------------
+$dataKeep = $null
+if ($Deploy -or $Push) {
+    $keepDir = "E:\_phirura_keep"
+    if (Test-Path $keepDir) {
+        # `-LiteralPath` with an explicit path: the harness's safe-delete wrapper only reads
+        # that form, and a piped form throws before anything is removed.
+        Remove-Item -LiteralPath $keepDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $keepDir -Force | Out-Null
+    & $ise ts $Device $ProductId $keepDir 2>&1 | Out-Null
+
+    # `ts` wraps its output in `IsolatedStore\`, the same shape `-PullLog` reads back.
+    $keepData = Join-Path $keepDir "IsolatedStore\data"
+    if (Test-Path $keepData) {
+        $dataKeep = $keepData
+        $n = (Get-ChildItem -LiteralPath $keepData -Recurse -File | Measure-Object).Count
+        "kept LocalState\data: $n files -> $keepData"
+    } else {
+        # No `data` yet, or `ts` failed against a locked store. Either way there is nothing to
+        # put back, and claiming otherwise would read as a preserved login in the run output.
+        "no LocalState\data in the store - nothing to preserve"
+    }
+}
+
+# ---------------------------------------------------------------------------
 # 2. Deploy. `update` fails 0x81030137 when the version is unchanged, so this is
 #    uninstall + install: a clean app AND a clean LocalFolder.
 # ---------------------------------------------------------------------------
@@ -155,12 +206,29 @@ if ($Deploy) {
 # 3. Push. Replaces LocalFolder, so anything staged before this point is lost.
 # ---------------------------------------------------------------------------
 if ($Push) {
+    # Fold the preserved `data` into the mirror *before* `rs`. `rs` REPLACES LocalFolder, so
+    # restoring afterwards is a restore onto a store that has already been emptied - which is
+    # what made the first attempt at this a no-op that still reported success. Copying the
+    # directory onto `$Out` puts it at `$Out\data`, and `rs` pushes `$Out`'s contents, so the
+    # app finds `<LocalFolder>\data` exactly where `dir::root()` expects it.
+    if ($dataKeep -and (Test-Path $dataKeep)) {
+        Copy-Item -LiteralPath $dataKeep -Destination $Out -Recurse -Force
+        $merged = Join-Path $Out "data"
+        if (Test-Path $merged) {
+            $n = (Get-ChildItem -LiteralPath $merged -Recurse -File | Measure-Object).Count
+            "merged kept data: $n files -> $Out\data"
+        }
+    }
     & $ise rs $Device $ProductId $Out 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { Write-Warning "ISETool rs exit $LASTEXITCODE" }
     # Confirm with the path that would have failed had the `ts` wrapping been replicated here.
     & $ise "dir:charts" $Device $ProductId 2>&1 | Out-Null
     "pushed -> LocalFolder\charts"
 }
+
+# (3b removed: the restore moved inside step 3, before `rs`. Doing it after the push
+# restored onto a store `rs` had already emptied, and the variables it read only existed
+# when the unreachable `C:\Data` path happened to be mounted.)
 
 if ($Launch) {
     & $adp /launch $ProductId /targetdevice:$Device 2>&1 | Out-Null

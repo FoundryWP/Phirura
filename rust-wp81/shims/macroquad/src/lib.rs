@@ -1960,6 +1960,21 @@ pub mod draw {
         dirty: [u32; 4],
         /// Whether `dirty` holds something the shell has not read yet.
         dirty_pending: bool,
+        /// How many live registrations this id currently has.
+        ///
+        /// Needed because a render-texture id is a pure function of its dimensions
+        /// (`miniquad::Texture::new_render_texture` gives `width ^ (height << 16) ^ format`), so
+        /// every 1024x1024 render texture is the same id `0x4000401` by construction - not
+        /// "usually the same", *identically* the same. prpr builds one `TextCache` per scene,
+        /// scenes stack, and a dropped `TextCache` releases late (`ext::queue_texture_deletion`
+        /// is flushed from the render thread), so several owners of that one id coexist and the
+        /// last one registered is not necessarily the last one to let go.
+        ///
+        /// Without this the first `delete` removed the shared entry out from under the
+        /// survivors: `TextureSize` then answered false for every glyph batch, the shell drew
+        /// nothing, and all text disappeared while `texNew`/`texRebuilt` kept insisting the atlas
+        /// had been registered - which is exactly the reported symptom.
+        refs: u32,
     }
 
     static mut TEX_ENTRIES: [TexEntry; TEX_SLOTS] = [TexEntry {
@@ -1970,6 +1985,7 @@ pub mod draw {
         len: 0,
         dirty: [0; 4],
         dirty_pending: false,
+        refs: 0,
     }; TEX_SLOTS];
     static mut TEX_COUNT: usize = 0;
     static mut TEX_BYTES: Vec<u8> = Vec::new();
@@ -2022,6 +2038,10 @@ pub mod draw {
             let count = TEX_COUNT;
             for i in 0..count {
                 if TEX_ENTRIES[i].id == id {
+                    // A second owner of an id that is already live. Dropping the entry on the
+                    // first `delete` would strand it, so the count has to go up here too - the
+                    // pairing is registration-to-registration, not id-to-id. See `TexEntry::refs`.
+                    TEX_ENTRIES[i].refs = TEX_ENTRIES[i].refs.saturating_add(1);
                     return;
                 }
             }
@@ -2047,6 +2067,7 @@ pub mod draw {
                         len: e.len,
                         dirty: [0, 0, width, height],
                         dirty_pending: true,
+                        refs: 1,
                     };
                     TEX_COUNT = count + 1;
                     TEX_ALIAS = TEX_ALIAS.wrapping_add(1);
@@ -2073,6 +2094,7 @@ pub mod draw {
                 // one, so "new" has to mean "read all of it" or its first read is incomplete.
                 dirty: [0, 0, width, height],
                 dirty_pending: true,
+                refs: 1,
             };
             TEX_COUNT = count + 1;
         }
@@ -2110,10 +2132,21 @@ pub mod draw {
                 Some(i) => i,
                 None => return,
             };
+            // Not the last owner. This is the whole fix for text vanishing after a while:
+            // same-sized render textures share one id, several `TextCache`es hold it at once,
+            // and their releases arrive independently (queued onto the render thread, so an old
+            // scene's drop lands long after a newer one registered). Removing the entry on any
+            // one of them left the survivors with an id the shell had never heard of.
+            if TEX_ENTRIES[i].refs > 1 {
+                TEX_ENTRIES[i].refs -= 1;
+                return;
+            }
+
             let (offset, len) = (TEX_ENTRIES[i].offset, TEX_ENTRIES[i].len);
 
             // The entry goes whether or not the bytes do: an id nothing owns still costs the shell
-            // a carrier it would rebuild every poll.
+            // a carrier it would rebuild every poll. Only the last owner gets here - `refs` above
+            // is what makes "nobody owns it" mean it rather than guess it.
             for j in i + 1..count {
                 TEX_ENTRIES[j - 1] = TEX_ENTRIES[j];
             }
@@ -2197,19 +2230,22 @@ pub mod draw {
             for i in 0..count {
                 if TEX_ENTRIES[i].id == id {
                     TEX_REBUILT = TEX_REBUILT.wrapping_add(1);
-                    let e = TEX_ENTRIES[i];
-                    core::ptr::write_bytes(TEX_BYTES.as_mut_ptr().add(e.offset), 0, e.len);
-                    // The *stored* extent, not the one just passed in. The dirty rectangle is a
-                    // promise the reader has to be able to keep, and `texture_rect_data` accepts
-                    // only what fits inside `e.width`/`e.height` - announcing a larger area would
-                    // get that read refused with -3, i.e. an atlas the shell can see but not fill.
+                    // The id already being registered cannot be this owner's previous texture:
+                    // `prpr` calls `new_cache_texture` only at construction or immediately after
+                    // `cache_texture.delete()`, and `delete` releases first - so by the time we
+                    // get here the entry would be gone if one owner were involved. Finding it
+                    // therefore means a *second live owner* of a shared id (see `TexEntry::refs`
+                    // for why the ids collide: they are a hash of the dimensions, so every
+                    // same-sized render texture is one id).
                     //
-                    // Normally the two agree, because the id is a function of the dimensions and
-                    // a different size therefore takes this branch only for the same size. Writing
-                    // the stored numbers makes the pair self-consistent even if that ever stops
-                    // being true: the content would be a subset, but never an unreadable one.
-                    TEX_ENTRIES[i].dirty = [0, 0, e.width, e.height];
-                    TEX_ENTRIES[i].dirty_pending = true;
+                    // Two things follow. Count the owner, or the first `delete` takes the entry
+                    // from under the rest and every glyph batch in the shell starts reporting
+                    // `registry miss` - text gone, permanently, with `texNew`/`texRebuilt` still
+                    // claiming the atlas is registered. And do *not* zero the pixels: this is not
+                    // a fresh allocation, it is the atlas the first owner is still drawing, and a
+                    // newly constructed `GlyphBrush` only ever samples glyphs it uploaded itself,
+                    // so whatever stale content sits outside its own rects is never read.
+                    TEX_ENTRIES[i].refs = TEX_ENTRIES[i].refs.saturating_add(1);
                     return;
                 }
             }
@@ -2238,6 +2274,7 @@ pub mod draw {
                 len,
                 dirty: [0, 0, width, height],
                 dirty_pending: true,
+                refs: 1,
             };
             TEX_COUNT = count + 1;
         }

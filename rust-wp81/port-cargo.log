@@ -252,195 +252,6 @@ warning: function `glFramebufferRenderbuffer` should have a snake case name
 fer`
 
 warning: `miniquad` (lib) generated 15 warnings
-warning: unused doc comment
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:1243:5
-     |
-1243 | /     /// Touch events the shell pushed for the frame now being drawn.
-1244 | |     ///
-1245 | |     /// One queue serves two readers that upstream feeds from two different places. Macroquad's
-1246 | |     /// `touches()` reports the *state* of what is currently down, which `Judge::update` needs in
-...    |
-1260 | |     /// to the last configuration that booted. **Do not reintroduce a lock here without a device test
-1261 | |     /// that shows the boot still reaches its first frame.**
-     | |_____-------------------------------------------------------^
-     |       |
-     |       rustdoc does not generate documentation for macro invocations
-     |
-     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
-     = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
-
-warning: unnecessary `unsafe` block
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:3017:9
-     |
-3017 |         unsafe { core::ptr::addr_of!(PORT_CMDS) as *const PortCmd }
-     |         ^^^^^^ unnecessary `unsafe` block
-     |
-     = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
-
-warning: unnecessary `unsafe` block
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:3022:9
-     |
-3022 |         unsafe { core::ptr::addr_of!(PORT_VERTS) as *const PortVertex }
-     |         ^^^^^^ unnecessary `unsafe` block
-
-warning: unnecessary `unsafe` block
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:3027:9
-     |
-3027 |         unsafe { core::ptr::addr_of!(INDICES) as *const u16 }
-     |         ^^^^^^ unnecessary `unsafe` block
-
-warning: creating a shared reference to mutable static
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2040:58
-     |
-2040 |                 let stored = core::slice::from_raw_parts(TEX_BYTES.as_ptr().add(e.offset), e.len);
-     |                                                          ^^^^^^^^^^^^^^^^^^ shared reference to mutable static
-     |
-     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if
- a mutable reference is created for it while the shared reference lives
-     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
-g.org/reference/interior-mutability.html>
-     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
-     = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
-
-warning: creating a shared reference to mutable static
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2057:26
-     |
-2057 |             let offset = (&TEX_BYTES).len();
-     |                          ^^^^^^^^^^^^ shared reference to mutable static
-     |
-     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if
- a mutable reference is created for it while the shared reference lives
-     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
-help: use `&raw const` instead to create a raw pointer
-     |
-2057 |             let offset = (&raw const TEX_BYTES).len();
-     |                            +++++++++
-
-warning: creating a mutable reference to mutable static
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2065:13
-     |
-2065 |             TEX_BYTES.extend_from_slice(bytes);
-     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
-     |
-     = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the s
-tatic is used or if any other reference is created for the static while the mutable reference lives
-     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
-g.org/reference/interior-mutability.html>
-     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
-
-warning: creating a mutable reference to mutable static
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2132:21
-     |
-2132 |             let _ = TEX_BYTES.drain(offset..end);
-     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
-     |
-     = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the s
-tatic is used or if any other reference is created for the static while the mutable reference lives
-     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
-g.org/reference/interior-mutability.html>
-     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
-
-warning: creating a mutable reference to mutable static
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2201:44
-     |
-2201 |                     core::ptr::write_bytes(TEX_BYTES.as_mut_ptr().add(e.offset), 0, e.len);
-     |                                            ^^^^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
-     |
-     = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the s
-tatic is used or if any other reference is created for the static while the mutable reference lives
-     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
-g.org/reference/interior-mutability.html>
-     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
-
-warning: creating a shared reference to mutable static
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2224:16
-     |
-2224 |             if TEX_BYTES.len().saturating_add(len) > TEX_MAX_BYTES {
-     |                ^^^^^^^^^^^^^^^ shared reference to mutable static
-     |
-     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if
- a mutable reference is created for it while the shared reference lives
-     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
-g.org/reference/interior-mutability.html>
-     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
-
-warning: creating a shared reference to mutable static
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2229:26
-     |
-2229 |             let offset = TEX_BYTES.len();
-     |                          ^^^^^^^^^^^^^^^ shared reference to mutable static
-     |
-     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if
- a mutable reference is created for it while the shared reference lives
-     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
-g.org/reference/interior-mutability.html>
-     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
-
-warning: creating a mutable reference to mutable static
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2231:13
-     |
-2231 |             TEX_BYTES.resize(offset + len, 0);
-     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
-     |
-     = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the s
-tatic is used or if any other reference is created for the static while the mutable reference lives
-     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
-g.org/reference/interior-mutability.html>
-     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
-
-warning: creating a mutable reference to mutable static
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2290:27
-     |
-2290 |                   let dst = TEX_BYTES
-     |  ___________________________^
-2291 | |                     .as_mut_ptr()
-     | |_________________________________^ mutable reference to mutable static
-     |
-     = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the s
-tatic is used or if any other reference is created for the static while the mutable reference lives
-     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
-g.org/reference/interior-mutability.html>
-     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
-
-warning: creating a shared reference to mutable static
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2380:27
-     |
-2380 |                   let src = TEX_BYTES
-     |  ___________________________^
-2381 | |                     .as_ptr()
-     | |_____________________________^ shared reference to mutable static
-     |
-     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if
- a mutable reference is created for it while the shared reference lives
-     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
-g.org/reference/interior-mutability.html>
-     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
-
-warning: creating a shared reference to mutable static
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2415:18
-     |
-2415 |         unsafe { TEX_BYTES.len() }
-     |                  ^^^^^^^^^^^^^^^ shared reference to mutable static
-     |
-     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if
- a mutable reference is created for it while the shared reference lives
-     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
-g.org/reference/interior-mutability.html>
-     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
-
-warning: creating a shared reference to mutable static
-    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2462:44
-     |
-2462 |             core::ptr::copy_nonoverlapping(TEX_BYTES.as_ptr().add(e.offset), out, e.len);
-     |                                            ^^^^^^^^^^^^^^^^^^ shared reference to mutable static
-     |
-     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if
- a mutable reference is created for it while the shared reference lives
-     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
-g.org/reference/interior-mutability.html>
-     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
-
-warning: `macroquad` (lib) generated 16 warnings
 warning: linker stdout: LINK : warning LNK4044: unrecognized option '/NATVIS:C:\Users\admin\.workbuddy-ai\binaries\rust
 \rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\etc\intrinsic.natvis'; ignored鈵?         LINK : warning L
 NK4044: unrecognized option '/NATVIS:C:\Users\admin\.workbuddy-ai\binaries\rust\rustup\toolchains\nightly-x86_64-pc-win
@@ -451,6 +262,7 @@ tup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\etc\libstd.natvis'; ig
   |
   = note: `#[warn(linker_messages)]` on by default
 
+   Compiling macroquad v0.3.25 (E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad)
 warning: `phira` (build script) generated 1 warning
 warning: variable does not need to be mutable
    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\rfd\src\lib.rs:111:23
@@ -463,7 +275,6 @@ warning: variable does not need to be mutable
     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
 warning: `rfd` (lib) generated 1 warning (run `cargo fix --lib -p rfd` to apply 1 suggestion)
-   Compiling prpr v0.8.2 (E:\Users\admin\Documents\visual studio 2013\Phirura\phira-main\phira-main\prpr)
 warning: variable does not need to be mutable
    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\reqwest\src\lib.rs:940:23
     |
@@ -487,6 +298,7 @@ warning: field `redirect` is never read
 sis
     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
+   Compiling phira v0.8.2 (E:\Users\admin\Documents\visual studio 2013\Phirura\phira-main\phira-main\phira)
 warning: `reqwest` (lib) generated 2 warnings (run `cargo fix --lib -p reqwest` to apply 1 suggestion)
 warning: suspicious definition of the runtime `strlen` symbol used by the standard library
     --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\compat\src\lib.rs:1008:1
@@ -502,6 +314,183 @@ rlen")]`, or `#[link_name = "strlen"]`
      = note: `#[warn(suspicious_runtime_symbol_definitions)]` on by default
 
 warning: `wp81-compat` (lib) generated 1 warning
+warning: unused doc comment
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:1243:5
+     |
+1243 | /     /// Touch events the shell pushed for the frame now being drawn.
+1244 | |     ///
+1245 | |     /// One queue serves two readers that upstream feeds from two different places. Macroquad's
+1246 | |     /// `touches()` reports the *state* of what is currently down, which `Judge::update` needs in
+...    |
+1260 | |     /// to the last configuration that booted. **Do not reintroduce a lock here without a device test
+1261 | |     /// that shows the boot still reaches its first frame.**
+     | |_____-------------------------------------------------------^
+     |       |
+     |       rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+     = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:3054:9
+     |
+3054 |         unsafe { core::ptr::addr_of!(PORT_CMDS) as *const PortCmd }
+     |         ^^^^^^ unnecessary `unsafe` block
+     |
+     = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:3059:9
+     |
+3059 |         unsafe { core::ptr::addr_of!(PORT_VERTS) as *const PortVertex }
+     |         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:3064:9
+     |
+3064 |         unsafe { core::ptr::addr_of!(INDICES) as *const u16 }
+     |         ^^^^^^ unnecessary `unsafe` block
+
+warning: creating a shared reference to mutable static
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2060:58
+     |
+2060 |                 let stored = core::slice::from_raw_parts(TEX_BYTES.as_ptr().add(e.offset), e.len);
+     |                                                          ^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+     |
+     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if
+ a mutable reference is created for it while the shared reference lives
+     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
+g.org/reference/interior-mutability.html>
+     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+     = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning: creating a shared reference to mutable static
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2078:26
+     |
+2078 |             let offset = (&TEX_BYTES).len();
+     |                          ^^^^^^^^^^^^ shared reference to mutable static
+     |
+     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if
+ a mutable reference is created for it while the shared reference lives
+     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+help: use `&raw const` instead to create a raw pointer
+     |
+2078 |             let offset = (&raw const TEX_BYTES).len();
+     |                            +++++++++
+
+warning: creating a mutable reference to mutable static
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2086:13
+     |
+2086 |             TEX_BYTES.extend_from_slice(bytes);
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
+     |
+     = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the s
+tatic is used or if any other reference is created for the static while the mutable reference lives
+     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
+g.org/reference/interior-mutability.html>
+     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+
+warning: creating a mutable reference to mutable static
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2165:21
+     |
+2165 |             let _ = TEX_BYTES.drain(offset..end);
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
+     |
+     = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the s
+tatic is used or if any other reference is created for the static while the mutable reference lives
+     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
+g.org/reference/interior-mutability.html>
+     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+
+warning: creating a shared reference to mutable static
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2260:16
+     |
+2260 |             if TEX_BYTES.len().saturating_add(len) > TEX_MAX_BYTES {
+     |                ^^^^^^^^^^^^^^^ shared reference to mutable static
+     |
+     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if
+ a mutable reference is created for it while the shared reference lives
+     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
+g.org/reference/interior-mutability.html>
+     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+
+warning: creating a shared reference to mutable static
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2265:26
+     |
+2265 |             let offset = TEX_BYTES.len();
+     |                          ^^^^^^^^^^^^^^^ shared reference to mutable static
+     |
+     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if
+ a mutable reference is created for it while the shared reference lives
+     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
+g.org/reference/interior-mutability.html>
+     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+
+warning: creating a mutable reference to mutable static
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2267:13
+     |
+2267 |             TEX_BYTES.resize(offset + len, 0);
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
+     |
+     = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the s
+tatic is used or if any other reference is created for the static while the mutable reference lives
+     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
+g.org/reference/interior-mutability.html>
+     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+
+warning: creating a mutable reference to mutable static
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2327:27
+     |
+2327 |                   let dst = TEX_BYTES
+     |  ___________________________^
+2328 | |                     .as_mut_ptr()
+     | |_________________________________^ mutable reference to mutable static
+     |
+     = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the s
+tatic is used or if any other reference is created for the static while the mutable reference lives
+     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
+g.org/reference/interior-mutability.html>
+     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+
+warning: creating a shared reference to mutable static
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2417:27
+     |
+2417 |                   let src = TEX_BYTES
+     |  ___________________________^
+2418 | |                     .as_ptr()
+     | |_____________________________^ shared reference to mutable static
+     |
+     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if
+ a mutable reference is created for it while the shared reference lives
+     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
+g.org/reference/interior-mutability.html>
+     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+
+warning: creating a shared reference to mutable static
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2452:18
+     |
+2452 |         unsafe { TEX_BYTES.len() }
+     |                  ^^^^^^^^^^^^^^^ shared reference to mutable static
+     |
+     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if
+ a mutable reference is created for it while the shared reference lives
+     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
+g.org/reference/interior-mutability.html>
+     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+
+warning: creating a shared reference to mutable static
+    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:2499:44
+     |
+2499 |             core::ptr::copy_nonoverlapping(TEX_BYTES.as_ptr().add(e.offset), out, e.len);
+     |                                            ^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+     |
+     = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if
+ a mutable reference is created for it while the shared reference lives
+     = help: use a type that relies on "interior mutability" instead; to read more on this, visit <https://doc.rust-lan
+g.org/reference/interior-mutability.html>
+     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+
+   Compiling prpr v0.8.2 (E:\Users\admin\Documents\visual studio 2013\Phirura\phira-main\phira-main\prpr)
 warning: unused import: `macroquad::prelude::*`
  --> prpr\src\core\object.rs:2:5
   |
@@ -510,6 +499,7 @@ warning: unused import: `macroquad::prelude::*`
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
+warning: `macroquad` (lib) generated 15 warnings
 warning: use of deprecated constant `std::f32::INFINITY`: replaced by the `INFINITY` associated constant on `f32`
    --> prpr\src\ui.rs:519:23
     |
@@ -579,7 +569,6 @@ warning: struct `Uniforms` is never constructed
     |                ^^^^^^^^
 
 warning: `prpr` (lib) generated 9 warnings (run `cargo fix --lib -p prpr` to apply 5 suggestions)
-   Compiling phira v0.8.2 (E:\Users\admin\Documents\visual studio 2013\Phirura\phira-main\phira-main\phira)
 warning: dropping unsupported crate type `cdylib` for target `thumbv7a-pc-windows-msvc-11203888916865665807`
 
 warning: use of deprecated constant `std::f32::NAN`: replaced by the `NAN` associated constant on `f32`
@@ -1111,4 +1100,4 @@ help: first cast to a pointer `as *const ()`
      |                               ++++++++++++
 
 warning: `prpr-port` (lib) generated 44 warnings (run `cargo fix --lib -p prpr-port` to apply 42 suggestions)
-    Finished `release` profile [optimized] target(s) in 3m 29s
+    Finished `release` profile [optimized] target(s) in 3m 05s
