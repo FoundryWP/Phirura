@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Net.Http;
 using System.Runtime.InteropServices;
@@ -1082,6 +1082,105 @@ namespace Phirura
             public uint H;
         }
 
+        // ------------------------------------------------------------------
+        // the XAudio2 mixer - wp81mix.cpp, linked into this same DLL
+        // ------------------------------------------------------------------
+
+        private static readonly byte[] _mixDiagBuf = new byte[256];
+        private static int _mixReady = -1;
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_mix_ready();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_mix_diag(byte[] buf, int cap);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        private static extern int wp81_mix_sfx_play(string key, int keyLen, float amp);
+
+        /// <summary>
+        /// Whether the XAudio2 mixer came up.
+        ///
+        /// Cached, because `ensureEngine` latches - the answer cannot change once XAudio2 has been
+        /// tried - and because every hit sound asks. False where the audio module is missing is a
+        /// correct answer rather than an error: the caller then takes the MediaElement path it
+        /// always had, which is why the whole mixer was built to be skippable.
+        /// </summary>
+        public static bool MixReady
+        {
+            get
+            {
+                if (_mixReady < 0)
+                {
+                    try
+                    {
+                        _mixReady = wp81_mix_ready() != 0 ? 1 : 0;
+                    }
+                    catch (Exception ex)
+                    {
+                        // EntryPointNotFound means the DLL predates the mixer. That must not take
+                        // the app down; it only means the old path stays in use.
+                        _mixReady = 0;
+                        AppLog.Write("PrprPort: mix_ready", ex);
+                    }
+                }
+                return _mixReady == 1;
+            }
+        }
+
+        /// <summary>
+        /// One line describing the mixer - engine, error, clip and voice counts, resident PCM,
+        /// music voice. The only evidence from outside that the mixer exists at all: a chart with
+        /// no hit sounds and a mixer that never came up are otherwise the same line.
+        /// </summary>
+        public static string MixDiag()
+        {
+            try
+            {
+                int n = wp81_mix_diag(_mixDiagBuf, _mixDiagBuf.Length);
+                if (n <= 0)
+                {
+                    return "mix: (empty)";
+                }
+                // Encoding.ASCII does not exist in the Windows Phone profile, and the diag string
+                // is pure ASCII by construction ("mix engine=... clips=... pcmMB=..."), so UTF-8
+                // decodes it byte-for-byte the same way.
+                return "mix: " + System.Text.Encoding.UTF8.GetString(
+                    _mixDiagBuf, 0, Math.Min(n, _mixDiagBuf.Length));
+            }
+            catch (Exception ex)
+            {
+                return "mix: (diag failed " + ex.Message + ")";
+            }
+        }
+
+        /// <summary>
+        /// Plays the clip named by <paramref name="uri"/> through the mixer. Returns false when it
+        /// cannot - XAudio2 absent, or this sound's PCM was never ingested because the chart has
+        /// not finished loading - and the caller must then fall back to a MediaElement.
+        ///
+        /// The length is passed as -1 so the C++ side counts up to the NUL itself. Both halves
+        /// would compute the same number for these ASCII names, and one fewer thing to keep in
+        /// step across an ABI is one fewer way for a hit sound to silently not play.
+        /// </summary>
+        public static bool MixSfxPlay(string uri, float amp)
+        {
+            if (!MixReady || string.IsNullOrEmpty(uri))
+            {
+                return false;
+            }
+            try
+            {
+                return wp81_mix_sfx_play(uri, -1, amp) == 0;
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("PrprPort: mix_sfx_play " + uri, ex);
+                _mixReady = 0;   // stop asking; the MediaElement path is back for good
+                return false;
+            }
+        }
+
         /// <summary>How many textures the registry holds right now. One native call, nothing copied.</summary>
         public static int TextureCount()
         {
@@ -1362,6 +1461,12 @@ namespace Phirura
             {
                 return;
             }
+
+            // Ask whether the XAudio2 mixer exists before any sound is reached, so the answer is
+            // in the log even if the session never plays one: a chart that fails to load and a
+            // mixer that never came up are otherwise the same silence.
+            AppLog.Write("PrprPort: " + (MixReady ? MixDiag()
+                : "mix: unavailable, MediaElement path"));
 
             _audioDecode = OnAudioDecode;
             _musicNew = OnMusicNew;

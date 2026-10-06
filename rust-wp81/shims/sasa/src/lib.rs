@@ -76,7 +76,26 @@ mod shell {
         ///
         /// The frames are not copied back: only the rate and count are needed on the Rust side, and
         /// the audio itself is played by the shell from the same buffer.
+        ///
+        /// Kept for the legacy contract; the real decode now happens in Rust (`symphonia`) and
+        /// the PCM arrives through `wp81_audio_pcm` below, which is what the mixer consumes.
         pub fn wp81_audio_decode(data: *const u8, len: usize, out: *mut DecodedInfo) -> i32;
+
+        /// Hand one decoded clip to the shell, as interleaved f32 at `rate` and `channels`.
+        ///
+        /// `tag` is 0 for a music track, 1 for a hit sound; `key`/`key_len` name the asset the
+        /// way `wp81_audio_sfx_new` does, because the shell's mixer keys its library on the name,
+        /// not on the id (which is 0 for every clip). The bytes are copied by the callee; the
+        /// buffer is freed on return. Returns 0 on success, 1 on failure.
+        pub fn wp81_audio_pcm(
+            tag: u32,
+            key: *const u8,
+            key_len: usize,
+            rate: u32,
+            channels: u32,
+            frames: *const f32,
+            frame_count: u64,
+        ) -> i32;
 
         /// Create a music stream. `rate` is `playback_rate`, `amp` the amplifier, `clip_secs` the
         /// clip's duration in seconds. `name`/`name_len` say *which* file this is, exactly as
@@ -127,6 +146,74 @@ pub struct AudioClip {
     /// sound or a button click. Fixed size, no allocation - see the DLL size note.
     name: [u8; NAME_CAP],
     name_len: u8,
+    /// The decoded PCM, interleaved at `pcm_channels` channels and `pcm_rate`.
+    ///
+    /// Kept on the clip rather than handed to the shell at construction because the two owners of
+    /// it - the music player and the sfx pool - are decided by `create_music`/`create_sfx`, which
+    /// run later and only once. A clip that is never played (a res-pack sound the chart does not
+    /// use) therefore costs a decode and no upload.
+    pcm: Option<std::sync::Arc<Vec<f32>>>,
+    pcm_channels: u32,
+    pcm_rate: u32,
+}
+
+/// Decode compressed bytes to interleaved f32 PCM via symphonia.
+///
+/// Returns `(samples, sample_rate, channels)`. The samples are *not* resampled - the shell's
+/// mixer runs at the file's own rate, because resampling here would either cost a crate or cost
+/// precision, and `MediaStreamSource` takes the rate it is given.
+///
+/// Symphonia is the decoder `prpr` already depends on, so this adds no new crate to the build.
+fn decode_pcm(data: &[u8]) -> Result<(Vec<f32>, u32, u32)> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let cursor = std::io::Cursor::new(data.to_vec());
+    let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
+    let hint = Hint::new();
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .map_err(|e| anyhow::anyhow!("probe: {e}"))?;
+    let mut format = probed.format;
+    let track = format
+        .default_track()
+        .ok_or_else(|| anyhow::anyhow!("no default track"))?;
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| anyhow::anyhow!("codec: {e}"))?;
+
+    let mut out: Vec<f32> = Vec::new();
+    let mut sample_rate = 0u32;
+    let mut channels = 0u32;
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        if sample_rate == 0 {
+            sample_rate = decoded.spec().rate;
+            channels = decoded.spec().channels.count() as u32;
+            let frames = decoded.frames() as u64;
+            out.reserve((frames * channels as u64) as usize);
+        }
+        let mut buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+        buf.copy_interleaved_ref(decoded);
+        out.extend_from_slice(buf.samples());
+    }
+
+    if sample_rate == 0 || out.is_empty() {
+        return Err(anyhow::anyhow!("decode produced no samples"));
+    }
+    Ok((out, sample_rate, channels))
 }
 
 /// Enough for the longest asset name in the resource pack, with room to spare.
@@ -150,18 +237,16 @@ impl AudioClip {
     /// The caller knows the name (`load_clip!` has it as a literal, the RPE parser has it as a map
     /// key); this shim does not, which is why it has to be handed in rather than derived.
     pub fn new_named(name: &str, data: Vec<u8>) -> Result<Self> {
+        let (pcm, rate, channels) = decode_pcm(&data)?;
+        let frame_count = (pcm.len() as u64) / channels.max(1) as u64;
+        // The shell still hears the old callback for its own bookkeeping, but the answer it
+        // returns is no longer load-bearing - the clip carries its own length now, from the
+        // real decode rather than from a callback that was never wired.
         let mut info = shell::DecodedInfo {
             sample_rate: 0,
             frame_count: 0,
         };
-        let rc = unsafe { shell::wp81_audio_decode(data.as_ptr(), data.len(), &mut info) };
-        if rc != 0 || info.sample_rate == 0 {
-            return Err(anyhow::anyhow!(
-                "audio decode failed (rc={}, {} bytes)",
-                rc,
-                data.len()
-            ));
-        }
+        let _ = unsafe { shell::wp81_audio_decode(data.as_ptr(), data.len(), &mut info) };
         // Truncated rather than rejected: a long name still identifies the sound far better than no
         // name at all, and refusing the clip would silence it.
         let mut buf = [0u8; NAME_CAP];
@@ -175,10 +260,13 @@ impl AudioClip {
         }
         Ok(AudioClip {
             id: 0,
-            sample_rate: info.sample_rate,
-            frame_count: info.frame_count,
+            sample_rate: rate,
+            frame_count,
             name: buf,
             name_len: len as u8,
+            pcm: Some(std::sync::Arc::new(pcm)),
+            pcm_channels: channels,
+            pcm_rate: rate,
         })
     }
 
@@ -227,6 +315,9 @@ impl AudioClip {
             frame_count: frames.len() as u64,
             name: [0u8; NAME_CAP],
             name_len: 0,
+            pcm: None,
+            pcm_channels: 0,
+            pcm_rate: 0,
         }
     }
 
@@ -558,6 +649,14 @@ impl AudioManager {
 
     pub fn create_sfx(&mut self, clip: AudioClip, _buffer_size: Option<usize>) -> Result<Sfx> {
         let (name, name_len) = clip.name_parts();
+        // The PCM goes to the shell's mixer before the handle comes back, so a `sfx_play` that
+        // lands in the same frame as `sfx_new` still finds the sound loaded.
+        if let (Some(pcm), rate, channels) = (clip.pcm.as_ref(), clip.pcm_rate, clip.pcm_channels) {
+            unsafe {
+                shell::wp81_audio_pcm(1, name, name_len, rate, channels,
+                    pcm.as_ptr(), clip.frame_count);
+            }
+        }
         Ok(Sfx {
             id: unsafe { shell::wp81_audio_sfx_new(clip.id(), name, name_len, clip.length()) },
         })
@@ -565,6 +664,12 @@ impl AudioManager {
 
     pub fn create_music(&mut self, clip: AudioClip, settings: MusicParams) -> Result<Music> {
         let (name, name_len) = clip.name_parts();
+        if let (Some(pcm), rate, channels) = (clip.pcm.as_ref(), clip.pcm_rate, clip.pcm_channels) {
+            unsafe {
+                shell::wp81_audio_pcm(0, name, name_len, rate, channels,
+                    pcm.as_ptr(), clip.frame_count);
+            }
+        }
         let id = unsafe {
             shell::wp81_audio_music_new(
                 clip.id(),

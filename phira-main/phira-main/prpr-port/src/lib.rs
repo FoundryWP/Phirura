@@ -512,6 +512,88 @@ pub unsafe extern "C" fn wp81_audio_decode(data: *const u8, len: usize, out: *mu
     }
 }
 
+/// The XAudio2 mixer, compiled into this same DLL from `rust-wp81/wp81mix.cpp`.
+///
+/// Declared here rather than exported: both halves live in one image, so the linker resolves the
+/// call against the object file `build-port.ps1` compiles and no `/EXPORT:` is needed for it.
+/// The ingest path is deliberately internal-only - C# reaches the mixer through the exported
+/// `wp81_mix_*` entry points it actually drives, never through the samples themselves.
+extern "C" {
+    fn wp81_mix_pcm(
+        tag: i32,
+        key: *const u8,
+        key_len: i32,
+        rate: u32,
+        ch: u32,
+        frames: *const f32,
+        frame_count: u64,
+    ) -> i32;
+}
+
+/// Hand one decoded clip to the shell as interleaved f32.
+
+///
+/// Called by `sasa::AudioManager::create_sfx` (tag 1) and `create_music` (tag 0) immediately
+/// *before* `wp81_audio_sfx_new` / `wp81_audio_music_new`, with the same `key`/`key_len`, and
+/// its return value is ignored at both call sites.
+///
+/// Defined here because nothing else defines it: the `sasa` shim only declares it in its
+/// `mod shell` extern block, so an earlier link of this crate resolved every `wp81_audio_*`
+/// forwarder except this one and failed on it. It is internal to the DLL - `sasa` and
+/// `prpr-port` are both members of the same staticlib - so unlike its neighbours it takes no
+/// `/EXPORT:`; C# never sees the symbol.
+///
+/// It hands the samples to the XAudio2 mixer compiled into this same DLL, which is the other
+/// half of this contract: prpr already decodes every asset with symphonia, so the mixer needs no
+/// decoder of its own - and mixing is the only way a hit sound can play without being able to
+/// silence the music, because they stop being two pipelines fighting over one platform session.
+///
+/// The bytes are *copied* and converted to i16 on the way in. The source belongs to `AudioClip`
+/// and does not outlive this call, and holding both a 65 MB f32 track and its i16 twin on a phone
+/// that hands an app a few hundred MB is not an option - the conversion is what makes the
+/// permanent cost 34 MB instead of 65, and the caller's copy is the one that goes away.
+///
+/// Still logged, once per clip, so that stays visible: if a chart's hit sound ever comes out
+/// silent, the first thing to rule out is that its PCM never reached the mixer. `mix=` is
+/// `wp81_mix_pcm`'s return - 0 means taken, 1 means malformed, 3 means out of memory, 4 means
+/// XAudio2 never came up and every other consumer of this line has to fall back. `error!`/
+/// `warn!` are silent on this build, so it goes through `log_line` like every other line that
+/// has to survive the trip to the device.
+#[no_mangle]
+pub unsafe extern "C" fn wp81_audio_pcm(
+    tag: u32,
+    key: *const u8,
+    key_len: usize,
+    rate: u32,
+    channels: u32,
+    frames: *const f32,
+    frame_count: u64,
+) -> i32 {
+    let name = if key.is_null() || key_len == 0 {
+        String::new()
+    } else {
+        String::from_utf8_lossy(unsafe { core::slice::from_raw_parts(key, key_len) }).into_owned()
+    };
+    let rc = if frames.is_null() {
+        1
+    } else {
+        wp81_mix_pcm(
+            tag as i32,
+            key,
+            key_len as i32,
+            rate,
+            channels,
+            frames,
+            frame_count,
+        )
+    };
+    log_line(&format!(
+        "audio: pcm tag={} name={} rate={} ch={} frames={} mix={}",
+        tag, name, rate, channels, frame_count, rc
+    ));
+    rc
+}
+
 /// Create a music stream.
 ///
 /// `name`/`name_len` are the file this clip came from, borrowed for the call exactly like
@@ -1204,6 +1286,47 @@ pub extern "C" fn wp81_game_frame(dt: f64) -> i32 {
                 n = push_u32(&mut buf, n, jd);
                 n = push_str(&mut buf, n, " t=");
                 n = push_u32(&mut buf, n, jtms);
+                if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                    log_line(s);
+                }
+            }
+            // The ending screen's half of the picture. Same shape as the judge line above: four
+            // causes of "the summary is blank" are indistinguishable from the shell - the scene
+            // was never rendered (`er=0`), it renders to a framebuffer nobody presents (`et`==`er`),
+            // the entry animation never opened the gate (`eg`=0 while `er` moves), or it draws but
+            // its texts never reach the atlas (`es`=0). `ea` is the atlas rebuild count: a rebuild
+            // inside the scene is the one event that strands every pending glyph on a texture the
+            // registry has the wrong size for.
+            //
+            // Not gated on "any counter moved" the way the judge line is: `esc` is a value, and
+            // ending counters are all zero on every screen that is not the ending, so an all-zero
+            // line once a second is the signal that says the scene never ran at all.
+            let (ee, er, et, eg, esc, ea, es, edw, edh) = macroquad::ending_diag::take();
+            if ee + er > 0 {
+                let mut buf = [0u8; 208];
+                let mut n = push_str(&mut buf, 0, "ending: ee=");
+                n = push_u32(&mut buf, n, ee);
+                n = push_str(&mut buf, n, " er=");
+                n = push_u32(&mut buf, n, er);
+                n = push_str(&mut buf, n, " et=");
+                n = push_u32(&mut buf, n, et);
+                n = push_str(&mut buf, n, " eg=");
+                n = push_u32(&mut buf, n, eg);
+                n = push_str(&mut buf, n, " esc=");
+                n = push_u32(&mut buf, n, esc);
+                n = push_str(&mut buf, n, " ea=");
+                n = push_u32(&mut buf, n, ea);
+                n = push_str(&mut buf, n, " es=");
+                n = push_u32(&mut buf, n, es);
+                // `dw`/`dh` are the score digits' measured advance and height in 1/10000 UI
+                // units. Zero in either is the blank scoreboard: the width stops the digits
+                // walking across the screen, the height empties the clip rect they are drawn
+                // inside. Without them "the scoreboard is blank" and "the scoreboard draws"
+                // produce the same line.
+                n = push_str(&mut buf, n, " dw=");
+                n = push_u32(&mut buf, n, edw);
+                n = push_str(&mut buf, n, " dh=");
+                n = push_u32(&mut buf, n, edh);
                 if let Ok(s) = core::str::from_utf8(&buf[..n]) {
                     log_line(s);
                 }

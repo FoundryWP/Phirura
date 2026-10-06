@@ -31,6 +31,74 @@ namespace Phirura
         private Judge _judge;
         private Win2DChartRenderer _renderer;
         private MusicClock _clock;
+        /// <summary>
+        /// How many times the music element's own state event fired. `sfxCut` samples once per
+        /// sound and can miss a flip that reverses inside the same second; this counts the event
+        /// itself, so nothing in between is invisible.
+        /// </summary>
+        private int _musicStateFlips;
+
+        /// <summary>
+        /// Whether the engine last asked for the music to be running.
+        ///
+        /// `MusicPlay` and `MusicPause` are the only *intentional* writers of the element's
+        /// state, so they record the intent here and <see cref="GuardMusic"/> is the only thing
+        /// that acts on the gap between that intent and `Player.CurrentState`. Without a flag
+        /// the guard cannot tell a sound that knocked the track out from a pause the player
+        /// asked for, and restarting the second one would make the pause button useless.
+        /// </summary>
+        private bool _musicWantPlaying;
+
+        /// <summary>
+        /// How many times <see cref="GuardMusic"/> had to restart the track. Reported next to
+        /// `sfxCut` because the two answer halves of one question: `sfxCut` counts the moments
+        /// the state *changed*, this counts the ones where nothing else would have put it back.
+        /// </summary>
+        private int _musicGuardRescues;
+
+        private int _musicGuardLogTick = int.MinValue / 2;
+
+        /// <summary>
+        /// Throttle for the <see cref="GuardMusic"/> restart attempt. `Play()` on an element
+        /// that stays stuck is cheap but not free, and once per frame at 60 fps would bury the
+        /// log line that says it is happening - 250 ms is short enough that a real knock-out
+        /// costs at most a quarter second of silence and long enough that one stuck element
+        /// produces four log lines a second rather than sixty.
+        /// </summary>
+        private int _musicGuardLastTry = int.MinValue / 2;
+
+        /// <summary>
+        /// The last position the music element reported as having *moved*, or -1 before the
+        /// first sample.
+        ///
+        /// The state check alone cannot see the failure that actually happens: on device the
+        /// element sat in <c>Playing</c> with its position frozen at 10.27 s for 280 s, so a
+        /// guard that only reacts to <c>Paused</c>/<c>Stopped</c> reported "nothing wrong"
+        /// throughout. State says what the pipeline intends; position says whether it is doing
+        /// it, and only the second one is audible.
+        /// </summary>
+        private double _musicLastPos = -1.0;
+
+        /// <summary>
+        /// <see cref="Environment.TickCount"/> of the first sample that found the position
+        /// unchanged, or 0 when it is advancing. Zero rather than a timestamp because a real
+        /// tick count of 0 is indistinguishable from "not stalled" only in the next call, and
+        /// the next call happens within a quarter of a second.
+        /// </summary>
+        private int _musicStallTick;
+
+        /// <summary>
+        /// 0 = nothing tried yet, 1 = seeked onto the clock's position, 2 = bounced the
+        /// pipeline with Pause/Play. The two are deliberately separate attempts rather than
+        /// one combined one: a seek alone un-wedges most stalls and preserves where the song
+        /// was, and the Pause/Play that follows is the blunter instrument for the ones it does
+        /// not, so paying for both every time would trade a cheap correction for a loud one.
+        /// </summary>
+        private int _musicStallStage;
+
+        /// <summary>How many stalls were detected, for the per-second frame line.</summary>
+        private int _musicStalls;
+
         private GameSettings _settings;
         private SfxPlayer _sfx;
 
@@ -549,6 +617,7 @@ namespace Phirura
                 _sfx = new SfxPlayer(SfxHost);
                 _sfx.Volume = _settings == null ? 1.0 : _settings.VolumeSfx;
                 _sfx.Enabled = true;
+                _sfx.Music = Player;
 
                 // Before `StartPhiraAsync`, which never yields: the music URI has to exist by the
                 // time phira first asks for the music, and phira asks from the frame thread.
@@ -637,11 +706,13 @@ namespace Phirura
                 _sfx = new SfxPlayer(SfxHost);
                 _sfx.Volume = _settings.VolumeSfx;
                 _sfx.Enabled = true;
+                _sfx.Music = Player;
 
                 _judge = new Judge(_chart);
                 _judge.AspectRatio = _aspectRatio;
 
                 _clock = new MusicClock(Player);
+                HookMusicStateEvents();
                 _clock.Offset = -StartDelay - _chart.Offset + _settings.Offset;
                 Player.Volume = _settings.VolumeMusic;
 
@@ -975,6 +1046,7 @@ namespace Phirura
             _toRemove.Clear();
             _mediaReady = false;
             _clock = new MusicClock(Player);
+            HookMusicStateEvents();
             _clock.Offset = -StartDelay - _chart.Offset + _settings.Offset;
             StartPlayback();
         }
@@ -1296,6 +1368,11 @@ namespace Phirura
                 UpdateCalibration();
                 return;
             }
+
+            // Before either render path: a track knocked out during the *previous* frame is
+            // already silent by the time this one draws, and the chart path returns further
+            // down for a dozen reasons that have nothing to do with the audio.
+            GuardMusic();
 
             if (_phiraMode)
             {
@@ -1762,7 +1839,17 @@ namespace Phirura
                     // Paused` flip to a hit or rule one out, instead of leaving the two facts
                     // known separately. It is a counter, so it adds no lines to a log that has
                     // already proven too small.
-                    + " sfxN=" + (_sfx == null ? 0 : _sfx.Played));
+                    + " sfxN=" + (_sfx == null ? 0 : _sfx.Played) + " sfxCut=" + (_sfx == null ? 0 : _sfx.MusicStateChanges)
+                    // ...and how many times the frame guard had to put the track back. `sfxCut`
+                    // counts state *changes*; this counts the ones where nothing else would have
+                    // recovered, so `music=Paused ... mGuard=5` is "the sound kept killing it and
+                    // it kept coming back" while `music=Paused ... mGuard=0` is "nobody tried".
+                    + " mGuard=" + _musicGuardRescues
+                    // ...and how many times the element claimed to be playing while standing
+                    // still. `music=Playing ... mGuard=0 mStall=3` is the state check passing
+                    // and the position check failing - the one case the state line alone
+                    // reports as healthy, and the one the report describes.
+                    + " mStall=" + _musicStalls);
                 _frames = 0;
                 _sumRust = 0; _sumDraw = 0; _sumPresent = 0; _maxFrame = 0;
             }
@@ -1909,6 +1996,7 @@ namespace Phirura
                 return;
             }
             _finished = true;
+            _musicWantPlaying = false;
             StopLoop();
             try
             {
@@ -2116,8 +2204,23 @@ namespace Phirura
             if (_clock == null)
             {
                 _clock = new MusicClock(Player);
+                HookMusicStateEvents();
             }
             _clock.Rate = rate > 0.0 ? rate : 1.0;
+
+            // A new Source means a new element lifecycle: the previous intent no longer
+            // describes anything. It is re-armed by the `MusicPlay` prpr issues right after
+            // `music_new`, and disarming here is what stops the frame guard from starting the
+            // track inside the `MediaOpened -> Paused` window - `AutoPlay` is false, so that
+            // window looks exactly like the knock-out the guard exists to repair.
+            _musicWantPlaying = false;
+
+            // The old element's movement history belongs to the old element. Leaving it in
+            // place would compare the new Source's position against the previous track's and
+            // open on what looks like a stall.
+            _musicLastPos = -1.0;
+            _musicStallTick = 0;
+            _musicStallStage = 0;
 
             // Zero on purpose. prpr applies the chart's own offset downstream of this position,
             // so folding the shell's in here too would apply one correction twice - and when the
@@ -2190,6 +2293,9 @@ namespace Phirura
 
         public void MusicPlay()
         {
+            // Recorded before anything else: the intent survives a `Player.Play()` that the
+            // platform then silently undoes, which is the whole reason this flag exists.
+            _musicWantPlaying = true;
             MusicClock clock = _clock;
             if (clock == null)
             {
@@ -2221,6 +2327,10 @@ namespace Phirura
 
         public void MusicPause()
         {
+            // The engine asked for silence, so the guard must not fight it. Cleared first for
+            // the same reason `MusicPlay` sets it first - a throw below must not leave the
+            // guard believing music should be running when the engine has moved on.
+            _musicWantPlaying = false;
             MusicClock clock = _clock;
             if (clock == null)
             {
@@ -2252,6 +2362,214 @@ namespace Phirura
             }
         }
 
+        /// <summary>
+        /// Restarts the music when it leaves `Playing` while the engine still wants it running.
+        ///
+        /// The bug this replaces ran the rescue *inside* `SfxPlayer.Play`, synchronously after
+        /// `m.Play()`, and could not have worked: `Player.CurrentState` still reads `Playing`
+        /// at that instant and only flips to `Paused` some hundreds of milliseconds later, once
+        /// the sfx voice's own open/seek has finished rebuilding the shared audio session. The
+        /// check returned before the thing it was checking for had happened. On device that is
+        /// exactly what the log shows - hit 20 logs `resuming`, and the next second logs
+        /// `music=Paused`, which then holds for the remaining 80 seconds of the song.
+        ///
+        /// A frame-driven guard is the only shape that closes the window, because it is the
+        /// only one that runs *after* the drop rather than before it. It is driven by intent
+        /// (<see cref="_musicWantPlaying"/>) rather than by a hit having just occurred, so a
+        /// pause the engine asked for is left alone - restarting that would make pausing
+        /// impossible and would be a worse bug than the one it fixes.
+        /// </summary>
+        private void GuardMusic()
+        {
+            if (!_musicWantPlaying || _finished || _paused)
+            {
+                return;
+            }
+
+            Windows.UI.Xaml.Media.MediaElementState st;
+            try
+            {
+                st = Player.CurrentState;
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("GamePage.GuardMusic.state", ex);
+                _musicWantPlaying = false;
+                return;
+            }
+
+            // `Opening` and `Closed` are not knock-outs. A Source that has just been assigned
+            // passes through them before it can play at all, and `MusicPlay` has already been
+            // issued by then - restarting in that window is what would fire the guard during
+            // ordinary loading. `Buffering` is the platform deciding to refill, not to stop.
+            //
+            // `Playing` is deliberately *not* excluded any more. State only says what the
+            // pipeline intends, and on device the element sat in `Playing` with its position
+            // frozen for 280 seconds - a guard that trusted it would have reported "nothing
+            // wrong" for the whole time the music was inaudible. Both ends of the gap are
+            // handled below: not running, and claiming to run without doing so.
+            bool stopped = st == Windows.UI.Xaml.Media.MediaElementState.Paused
+                || st == Windows.UI.Xaml.Media.MediaElementState.Stopped;
+            if (!stopped && st != Windows.UI.Xaml.Media.MediaElementState.Playing)
+            {
+                return;
+            }
+
+            int nowTick = Environment.TickCount;
+            if (unchecked(nowTick - _musicGuardLastTry) < 250)
+            {
+                return;
+            }
+            _musicGuardLastTry = nowTick;
+
+            if (stopped)
+            {
+                try
+                {
+                    Player.Play();
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Write("GamePage.GuardMusic.Play", ex);
+                    // A Play that throws is not a transient knock-out; stop asking, or this
+                    // logs once a quarter second for the rest of the session.
+                    _musicWantPlaying = false;
+                    return;
+                }
+
+                _musicGuardRescues++;
+                if (unchecked(nowTick - _musicGuardLogTick) >= 1000)
+                {
+                    _musicGuardLogTick = nowTick;
+                    AppLog.Write("GamePage: GuardMusic resumed from " + st
+                        + " n=" + _musicGuardRescues);
+                }
+                return;
+            }
+
+            GuardMusicStall(nowTick);
+        }
+
+        /// <summary>
+        /// The half of <see cref="GuardMusic"/> for an element that insists it is playing.
+        ///
+        /// Two attempts, a second and a half apart, because they cost different things: a seek
+        /// onto the position the clock says the song should be at is cheap and keeps the song
+        /// where it belongs, and the Pause/Play that follows is for the stalls a seek cannot
+        /// shift. Both are throttled by the caller to one attempt per 250 ms, and a stall that
+        /// clears resets the stage - so a healthy element never does any of this.
+        /// </summary>
+        private void GuardMusicStall(int nowTick)
+        {
+            double pos;
+            try
+            {
+                pos = Player.Position.TotalSeconds;
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("GamePage.GuardMusic.position", ex);
+                return;
+            }
+
+            if (_musicLastPos < 0.0 || pos + 0.5 < _musicLastPos)
+            {
+                // First sample, or a seek to an earlier point (a restart, a scrub). Begin a
+                // fresh window rather than reading the drop as a stall - otherwise every
+                // restart would be followed by a spurious "seek" a second and a half later.
+                _musicLastPos = pos;
+                _musicStallTick = 0;
+                _musicStallStage = 0;
+                return;
+            }
+
+            if (pos > _musicLastPos + 0.001)
+            {
+                _musicLastPos = pos;
+                _musicStallTick = 0;
+                _musicStallStage = 0;
+                return;
+            }
+
+            if (_musicStallTick == 0)
+            {
+                _musicStallTick = nowTick;
+                return;
+            }
+
+            // 1.5 s rather than anything tighter: this platform refreshes `Position` only a few
+            // times a second - which is the whole reason `MusicClock` runs a Stopwatch instead
+            // of reading it - so a tighter window would fire on an ordinary gap between two
+            // refreshes. The measured failure lasted 280 s, so the price of waiting here is a
+            // rounding error against the failure it is waiting for.
+            if (unchecked(nowTick - _musicStallTick) < 1500)
+            {
+                return;
+            }
+
+            if (_musicStallStage == 0)
+            {
+                _musicStallStage = 1;
+                try
+                {
+                    // Stop and start, rather than seek. Repositioning is `MusicClock.Resync`'s
+                    // job now - it pushes the element up to the clock every 300 ms while it is
+                    // behind - and a second writer doing the same thing is how two corrections
+                    // end up fighting. On device that seek demonstrably never took: the element
+                    // was written onto the clock's position at 10.73 s and eleven seconds later
+                    // was still on its own timeline, 1.8 s behind. What a frozen element has not
+                    // been offered yet is a stop and a start, which is what this is.
+                    Player.Pause();
+                    Player.Play();
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Write("GamePage.GuardMusic.seek", ex);
+                }
+                // `_musicLastPos` is deliberately left at the position that *failed to move*.
+                // It is not rewritten to a corrected value: doing so would put the baseline
+                // ahead of where the element actually is, so the next sample would read as a
+                // backwards jump - and the backwards-jump branch above exists for real restarts,
+                // where it has to clear the stage. Consumed there instead it would clear the
+                // stage on our own correction, so the bounce below could never be reached and
+                // this half would repeat for ever while the other one never fired.
+                //
+                // Left alone the two outcomes separate on their own: an element that starts
+                // moving again passes the "is it advancing" test and the stall clears; one that
+                // does not stays exactly where it was, `_musicStallTick` keeps ageing, and the
+                // 1.5 s window expires into the bounce.
+                _musicStalls++;
+                AppLog.Write("GamePage: GuardMusic stall at " + pos.ToString("0.###")
+                    + "s -> pause/play n=" + _musicStalls);
+                _musicStallTick = nowTick;
+                return;
+            }
+
+            if (unchecked(nowTick - _musicStallTick) < 1500)
+            {
+                return;
+            }
+
+            // Still not moving, so bounce it again. Stays at stage 1 afterwards, which keeps
+            // repeating this for as long as the element refuses to move - the alternative is
+            // one attempt and then silence for the rest of the song. Every 1.5 s rather than
+            // five: a bounce is the cheapest thing this file can do, and the cost of waiting
+            // is measured in seconds of a song nobody can hear.
+            _musicStallTick = nowTick;
+            try
+            {
+                Player.Pause();
+                Player.Play();
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("GamePage.GuardMusic.bounce", ex);
+            }
+            _musicStalls++;
+            AppLog.Write("GamePage: GuardMusic stall persists at " + pos.ToString("0.###")
+                + "s -> pause/play n=" + _musicStalls);
+        }
+
         public void MusicSeek(double seconds)
         {
             MusicClock clock = _clock;
@@ -2262,6 +2580,12 @@ namespace Phirura
             try
             {
                 clock.Seek(seconds);
+                // A seek moves the element on purpose. Without this the stall detector would
+                // compare the position *before* the jump against the one after it and, for a
+                // forward seek of under half a second, read its own correction as a failure.
+                _musicLastPos = -1.0;
+                _musicStallTick = 0;
+                _musicStallStage = 0;
             }
             catch (Exception ex)
             {
@@ -2306,6 +2630,52 @@ namespace Phirura
         // ------------------------------------------------------------------
         // Media events
         // ------------------------------------------------------------------
+
+        private bool _musicStateHooked;
+
+        /// <summary>
+        /// Wires the music element's own change notification exactly once per page. The second
+        /// `new MusicClock(Player)` on the phira path would otherwise stack a second handler onto
+        /// the same element, and every flip would then be logged twice.
+        /// </summary>
+        private void HookMusicStateEvents()
+        {
+            if (_musicStateHooked)
+            {
+                return;
+            }
+            _musicStateHooked = true;
+            Player.CurrentStateChanged += OnMusicStateChanged;
+        }
+
+        private void OnMusicStateChanged(object sender, RoutedEventArgs e)
+        {
+            _musicStateFlips++;
+            AppLog.Write("GamePage: music state -> " + Player.CurrentState
+                + " flip=" + _musicStateFlips
+                + " sfxN=" + (_sfx == null ? 0 : _sfx.Played)
+                + " paused=" + _paused + " finished=" + _finished);
+
+            // During play the music is not allowed to leave Playing. The engine is the only
+            // legitimate pauser (pause menu, page navigation), and it never goes through the
+            // media element directly - so a state that is not Playing while the game is running
+            // and not paused is the audio-session glitch, and the fix is to put it back before
+            // the next frame notices. The guard on `_clock.IsRunning` is what keeps a pause the
+            // engine asked for from being undone here.
+            if (!_finished && !_paused && _clock != null && _clock.IsRunning
+                && Player.CurrentState != Windows.UI.Xaml.Media.MediaElementState.Playing)
+            {
+                AppLog.Write("GamePage: forcing music back to Playing (glitch during play)");
+                try
+                {
+                    Player.Play();
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Write("GamePage.MusicForcePlay", ex);
+                }
+            }
+        }
 
         private void OnMediaOpened(object sender, RoutedEventArgs e)
         {
@@ -2388,6 +2758,9 @@ namespace Phirura
         private void OnMediaEnded(object sender, RoutedEventArgs e)
         {
             _mediaReady = false;
+            // The track ran out on its own. A guard that kept the intent set would call
+            // `Play()` on a finished element every frame from here on.
+            _musicWantPlaying = false;
         }
 
         // ------------------------------------------------------------------

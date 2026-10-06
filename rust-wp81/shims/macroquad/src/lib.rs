@@ -3554,6 +3554,97 @@ pub mod dbg {
     }
 }
 
+/// Why the ending screen renders no text.
+///
+/// `prpr::scene::ending` draws its whole summary through `TextPainter`s owned by `PGR_FONT` and
+/// `BOLD_FONT` while gameplay drew its HUD through the same pair and showed it - so the fonts are
+/// known good, and what is left to distinguish is narrower than "text is broken": whether the
+/// scene's render is ever entered, whether its gate (`project_y < top`) opens, and whether a
+/// `TextPainter::submit` during the ending flushes or rebuilds its atlas. All four answers live
+/// behind types the port cannot reach (`EndingScene` is `prpr`'s, the painter is `prpr`'s), so
+/// the values are parked here the same way `dbg` parks the home-screen gate, and the frame's
+/// once-a-second line prints them.
+pub mod ending_diag {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    /// `enter` calls, so a `render` with no `enter` is visible.
+    static ENTER: AtomicU32 = AtomicU32::new(0);
+    /// `render` calls.
+    static RENDER: AtomicU32 = AtomicU32::new(0);
+    /// `render` calls where `target` was `Some` - a render targeting a framebuffer the shell
+    /// never presents reads exactly like a render that drew nothing.
+    static TARGETED: AtomicU32 = AtomicU32::new(0);
+    /// `render` calls that passed `project_y < top`. The gate is animation-driven; a stuck
+    /// animation is a summary that exists but is never asked to draw.
+    static GATED: AtomicU32 = AtomicU32::new(0);
+    /// The score the digits were drawn from, so "drew 0000000" is distinguishable from "never
+    /// drew at all" - the two look identical on a blank screen.
+    static SCORE: AtomicU32 = AtomicU32::new(0);
+    /// `TextPainter` atlas rebuilds across the whole process, not only the ending's: a submit
+    /// that rebuilds mid-scene is the one mechanism that hands the renderer vertices whose uv
+    /// points into a texture the registry has never been told the new size of.
+    static ATLAS_REBUILT: AtomicU32 = AtomicU32::new(0);
+    /// `TextPainter::submit` calls that reached `redraw`, i.e. that had at least one glyph to
+    /// draw. Zero while the counters above move means the texts were measured but never queued.
+    static SUBMITTED: AtomicU32 = AtomicU32::new(0);
+    /// `ui.text("0").size(1.5).measure_using(&PGR_FONT).w` for the score digits, in 1/10000 UI
+    /// units, and the matching height. Both are the two numbers the scoreboard's geometry is
+    /// built from: a width of 0 stacks all seven digits on one spot and stops `x` advancing, and
+    /// a height of 0 hands `ui.scissor` a zero-height rectangle - which on a renderer whose clip
+    /// is a *layer* rather than `glScissor` means "clip everything", so the digits vanish while
+    /// every label and button around them keeps drawing. That is exactly the reported symptom,
+    /// and neither reading is distinguishable on screen from the atlas being empty, so the
+    /// numbers are recorded here rather than inferred. Stored as `* 10000 as u32`, which turns
+    /// NaN and infinity into 0 - the degenerate case is the case we want to see.
+    static DIGIT_W: AtomicU32 = AtomicU32::new(0);
+    static DIGIT_H: AtomicU32 = AtomicU32::new(0);
+
+    pub fn note_enter() {
+        ENTER.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn note_render(has_target: bool, passed_gate: bool) {
+        RENDER.fetch_add(1, Ordering::Relaxed);
+        if has_target {
+            TARGETED.fetch_add(1, Ordering::Relaxed);
+        }
+        if passed_gate {
+            GATED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn note_score(score: u32) {
+        SCORE.store(score, Ordering::Relaxed);
+    }
+    pub fn note_atlas_rebuilt() {
+        ATLAS_REBUILT.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn note_submitted() {
+        SUBMITTED.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn note_digit_metrics(w: u32, h: u32) {
+        DIGIT_W.store(w, Ordering::Relaxed);
+        DIGIT_H.store(h, Ordering::Relaxed);
+    }
+
+    /// `(enter, render, targeted, gated, score, atlas_rebuilt, submitted, digit_w, digit_h)`.
+    /// Windowed like `judge_diag::take` for the counters - the point is "in the last second",
+    /// and a total that only grows buries one render under a thousand. `score` and the two
+    /// measurements are read but not cleared: they are values, not events, and the last one is
+    /// the interesting one.
+    pub fn take() -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+        (
+            ENTER.swap(0, Ordering::Relaxed),
+            RENDER.swap(0, Ordering::Relaxed),
+            TARGETED.swap(0, Ordering::Relaxed),
+            GATED.swap(0, Ordering::Relaxed),
+            SCORE.load(Ordering::Relaxed),
+            ATLAS_REBUILT.swap(0, Ordering::Relaxed),
+            SUBMITTED.swap(0, Ordering::Relaxed),
+            DIGIT_W.load(Ordering::Relaxed),
+            DIGIT_H.load(Ordering::Relaxed),
+        )
+    }
+}
+
 pub mod texture {
     pub use super::{DrawTextureParams, FilterMode, Image, ImageFormat, RenderTarget, Texture2D};
 

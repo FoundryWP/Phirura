@@ -33,5 +33,11 @@ ohos = []
 
 [dependencies]
 anyhow = "1.0"
+# The decode happens here, not in the shell: WP8.1 has no usable compressed-audio decode for a
+# C#/XAML app (no AudioGraph, no public MediaPlayer), and `prpr` already carries the decoder.
+# `default-features = false` because the default `minimp3` backend is the one that cannot build
+# for this target; `symphonia` decodes MP3 through its own `puremp3` when the feature is named
+# `mp3`.
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "ogg", "vorbis", "wav", "pcm"] }
 
 [workspace]

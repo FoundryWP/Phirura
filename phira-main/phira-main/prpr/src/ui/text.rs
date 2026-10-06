@@ -367,14 +367,20 @@ impl TextPainter {
                     self.cache_texture.delete();
                     self.cache_texture = Self::new_cache_texture(suggested);
                     self.brush.resize_texture(suggested.0, suggested.1);
+                    // Counted rather than logged: a rebuild is normal once per font, and the only
+                    // question that matters is whether one happened *during* the scene that draws
+                    // nothing, which a count on the once-a-second line answers without flooding it.
+                    macroquad::ending_diag::note_atlas_rebuilt();
                 }
                 Ok(BrushAction::Draw(vertices)) => {
                     self.vertices_buffer.clear();
                     self.vertices_buffer.extend(vertices.into_iter().flatten());
+                    macroquad::ending_diag::note_submitted();
                     self.redraw(tr);
                     break;
                 }
                 Ok(BrushAction::ReDraw) => {
+                    macroquad::ending_diag::note_submitted();
                     self.redraw(tr);
                     break;
                 }

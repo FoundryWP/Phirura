@@ -162,6 +162,7 @@ impl Scene for EndingScene {
         tm.reset();
         tm.seek_to(-0.4);
         self.target = target;
+        macroquad::ending_diag::note_enter();
         Ok(())
     }
 
@@ -271,7 +272,12 @@ impl Scene for EndingScene {
 
         let pf = ran(t, 2., 2.4);
 
+        // Counted on both sides of the gate rather than only inside it: a render that is called
+        // and a render whose summary block is drawn are the two halves of "the scene is running
+        // but nothing shows", and only the pair says which half is missing.
+        macroquad::ending_diag::note_render(self.target.is_some(), project_y < top);
         if project_y < top {
+            macroquad::ending_diag::note_score(self.result.score);
             let c = ui.background();
             let y = -top + 0.12;
             let br = Rect::new(-1., y, 2., 0.34);
@@ -322,7 +328,28 @@ impl Scene for EndingScene {
             digits.reverse();
             let s = 1.5;
             let sr = ui.text("0").size(s).measure_using(&PGR_FONT);
-            let h = sr.h;
+            // Recorded before the fallbacks below substitute for it, so the log reports what the
+            // font actually returned rather than the value that replaced it.
+            macroquad::ending_diag::note_digit_metrics((sr.w * 10000.) as u32, (sr.h * 10000.) as u32);
+            // Both numbers decide whether the scoreboard is visible at all. A zero width stops
+            // `x` from advancing, so all seven digits pile onto one spot and read as a single
+            // illegible glyph; a zero height hands `ui.scissor` a zero-height rectangle, and on a
+            // renderer whose clip is a *layer* rather than `glScissor` an empty rectangle means
+            // "clip everything" - which blanks the digits while every label, icon and button
+            // around them keeps drawing, which is exactly the reported picture. The guard is
+            // applied rather than only measured because the symptom and the fix are the same
+            // shape: if the measure is sound, these substitutes are never taken and nothing
+            // moves, and if it is not, the digits come back instead of staying invisible.
+            let step = if sr.w.is_finite() && sr.w > 0. {
+                sr.w
+            } else {
+                0.1
+            };
+            let h = if sr.h.is_finite() && sr.h > 0. {
+                sr.h
+            } else {
+                0.1
+            };
             ui.scissor(Rect::new(-1., y, 2., h + 0.01), |ui| {
                 for (i, d) in digits.into_iter().enumerate() {
                     let p = (p * (1. + (0.16 * (6 - i) as f32).powi(2))).min(1.);
@@ -335,16 +362,16 @@ impl Scene for EndingScene {
                     let dw = (up + 1) % 10;
                     let o = -h * (p - up as f32);
                     ui.text(up.to_string())
-                        .pos(x + sr.w / 2., y + o)
+                        .pos(x + step / 2., y + o)
                         .anchor(0.5, 0.)
                         .size(s)
                         .draw_using(&PGR_FONT);
                     ui.text(dw.to_string())
-                        .pos(x + sr.w / 2., y + h + o)
+                        .pos(x + step / 2., y + h + o)
                         .anchor(0.5, 0.)
                         .size(s)
                         .draw_using(&PGR_FONT);
-                    x += sr.w;
+                    x += step;
                 }
             });
 

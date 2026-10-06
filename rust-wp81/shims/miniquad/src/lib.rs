@@ -17,7 +17,7 @@
 
 #![allow(non_upper_case_globals, non_camel_case_types, unused_variables, dead_code)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub use macroquad_compat_types::*;
 
@@ -265,10 +265,21 @@ pub mod conf {
     pub use super::macroquad_compat_types::conf::*;
 }
 
+/// Unique id source for render textures.
+///
+/// A hash of the dimensions was the original answer, and it is the bug behind the invisible
+/// ending screen: every 1024x1024 RGBA texture hashes to the same id, and the text atlases are
+/// all 1024x1024. Two `TextPainter`s therefore shared one registry entry, and when a scene's
+/// drop released its painter the entry's contents went with it while every other painter kept
+/// drawing against the same id - which is exactly "the score digits submit every frame and
+/// nothing appears". Ids are handed out from a counter instead; the registry keys on the id
+/// alone, so uniqueness is the whole fix.
+static RENDER_TEX_ID: AtomicU32 = AtomicU32::new(0x8000_0000);
+
 impl Texture {
     pub fn new_render_texture(_ctx: &mut Context, params: TextureParams) -> Self {
         Texture {
-            id: params.width ^ (params.height << 16) ^ params.format as u32,
+            id: RENDER_TEX_ID.fetch_add(1, Ordering::Relaxed),
             width: params.width,
             height: params.height,
         }

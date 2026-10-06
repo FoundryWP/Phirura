@@ -33,6 +33,13 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $vs11   = "C:/Program Files (x86)/Microsoft Visual Studio 11.0"
 $wpKit  = "C:/Program Files (x86)/Windows Phone Kits/8.1"
 $sdkLib = "C:/Program Files (x86)/Windows Kits/8.1/Lib/winv6.3"
+# The base Windows Kits tree, not the phone kit's overlay: see step 1c for why the overlay cannot
+# be put on the include path at all. The phone kit is still checked for, because a machine without
+# it has no XAudio2 SDK to build against in any configuration.
+$sdkInc       = "C:/Program Files (x86)/Windows Kits/8.1/Include"
+$sdkIncUm     = Join-Path $sdkInc "um"
+$sdkIncShared = Join-Path $sdkInc "shared"
+$wpIncArm     = Join-Path $wpKit "Include"
 
 $env:RUSTUP_HOME = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { "C:/Users/admin/.workbuddy-ai/binaries/rust/rustup" }
 $env:CARGO_HOME  = if ($env:CARGO_HOME)  { $env:CARGO_HOME }  else { "C:/Users/admin/.workbuddy-ai/binaries/rust/cargo" }
@@ -58,7 +65,18 @@ $tlsStartSrc = Join-Path $here "tlsdir_start.rs"
 $tlsEndSrc   = Join-Path $here "tlsdir_end.rs"
 $deploy  = "E:/Users/admin/Documents/visual studio 2013/Phirura/Phirura/Phirura/Phirura.WindowsPhone/wp81prpr.dll"
 
-foreach ($p in @($cargo, $armLink, $vcLibArm, $wpLibArm, $chkstk, $target, $ws, $tlsStartSrc, $tlsEndSrc)) {
+# The XAudio2 mixer is C++ rather than Rust, so it needs the VC11 ARM cross compiler and the WP8.1
+# kit's Include directory - xaudio2.h exists nowhere else on this machine. It compiles to a single
+# object that goes straight onto the link line as a direct object: no /EXPORT: for the internal
+# half, no second DLL to deploy, and no import table entry for xaudio2_8.dll either, because that
+# module is resolved from inside the code instead of being linked. Keeping the import table at
+# seven API sets is the whole point - a DLL that names a library the phone does not have fails to
+# load at all, and the failure looks like an app that never starts.
+$armCl    = Join-Path $vs11 "VC\bin\x86_arm\cl.exe"
+$mixSrc   = Join-Path $here "wp81mix.cpp"
+$mixObj   = Join-Path $outDir "wp81mix.obj"
+
+foreach ($p in @($cargo, $armLink, $vcLibArm, $wpLibArm, $chkstk, $target, $ws, $tlsStartSrc, $tlsEndSrc, $armCl, $wpIncArm, $sdkIncUm, $sdkIncShared, $mixSrc)) {
     if (-not (Test-Path $p)) { throw "missing: $p" }
 }
 
@@ -235,6 +253,47 @@ $ErrorActionPreference = $saved3
 if ($libCode -ne 0) { throw "lib failed ($libCode) for $tlsEndObj - see port-tlsdir.log" }
 Write-Host ("  {0} = {1} bytes" -f (Split-Path -Leaf $tlsEndLib), (Get-Item $tlsEndLib).Length)
 
+# ---- 1c. the XAudio2 mixer ----
+#
+# vcvarsall is deliberately not used, and INCLUDE is set by hand for a reason worth writing down:
+# Windows Phone Kits\8.1\Include is an *overlay*, not a complete SDK. It carries 263 headers
+# against the base kit's 1569, so putting it on the path first makes winbase.h come from the
+# overlay while processthreadsapi.h comes from the base kit - two definitions of
+# _THREAD_INFORMATION_CLASS and _MEMORY_PRIORITY_INFORMATION, which is C2011 rather than a phone
+# build. (It is also where minwindef.h is missing from, which is the first thing that fails.)
+#
+# The overlay turns out to be unnecessary anyway: the one header this file actually cares about,
+# xaudio2.h, is byte-identical in both trees - 60924 bytes, same hash. So the base kit is used in
+# the order vcvars would pick (um, then shared), with VC last for <stddef.h>.
+Write-Host "`n=== 1c. compile wp81mix.cpp (VC11 x86_arm, CRT-free) ==="
+$mixLog    = Join-Path $here "port-mix.log"
+$savedInc  = $env:INCLUDE
+$env:INCLUDE = "$sdkIncUm;$sdkIncShared;$vs11\VC\include"
+# /GS- is not a preference: with no CRT there is no __security_cookie to compare against, and the
+# function that builds a hit sound keeps a 96-byte key buffer on the stack, so leaving it on would
+# produce an unresolved __security_check_cookie rather than a working mixer. /GR- drops RTTI
+# (nothing here uses dynamic_cast), /Zl stops the compiler writing defaultlib directives that
+# /NODEFAULTLIB would only have to discard again, and /Oi lets the struct copies inline instead of
+# reaching for a memcpy that may not resolve without a CRT.
+# _CRT_BUILD_DESKTOP_APP=0 is what gets past crtdefs.h line 337, which otherwise errors out with
+# "Compiling Desktop applications for the ARM platform is not supported" the moment anything
+# reaches <stddef.h> - and windows.h always does. The guard above it is #ifndef, so the command
+# line wins. It only decides which CRT declarations are dllimport'd, and this object calls no CRT
+# function at all (there is no CRT to call: /NODEFAULTLIB, HeapAlloc for memory, loops for copies).
+$mixArgs = @("/nologo", "/c", "/O2", "/Oi", "/W3", "/GS-", "/GR-", "/Zl",
+             "/D_CRT_BUILD_DESKTOP_APP=0", "/DWIN32", "/D_WINDOWS",
+             "/Fo$mixObj", $mixSrc)
+$savedMix = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $armCl @mixArgs 2>&1 | Out-File -FilePath $mixLog -Encoding utf8
+$mixCode = $LASTEXITCODE
+$ErrorActionPreference = $savedMix
+$env:INCLUDE = $savedInc
+Get-Content $mixLog -ErrorAction SilentlyContinue | Select-Object -Last 40
+if ($mixCode -ne 0) { throw "cl failed ($mixCode) for wp81mix.cpp - see port-mix.log" }
+if (-not (Test-Path $mixObj)) { throw "cl produced no object for wp81mix.cpp" }
+Write-Host ("  {0} = {1} bytes" -f (Split-Path -Leaf $mixObj), (Get-Item $mixObj).Length)
+
 Write-Host "`n=== 2. link ARMNT DLL (VC11 x86_arm, CRT-free) ==="
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
@@ -306,7 +365,17 @@ $exports = @(
     "wp81_game_touch",
     # Read in the turn after a failed create. `tracing` has no subscriber on the phone, so this is
     # the only place the reason for `-1`/`-2`/`-100` survives at all.
-    "wp81_game_last_error"
+    "wp81_game_last_error",
+    # The XAudio2 mixer's C#-facing half, implemented in rust-wp81/wp81mix.cpp rather than in Rust,
+    # so `#[no_mangle]` in lib.rs says nothing about them. The same rule as every line above: a
+    # missing `/EXPORT:` builds a clean DLL whose DllImports fail only at run time.
+    "wp81_mix_ready",
+    # One-line state for the log: engine, error, clip/voice counts and resident PCM. Without it a
+    # healthy mixer and a mixer that never came up are indistinguishable from outside.
+    "wp81_mix_diag",
+    # Returns a status rather than being `void` - 0 means the hit sound played, non-zero means the
+    # shell must fall back to a MediaElement. See the export in wp81mix.cpp.
+    "wp81_mix_sfx_play"
 )
 
 # /FORCE:MULTIPLE is load-bearing, and the reason is not obvious from the log.
@@ -363,6 +432,11 @@ $linkArgs = @(
     $tlsStartObj,
     $staticlib,
     $chkstk,
+    # The XAudio2 mixer. A direct object is always included rather than resolved, which is exactly
+    # what lets the Rust half call wp81_mix_pcm with no /EXPORT: at all - and it is named after
+    # $tlsStartObj so the ".tls begins at offset 0" ordering that step 1b depends on is untouched
+    # (the mixer has no thread-local state, so it contributes nothing to the template).
+    $mixObj,
     "WindowsPhoneCore.lib",
     "ws2_32.lib",
     # LAST, and as an archive rather than an object - see step 1b. link.exe takes all direct objects
