@@ -32,6 +32,13 @@ namespace Phirura
         private readonly bool[] _pending = new bool[VoiceCount];
         private int _next;
 
+        /// <summary>
+        /// Distinct URIs already logged as opened, so the log says *which* effect was attempted
+        /// once rather than once per voice that happened to pick it up.
+        /// </summary>
+        private readonly System.Collections.Generic.HashSet<string> _openedLog =
+            new System.Collections.Generic.HashSet<string>();
+
         /// <summary>0..1, mirrors prpr's config.volume_sfx.</summary>
         public double Volume = 0.7;
 
@@ -47,8 +54,19 @@ namespace Phirura
                 MediaElement m = new MediaElement();
                 m.AutoPlay = false;
                 m.IsHitTestVisible = false;
-                m.AudioCategory = Windows.UI.Xaml.Media.AudioCategory.GameMedia;
+                // GameEffects, not GameMedia. The platform documents `GameMedia` as "background
+                // (non-event or ambient) audio for games" - the category a game's *music* takes,
+                // and the one `Player` above already holds - and `GameEffects` as "audio for
+                // game-specific sound effects", which is what these six voices are. With both on
+                // `GameMedia` every hit was competing with the music for the same category rather
+                // than sitting beside it as an effect.
+                m.AudioCategory = Windows.UI.Xaml.Media.AudioCategory.GameEffects;
                 m.MediaOpened += OnVoiceOpened;
+                // Without this an effect the platform refuses to open fails *silently*:
+                // `MediaOpened` never fires, `_pending` stays set, and the sound simply never
+                // plays with nothing anywhere to say so - which is exactly what makes "the main
+                // menu lost its click sounds" undiagnosable from the log alone.
+                m.MediaFailed += OnVoiceFailed;
                 host.Children.Add(m);
                 _voices[i] = m;
                 _loaded[i] = null;
@@ -81,6 +99,31 @@ namespace Phirura
         }
 
         /// <summary>
+        /// Reports an effect the platform would not open. Wire-only: no recovery, because there is
+        /// nothing to recover *to* - the URI came from phira's own asset tree and a decode failure
+        /// is a property of the file and the codec, not of this call.
+        ///
+        /// The point is that it is reported at all. A <see cref="MediaElement"/> that cannot open
+        /// its source raises this and nothing else: `MediaOpened` stays unraised, `_pending` stays
+        /// set, and `Play` has already returned believing the sound started. Silence with no log
+        /// line and silence because a sound was never requested are the same picture on screen, and
+        /// only this separates them - which is what makes "the main menu lost its click sounds"
+        /// answerable instead of arguable.
+        /// </summary>
+        private void OnVoiceFailed(object sender, Windows.UI.Xaml.ExceptionRoutedEventArgs e)
+        {
+            MediaElement m = sender as MediaElement;
+            int idx = m == null ? -1 : Array.IndexOf(_voices, m);
+            if (idx >= 0 && idx < VoiceCount)
+            {
+                _pending[idx] = false;
+            }
+            AppLog.Write("SfxPlayer.MediaFailed voice=" + idx
+                + " uri=" + (idx >= 0 && idx < VoiceCount ? _loaded[idx] : null)
+                + " :: " + (e == null ? "(no args)" : e.ErrorMessage));
+        }
+
+        /// <summary>
         /// Plays <paramref name="uri"/>. Voices are handed out round-robin, so a burst of
         /// simultaneous hits steals the oldest voice instead of queueing up behind it.
         /// </summary>
@@ -105,6 +148,11 @@ namespace Phirura
                     m.Source = new Uri(uri);
                     _loaded[idx] = uri;
                     _pending[idx] = true;
+
+                    if (_openedLog.Add(uri))
+                    {
+                        AppLog.Write("SfxPlayer: open '" + uri + "' on voice " + idx);
+                    }
                 }
                 else
                 {

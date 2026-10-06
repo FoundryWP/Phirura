@@ -88,7 +88,21 @@ namespace Phirura
             }
             lock (Gate)
             {
-                _tail = _tail.ContinueWith(delegate { Append(line); }, TaskScheduler.Default);
+                Task previous = _tail;
+                _tail = previous.ContinueWith(delegate { Append(line); }, TaskScheduler.Default);
+                if (!previous.IsCompleted)
+                {
+                    // The chain is already wedged: an append is stuck, which is what happens the
+                    // moment anything - ISETool, most often - holds phirura.log open. Waiting
+                    // again buys nothing, because the line just queued is behind the stuck one and
+                    // cannot run until it clears. This is not a micro-optimisation: this runs on
+                    // the UI thread with `Gate` held, so one 500 ms wait *per logged line* is what
+                    // turned "someone is reading the log" into a frozen screen - the frame never
+                    // got past the first second of texture construction, which is also the second
+                    // half of why text was on screen as white blocks. At most one wait is now
+                    // ever spent on any one wedge.
+                    return;
+                }
                 try
                 {
                     // Bounded: logging must never be the reason the app hangs either.

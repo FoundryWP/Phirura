@@ -1019,9 +1019,16 @@ impl SongScene {
             }
         }));
 
+        // Owned here rather than borrowed by the future: the returned task outlives this
+        // call, and capturing the `&str` parameter would tie it to the caller's frame.
+        let music_source = local_path.to_string();
         Ok(Some(Box::pin(async move {
             let mut info = fs::load_info(fs.as_mut()).await?;
             info.id = id;
+            // Published before anything below opens a sound. `Resources::new` reads it while this
+            // block is still loading, and the shell reads it later, at `music_new` - so it has to
+            // be true for the whole launch, not merely for the moment it was written.
+            prpr::set_music_source(Some(format!("{music_source}/{}", info.music)));
             let mut config = get_data().config.clone();
             config.player_name = get_data()
                 .me

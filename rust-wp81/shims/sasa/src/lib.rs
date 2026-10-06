@@ -79,10 +79,15 @@ mod shell {
         pub fn wp81_audio_decode(data: *const u8, len: usize, out: *mut DecodedInfo) -> i32;
 
         /// Create a music stream. `rate` is `playback_rate`, `amp` the amplifier, `clip_secs` the
-        /// clip's duration in seconds - the shell's one identifier for *which* clip this is, since
-        /// `clip_id` is 0 for every clip. Kept in step with `prpr_port::wp81_audio_music_new`.
+        /// clip's duration in seconds. `name`/`name_len` say *which* file this is, exactly as
+        /// `wp81_audio_sfx_new` does: `clip_id` is 0 for every clip, and before this arrived the
+        /// shell had to guess the chart's track from its duration alone - which is right for the
+        /// one chart packaged with the app and wrong for every other one. Kept in step with
+        /// `prpr_port::wp81_audio_music_new`.
         pub fn wp81_audio_music_new(
             clip_id: u32,
+            name: *const u8,
+            name_len: usize,
             rate: f64,
             amp: f32,
             loop_mix_time: f64,
@@ -125,7 +130,14 @@ pub struct AudioClip {
 }
 
 /// Enough for the longest asset name in the resource pack, with room to spare.
-pub const NAME_CAP: usize = 48;
+///
+/// 96 rather than 48 because the *music* name now travels through here too, and a music name is
+/// not an asset name: it is `<local_path>/<file>` - `download/79814/4347843821313567.mp3` is 35
+/// bytes - and `phira` composes it without knowing how long the chart's id or the file's name will
+/// be. Truncation is silent (`new_named` copies up to the cap and stops), so a cap sized for
+/// `click` would have handed the shell a path that points at nothing and the chart would have gone
+/// back to playing in silence with a *plausible* log line beside it.
+pub const NAME_CAP: usize = 96;
 
 impl AudioClip {
     /// Decode a compressed buffer via the shell.
@@ -552,9 +564,12 @@ impl AudioManager {
     }
 
     pub fn create_music(&mut self, clip: AudioClip, settings: MusicParams) -> Result<Music> {
+        let (name, name_len) = clip.name_parts();
         let id = unsafe {
             shell::wp81_audio_music_new(
                 clip.id(),
+                name,
+                name_len,
                 settings.playback_rate,
                 settings.amplifier,
                 settings.loop_mix_time,

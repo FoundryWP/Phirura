@@ -357,7 +357,34 @@ namespace Phirura.Game
             // screen the port does not own (menus, the calibration view, ...).
             if (_portFrame != null)
             {
-                OnPortDraw(ds);
+                // Nothing below this may escape. A Win2D `Draw` handler is unhandled-exception
+                // territory, and this is exactly where the cross-factory COMException that ended a
+                // run leaving a community chart actually left the code - `OnPortDraw` had no try at
+                // all. A draw failure costs one frame; an unhandled one costs the process.
+                //
+                // No `Invalidate()` in the handlers below, deliberately: the Rust render loop calls
+                // `DrawPortFrame` every frame anyway, so a retry happens on its own - and scheduling
+                // one from inside a catch is how a permanently failing device becomes a redraw storm
+                // that drowns the log.
+                try
+                {
+                    OnPortDraw(ds);
+                }
+                catch (Exception ex)
+                {
+                    if (IsDeviceLost(ex))
+                    {
+                        int carriers = _portTextures.Count;
+                        DisposePortTextures();
+                        _deviceLost++;
+                        AppLog.WriteSync("Win2D: port draw device lost (#" + _deviceLost
+                            + "), dropped " + carriers + " carriers", ex);
+                    }
+                    else
+                    {
+                        AppLog.WriteSync("Win2D: port draw failed", ex);
+                    }
+                }
                 return;
             }
 
@@ -1282,7 +1309,28 @@ namespace Phirura.Game
             }
 
             int mode = (int)c.f0;
-            bool hasTex = _portTextures.ContainsKey(c.flags);
+            bool hasTex = c.flags != 0 && _portTextures.ContainsKey(c.flags);
+
+            // A geometry batch carries the texture that was bound when prpr pushed it
+            // (`macroquad::draw::set_texture`, recorded as `rec.flags`) and 0 for "none". A
+            // non-zero id with no carrier means the shell has not built that carrier yet - the
+            // glyph atlas alone takes ~700 ms, and the first frames run 350 ms each - and
+            // `FillPortTriangle` reads "no carrier" as "untextured" and flat-fills the triangle
+            // with the vertex colour. prpr writes a glyph's *shape* into the atlas and only the
+            // fade into the vertex alpha (`prpr/src/ui/text.rs:349`), so that fill paints every
+            // glyph quad solid white. This is the white-block report: a race between the first
+            // frames and texture construction, not a font, an asset or an alpha problem.
+            //
+            // Skipped rather than waited for, and gated on the registry rather than on the shell:
+            // an id the registry does not hold is a stale binding, not a pending one, and that
+            // case must keep flat-filling because prpr's untextured note bodies and judge-line
+            // strokes are drawn exactly this way.
+            bool carrierPending = false;
+            if (c.flags != 0 && !hasTex)
+            {
+                uint pendingW, pendingH;
+                carrierPending = PrprPort.TextureSize(c.flags, out pendingW, out pendingH);
+            }
 
             // The duplicate-quad memo is per command: it exists to fold the two triangles of one
             // quad together, and carrying it across commands would drop a legitimately repeated
@@ -1312,6 +1360,25 @@ namespace Phirura.Game
                     if (hasTex && TryDrawPortQuad(ds, frame, c, t))
                     {
                         t += 3;
+                        continue;
+                    }
+
+                    if (carrierPending)
+                    {
+                        // Named a texture whose carrier does not exist yet. Draw nothing for this
+                        // frame rather than a solid white block in its place; the carrier arrives
+                        // a frame or three later and the text then appears normally.
+                        //
+                        // Counted, because the point of this branch is that it stops being taken:
+                        // a count that never moves says the race is gone, and one that keeps
+                        // climbing says a carrier is being built and lost again, which would be a
+                        // different bug wearing the same symptom.
+                        _carrierPendingSkipped++;
+                        if (_carrierPendingSkipped == 1 || (_carrierPendingSkipped % 64) == 0)
+                        {
+                            AppLog.WriteSync("Win2D: geometry id=" + c.flags
+                                + " skipped, carrier pending (#" + _carrierPendingSkipped + ")");
+                        }
                         continue;
                     }
 
@@ -1657,6 +1724,89 @@ namespace Phirura.Game
         /// implementation to keep in step, and the one only the phone runs is never the one that
         /// rots.
         /// </summary>
+        /// <summary>Scratch set for <see cref="SweepPortTextures"/>; cleared, never reallocated.</summary>
+        private readonly HashSet<uint> _liveIds = new HashSet<uint>();
+
+        /// <summary>Poll counter driving the periodic half of the sweep.</summary>
+        private int _sweepTick;
+
+        /// <summary>
+        /// Disposes the carriers whose id the registry has released.
+        ///
+        /// The registry is no longer append-only - `Texture2D::delete` now returns its bytes - so an
+        /// id can leave, and this side would otherwise hold a `CanvasRenderTarget` for it until
+        /// `ResetPortTextures`. Those are D3D resources, not managed byte arrays: dropping the
+        /// dictionary entry alone leaves them to a finalizer that may never run, and the whole
+        /// point of freeing the Rust side was to make room on a phone.
+        ///
+        /// Safe because a released id is never drawn again: `prpr` dropped the handle before the
+        /// registry entry went (that is what releasing *means*), so the only thing that can still
+        /// mention it is this dictionary.
+        /// </summary>
+        private void SweepPortTextures(int total)
+        {
+            if (_portTextures.Count == 0)
+            {
+                return;
+            }
+            _liveIds.Clear();
+            for (int i = 0; i < total; i++)
+            {
+                if (_portIds[i] != 0)
+                {
+                    _liveIds.Add(_portIds[i]);
+                }
+            }
+
+            List<uint> gone = null;
+            foreach (uint id in _portTextures.Keys)
+            {
+                if (!_liveIds.Contains(id))
+                {
+                    if (gone == null)
+                    {
+                        gone = new List<uint>();
+                    }
+                    gone.Add(id);
+                }
+            }
+            if (gone == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < gone.Count; i++)
+            {
+                PortTexture pt;
+                if (_portTextures.TryGetValue(gone[i], out pt))
+                {
+                    _portTextures.Remove(gone[i]);
+                    if (pt != null)
+                    {
+                        pt.Dispose();
+                    }
+                }
+            }
+            PortTexturesBound = _portTextures.Count;
+            _sweepReleased += gone.Count;
+            AppLog.WriteSync("Win2D: released " + gone.Count + " port carriers (total "
+                + _sweepReleased + ", live=" + total + ")");
+        }
+
+        /// <summary>How many carriers the sweep has released this session, for the log line.</summary>
+        private int _sweepReleased;
+
+        /// <summary>
+        /// How many geometry batches named a texture whose carrier did not exist yet this session.
+        ///
+        /// The white-block fix is a *skip*, and a skip is invisible by construction - so without
+        /// this the fix and a silently broken text path would look identical on the device.
+        /// </summary>
+        private int _carrierPendingSkipped;
+
+        /// <summary>How many times the device has gone away this session.</summary>
+        private int _deviceLost;
+
         private void EnsurePortTextures(CanvasDrawingSession ds)
         {
             if (_portDirtyUnsupported)
@@ -1685,7 +1835,8 @@ namespace Phirura.Game
             // moment later" report. The saving is only worth having once the set has stopped
             // changing, which is the case this was written for.
             int live = (int)PrprPort.TextureCount();
-            if (live != _texPollTotal)
+            bool changed = live != _texPollTotal;
+            if (changed)
             {
                 _texPollTotal = live;
                 _texPollFrame = 0;
@@ -1698,6 +1849,11 @@ namespace Phirura.Game
                     return;
                 }
             }
+            // A delete is only *guaranteed* to move the count when nothing was added alongside it,
+            // and it is not worth a per-frame pass over every key to be sure. Every change plus a
+            // slow periodic catch-up bounds how long a freed texture can keep a render target.
+            _sweepTick++;
+            bool sweep = changed || (_sweepTick % 120 == 0);
 
             try
             {
@@ -1711,6 +1867,11 @@ namespace Phirura.Game
                     }
                     PrprPort.CopyTextureIds(_portIds, total);
 
+                    if (sweep)
+                    {
+                        SweepPortTextures(total);
+                    }
+
                     for (int i = 0; i < total; i++)
                     {
                         uint id = _portIds[i];
@@ -1719,6 +1880,11 @@ namespace Phirura.Game
                             PollPortTexture(ds, id);
                         }
                     }
+                }
+                else if (sweep && _portTextures.Count > 0)
+                {
+                    // The registry emptied: nothing below runs, so the loop would never reach it.
+                    SweepPortTextures(0);
                 }
             }
             catch (Exception ex)
@@ -1755,6 +1921,46 @@ namespace Phirura.Game
         /// set but goes through the same loop so that one mechanism covers both, and the walk over
         /// `InnerException` costs nothing on the only path where it runs.
         /// </summary>
+        /// <summary>
+        /// True when the failure means "this device is gone, build another one".
+        ///
+        /// Both strings are from the phone's own log, not from a header:
+        ///
+        /// * `0x8899000C presentation error` - `0x8899000C` is `D2DERR_RECREATE_TARGET`. The HRESULT
+        ///   is in the *message* because `AppLog.Describe` composes `Type: Message` and never reads
+        ///   `Exception.HResult`.
+        /// * `Objects used together must be created from the same factory instance` - the
+        ///   consequence, one line later. Carriers built on the dead device were still in
+        ///   `_portTextures`, so a bitmap from one factory was drawn into a session from another.
+        ///   That is what escaped `OnDraw`, which had no try at all, and an exception out of a Win2D
+        ///   `Draw` handler is unhandled: the process died with no managed message beside it.
+        ///
+        /// Matched on text rather than on `Exception.HResult` for the same reason
+        /// <see cref="MissingExport"/> matches on a type *name*: this reference set is a subset, and
+        /// a member missing from it fails to compile rather than failing at run time. Three specific
+        /// strings rather than "any COMException" because the recovery throws every carrier away -
+        /// a reset triggered by an unrelated COMException would cost a full re-read of every texture
+        /// for nothing, and would be indistinguishable in the log from the real thing.
+        /// </summary>
+        private static bool IsDeviceLost(Exception ex)
+        {
+            for (Exception e = ex; e != null; e = e.InnerException)
+            {
+                if (e.GetType().Name != "COMException")
+                {
+                    continue;
+                }
+                string m = e.Message ?? "";
+                if (m.IndexOf("8899000C", StringComparison.OrdinalIgnoreCase) >= 0
+                    || m.IndexOf("presentation error", StringComparison.OrdinalIgnoreCase) >= 0
+                    || m.IndexOf("same factory instance", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         private static bool MissingExport(Exception ex)
         {
             for (Exception e = ex; e != null; e = e.InnerException)
@@ -1957,6 +2163,22 @@ namespace Phirura.Game
                     // Re-thrown so the poll above turns it into the legacy path *once*, instead of
                     // here once per frame.
                     throw;
+                }
+                if (IsDeviceLost(ex))
+                {
+                    // Every carrier in here was built on a device that no longer exists. Leaving
+                    // them in the dictionary is worse than having none: the next call draws one of
+                    // them into a session created on the replacement device, which is the
+                    // cross-factory COMException - and *that* one is thrown outside any try on this
+                    // path. Dropping them makes the next poll build fresh ones from whatever device
+                    // is current; the registry's pixels are untouched, so the recovery costs one
+                    // full re-read per texture and nothing else.
+                    int carriers = _portTextures.Count;
+                    DisposePortTextures();
+                    _deviceLost++;
+                    AppLog.WriteSync("Win2D: port texture " + id + " device lost (#" + _deviceLost
+                        + "), dropped " + carriers + " carriers", ex);
+                    return;
                 }
                 AppLog.WriteSync("Win2D: port texture " + id + " sync failed", ex);
             }

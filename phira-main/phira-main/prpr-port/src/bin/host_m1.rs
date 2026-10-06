@@ -185,7 +185,15 @@ unsafe extern "C" fn audio_decode(data: *const u8, len: usize, out: *mut Decoded
     0
 }
 
-extern "C" fn music_new(_clip: u32, _rate: f64, _amp: f32, _loop_mix: f64, _clip_secs: f64) -> u32 {
+extern "C" fn music_new(
+    _clip: u32,
+    _name: *const u8,
+    _name_len: usize,
+    _rate: f64,
+    _amp: f32,
+    _loop_mix: f64,
+    _clip_secs: f64,
+) -> u32 {
     1
 }
 extern "C" fn music_play(_id: u32) {

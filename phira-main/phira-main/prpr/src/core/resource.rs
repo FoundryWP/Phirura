@@ -509,7 +509,16 @@ impl Resource {
         };
 
         let mut audio = create_audio_manger(&config)?;
-        let music = AudioClip::new(fs.load_file(&info.music).await?)?;
+        // Named with the file `phira` published for this launch, because the name is the only
+        // thing on the `music_new` boundary that identifies the audio - every clip reports id 0.
+        // Left unnamed, this arrived as "some clip, 274.9 s" and the shell could only match it
+        // against the chart it knew about, which is how a downloaded chart played the res pack's
+        // `ending` instead of its own music. An empty name (nothing published) keeps the old
+        // behaviour rather than inventing a path.
+        let music = AudioClip::new_named(
+            &crate::music_source().unwrap_or_default(),
+            fs.load_file(&info.music).await?,
+        )?;
         let track_length = music.length();
         let buffer_size = Some(BUFFER_SIZE);
         let sfx_click = audio.create_sfx(res_pack.sfx_click.clone(), buffer_size)?;

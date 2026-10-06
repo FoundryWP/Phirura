@@ -59,6 +59,8 @@ pub struct HostCallbacks {
     pub audio_music_new: Option<
         unsafe extern "C" fn(
             clip: u32,
+            name: *const u8,
+            name_len: usize,
             rate: f64,
             amp: f32,
             loop_mix: f64,
@@ -512,23 +514,29 @@ pub unsafe extern "C" fn wp81_audio_decode(data: *const u8, len: usize, out: *mu
 
 /// Create a music stream.
 ///
-/// `clip_secs` is the requested clip's duration, and it is the only thing on this boundary that
-/// says *which* audio is wanted: `AudioClip` carries no identity (every constructor hands back
-/// id 0), so without it the shell cannot tell the chart's own music apart from the res pack's
-/// `ending` clip - and it has exactly one player, which it would then point back at the chart
-/// song. That is what played the track a second time over the result page. `prpr` builds the
-/// duration into `Music::length` from the same `frame_count` on every path, so it is available
-/// whether the clip came from file bytes or from `from_raw`.
+/// `name`/`name_len` are the file this clip came from, borrowed for the call exactly like
+/// `wp81_audio_sfx_new`'s - `<local_path>/<music>` relative to phira's data root for a chart's own
+/// track, `ending` for the res pack's clip, empty for a preview whose file the engine did not
+/// open by path.
+///
+/// The shell has one player and `AudioClip` reports id 0 for every clip, so *something* has to
+/// say which audio is wanted. It used to be `clip_secs` alone, matched against the one chart the
+/// shell had resolved before boot: right for the packaged chart, and wrong for a downloaded one,
+/// which measured differently and fell through to the res pack's `ending` - so a chart with music
+/// on disk played in silence. A duration is a coincidence of two readings of a file; a path is the
+/// file.
 #[no_mangle]
 pub unsafe extern "C" fn wp81_audio_music_new(
     clip: u32,
+    name: *const u8,
+    name_len: usize,
     rate: f64,
     amp: f32,
     loop_mix: f64,
     clip_secs: f64,
 ) -> u32 {
     match cb().audio_music_new {
-        Some(f) => f(clip, rate, amp, loop_mix, clip_secs),
+        Some(f) => f(clip, name, name_len, rate, amp, loop_mix, clip_secs),
         None => 0,
     }
 }

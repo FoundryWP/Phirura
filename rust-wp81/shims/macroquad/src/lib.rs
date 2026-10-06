@@ -360,12 +360,102 @@ impl Texture2D {
     /// sees a filename. See `draw::register_texture`.
     pub fn from_rgba8(width: u16, height: u16, bytes: &[u8]) -> Self {
         let id = draw::next_texture_id();
-        draw::register_texture(id, width as u32, height as u32, bytes);
-        Texture2D {
-            id,
-            width: width as u32,
-            height: height as u32,
+        // Shaped to fit before it is stored, and the *stored* dimensions are what this handle
+        // reports, so `prpr`'s uv maths and the shell's source rectangles stay in the same space.
+        // A community cover arrives at 1920x1440: 11 MB, 1 s to upload, and - once several of them
+        // are on screen - enough to fill the registry's 64 MiB and start refusing textures, which
+        // is invisible rather than an error. See `MAX_TEXTURE_EDGE`.
+        let (w, h, owned): (u32, u32, Option<Vec<u8>>) = Self::fit(width as u32, height as u32, bytes);
+        let pixels: &[u8] = match &owned {
+            Some(buf) => buf.as_slice(),
+            None => bytes,
+        };
+        draw::register_texture(id, w, h, pixels);
+        Texture2D { id, width: w, height: h }
+    }
+
+    /// Longest edge the registry is asked to hold, and why it is not "whatever the file is".
+    ///
+    /// 1280, the screen's own width: nothing on this device is ever sampled above it, so a cover
+    /// kept whole at 1920 pays 2.2x the bytes, 2.2x the upload (measured at up to 2993 ms for one
+    /// texture, with the frame dropping to 1.6 fps while it ran) and 2.2x the pressure on a fixed
+    /// 64 MiB budget, for detail that is discarded on the way to the panel.
+    ///
+    /// Not lower, deliberately: a full-screen background is drawn at 1280 px wide, and dropping it
+    /// to 1024 would be the first thing anyone noticed about "the images look worse". If the
+    /// budget turns out to be binding again after `delete` starts returning bytes, this is the
+    /// number to revisit - with the `held=` figure in hand, not from here.
+    const MAX_TEXTURE_EDGE: u32 = 1280;
+
+    /// Area-average `bytes` (RGBA8, `width` x `height`) down to at most [`Self::MAX_TEXTURE_EDGE`].
+    ///
+    /// `None` means "nothing to do": the texture already fits, or the buffer is not the shape it
+    /// claims. Passing bad bytes through unchanged is safer than resizing them - the shell would
+    /// render the original, which is at worst the behaviour before this existed.
+    ///
+    /// A box filter rather than a mipmap-style decimation because the ratio is arbitrary (1920 ->
+    /// 1280 is 1.5, 1832 -> 1280 is 1.43): averaging every source pixel the destination covers is
+    /// the one rule that is right for all of them, and it is O(source pixels) - the same order as
+    /// the JPEG decode that produced these bytes, so it does not become the next thing measured.
+    fn fit(width: u32, height: u32, bytes: &[u8]) -> (u32, u32, Option<Vec<u8>>) {
+        if width == 0 || height == 0 {
+            return (width, height, None);
         }
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|it| it.checked_mul(4));
+        if expected != Some(bytes.len()) || bytes.is_empty() {
+            return (width, height, None);
+        }
+        let longest = width.max(height);
+        if longest <= Self::MAX_TEXTURE_EDGE {
+            return (width, height, None);
+        }
+        let scale = Self::MAX_TEXTURE_EDGE as u64;
+        let nw = (((width as u64) * scale) / longest as u64).max(1);
+        let nh = (((height as u64) * scale) / longest as u64).max(1);
+        let mut out = vec![0u8; (nw * nh * 4) as usize];
+        let (w, h) = (width as usize, height as usize);
+        for dy in 0..(nh as usize) {
+            let y0 = dy * h / nh as usize;
+            let mut y1 = (dy + 1) * h / nh as usize;
+            if y1 <= y0 {
+                y1 = y0 + 1;
+            }
+            if y1 > h {
+                y1 = h;
+            }
+            for dx in 0..(nw as usize) {
+                let x0 = dx * w / nw as usize;
+                let mut x1 = (dx + 1) * w / nw as usize;
+                if x1 <= x0 {
+                    x1 = x0 + 1;
+                }
+                if x1 > w {
+                    x1 = w;
+                }
+                let mut sum = [0u32; 4];
+                let mut n = 0u32;
+                for y in y0..y1 {
+                    let row = y * w * 4;
+                    for x in x0..x1 {
+                        let o = row + x * 4;
+                        sum[0] += bytes[o] as u32;
+                        sum[1] += bytes[o + 1] as u32;
+                        sum[2] += bytes[o + 2] as u32;
+                        sum[3] += bytes[o + 3] as u32;
+                        n += 1;
+                    }
+                }
+                let n = n.max(1);
+                let d = ((dy as u64 * nw + dx as u64) * 4) as usize;
+                out[d] = (sum[0] / n) as u8;
+                out[d + 1] = (sum[1] / n) as u8;
+                out[d + 2] = (sum[2] / n) as u8;
+                out[d + 3] = (sum[3] / n) as u8;
+            }
+        }
+        (nw as u32, nh as u32, Some(out))
     }
 
     pub fn from_image(image: &Image) -> Self {
@@ -384,8 +474,22 @@ impl Texture2D {
 
     pub fn set_filter(&self, _f: FilterMode) {}
 
-    pub fn delete(&self) {}
-    /// Adopts a handle `prpr` created itself - a *render* texture, allocated empty.
+    /// Gives the registry's bytes back.
+    ///
+    /// This was a no-op, and so was everything that queued a deletion for it: `SafeTexture` drops,
+    /// and `prpr`'s own `cache_texture.delete()` on a glyph-atlas rebuild. The registry therefore
+    /// only ever grew until `ResetPortTextures`, the 64 MiB ceiling started refusing *new*
+    /// textures - invisibly, since a refused texture draws nothing - and the log recorded
+    /// `23 dropped` beside a budget pinned at 67,087,208 of 67,108,864 bytes. That is the white
+    /// note keys: the chart's own sprites, refused because covers scrolled past earlier in the
+    /// session were still holding their pixels.
+    ///
+    /// Deleting is only correct because the caller is the last `SafeTexture` (see
+    /// `prpr::ext::SafeTextureInner::drop`, which queues onto the render thread) or `prpr` itself
+    /// replacing the texture it just unbound - the same contract upstream's GL `delete` relies on.
+    pub fn delete(&self) {
+        draw::release_texture(self.id);
+    }
     ///
     /// Returning `0` here was not a harmless placeholder; it is why every piece of prpr and Phira
     /// text is invisible. `prpr` builds its glyph atlas exactly this way (`ui/text.rs:305`), so a
@@ -1971,6 +2075,66 @@ pub mod draw {
                 dirty_pending: true,
             };
             TEX_COUNT = count + 1;
+        }
+    }
+
+    /// Frees a texture the caller no longer uses - the counterpart `register_texture` never had.
+    ///
+    /// The registry was append-only, and `Texture2D::delete` was a no-op to match, so every
+    /// `SafeTexture` drop and every glyph-atlas rebuild left its bytes in `TEX_BYTES`. The ceiling
+    /// is fixed and the session is not: scrolling the library re-registers each cover when its
+    /// `ChartItem` is rebuilt, `held=` walked up to within 21 KB of the budget, and from then on
+    /// the *new* registrations were the ones refused. A refused texture is not an error, it is an
+    /// absence - which is why this showed up as white note keys rather than as anything logged.
+    ///
+    /// The pixels are reclaimed only when no other entry points into them. `register_texture`
+    /// aliases a second id onto identical bytes (21 of the 190 chart's duplicates went that way),
+    /// so freeing on the first id alone would leave the survivor reading out of a hole - and the
+    /// test is an overlap rather than an equality because entries are built by appending and now
+    /// by removing whole ranges, so they are either equal or disjoint and the overlap states that
+    /// without depending on how they got there.
+    pub fn release_texture(id: u32) {
+        unsafe {
+            let count = TEX_COUNT;
+            let mut found = None;
+            for i in 0..count {
+                if TEX_ENTRIES[i].id == id {
+                    found = Some(i);
+                    break;
+                }
+            }
+            // Not in the registry: already released, refused on the way in, or never registered.
+            // Returning quietly is right because `delete` is called from a drop, and a drop must
+            // not be able to fail.
+            let i = match found {
+                Some(i) => i,
+                None => return,
+            };
+            let (offset, len) = (TEX_ENTRIES[i].offset, TEX_ENTRIES[i].len);
+
+            // The entry goes whether or not the bytes do: an id nothing owns still costs the shell
+            // a carrier it would rebuild every poll.
+            for j in i + 1..count {
+                TEX_ENTRIES[j - 1] = TEX_ENTRIES[j];
+            }
+            TEX_COUNT = count - 1;
+
+            if len == 0 {
+                return;
+            }
+            let end = offset + len;
+            for j in 0..TEX_COUNT {
+                let e = TEX_ENTRIES[j];
+                if e.offset < end && e.offset + e.len > offset {
+                    return;
+                }
+            }
+            let _ = TEX_BYTES.drain(offset..end);
+            for j in 0..TEX_COUNT {
+                if TEX_ENTRIES[j].offset > offset {
+                    TEX_ENTRIES[j].offset -= len;
+                }
+            }
         }
     }
 

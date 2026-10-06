@@ -1069,7 +1069,12 @@ namespace Phirura
             string uri = SfxUri(name);
             _sfxUris.Add(uri);
             AppLog.Write("GamePage: sfx_new '" + name + "' -> " + (uri == null ? "(none)" : uri));
-            return uri == null ? 0u : (uint)(_sfxUris.Count - 1);
+            // The slot, unconditionally. Returning 0 for a URI that resolved to nothing made
+            // that registration alias slot 0, so a silent effect played whatever the *first*
+            // registered sound was - and if slot 0 was itself the null one, the first effect ever
+            // registered became unplayable while every later one worked. A null entry now maps to
+            // its own index, which `SfxPlay` already treats as "play nothing".
+            return (uint)(_sfxUris.Count - 1);
         }
 
         void PrprPort.ISfxSink.SfxPlay(uint id, float amp)
@@ -2043,8 +2048,29 @@ namespace Phirura
             return null;
         }
 
+        /// <summary>
+        /// True for the engine naming a chart's own music file: `<local_path>/<file>`.
+        ///
+        /// Matching on shape rather than on the file existing keeps this synchronous. `music_new`
+        /// runs inside a Rust callback, so there is no `await` to put a storage probe on, and a
+        /// fire-and-forget one would race the `Source` assignment two lines below. A resource name
+        /// (`ending`) and an unnamed preview both fail the test and fall through to the duration
+        /// check, which is unchanged and still the only answer for a clip the engine opened
+        /// without a path.
+        /// </summary>
+        private static bool IsChartMusicPath(string source)
+        {
+            if (string.IsNullOrEmpty(source) || source.IndexOf('/') < 0)
+            {
+                return false;
+            }
+            string n = source.ToLowerInvariant();
+            return n.EndsWith(".mp3") || n.EndsWith(".ogg") || n.EndsWith(".wav")
+                || n.EndsWith(".flac") || n.EndsWith(".m4a") || n.EndsWith(".aac");
+        }
+
         /// <summary>Opens the chart's music on the shell's `Player`. See <see cref="PrprPort.IMusicSink"/>.</summary>
-        public void MusicNew(double rate, float amp, double loopMix, double clipSecs)
+        public void MusicNew(string source, double rate, float amp, double loopMix, double clipSecs)
         {
             if (_clock == null)
             {
@@ -2071,7 +2097,18 @@ namespace Phirura
             // by the encoder padding, so anything tighter would misclassify the chart itself.
             string uri = PhiraMusicUri;
             bool isChart = true;
-            if (PhiraMusicSeconds > 0.05 && clipSecs > 0.05
+            if (IsChartMusicPath(source))
+            {
+                // The engine named this clip's own file, relative to phira's data root - which is
+                // exactly where `EnsureBundledChartAsync` and the downloader put them, and exactly
+                // how line `PhiraMusicUri` is built for the packaged chart. This is the only
+                // branch that works for a chart the shell never resolved itself: a downloaded one
+                // measured 274.9 s against the packaged chart's 214.8 s, missed the test below,
+                // and played the res pack's `ending` in place of its own music.
+                uri = "ms-appdata:///local/data/charts/" + source;
+                isChart = true;
+            }
+            else if (PhiraMusicSeconds > 0.05 && clipSecs > 0.05
                 && Math.Abs(clipSecs - PhiraMusicSeconds) > 1.0)
             {
                 isChart = false;
@@ -2103,6 +2140,7 @@ namespace Phirura
             _clock.StartFree();
             AppLog.Write("GamePage: music_new -> " + uri
                 + (isChart ? " (chart)" : " (res-pack ending)")
+                + " src='" + (source ?? "") + "'"
                 + " secs=" + clipSecs.ToString("0.###")
                 + " rate=" + rate.ToString("0.###")
                 + " amp=" + amp.ToString("0.###")

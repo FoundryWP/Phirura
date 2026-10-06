@@ -108,7 +108,19 @@ pub fn get_data_mut() -> &'static mut Data {
 }
 
 pub fn save_data() -> Result<()> {
-    std::fs::write(format!("{}/data.json", dir::root()?), serde_json::to_string(get_data())?)?;
+    let path = format!("{}/data.json", dir::root()?);
+    let bytes = serde_json::to_string(get_data())?;
+    // Logged because the two ways a user reports this - "the option did not stick" and "the write
+    // failed and nothing said so" - are indistinguishable without it. `save_data` returns a
+    // `Result` that most callers fold into a scene update which has no log of its own, and
+    // `std::fs::write` on a phone fails for reasons (full, locked, mid-tombstone) that leave no
+    // other trace in the run. Cheap: settings write once after a 0.5 s debounce, records on finish.
+    let res = std::fs::write(&path, bytes.as_bytes());
+    match &res {
+        Ok(()) => log_line(&format!("data: saved {} ({} bytes)", path, bytes.len())),
+        Err(err) => log_line(&format!("data: SAVE FAILED {} ({})", path, err)),
+    }
+    res?;
     Ok(())
 }
 
