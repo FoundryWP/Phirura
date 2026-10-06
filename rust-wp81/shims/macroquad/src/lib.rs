@@ -3385,6 +3385,116 @@ pub mod utils {
     }
 }
 
+/// Where `prpr::judge` reports what it actually decided, for the shell's once-a-second log line.
+///
+/// Why this exists rather than `tracing`: there is no subscriber on this target, so `debug!` and
+/// `warn!` are both silent, and the one question behind "gameplay notes cannot be hit" has four
+/// causes that look identical from outside - the judge never ran, no `Started` reached it, the
+/// touch landed outside the note's x range, or outside its time window. The shell can only see
+/// that a finger went down; only the code inside `Judge::update` can tell those four apart.
+///
+/// `AtomicU32` and not a lock: `std::sync::Mutex` aborts the boot on this device (see the note on
+/// `PENDING`), and there is exactly one writer and one reader, both on the game thread.
+///
+/// Everything is a **window** - `take()` reads and clears - so a printed number means "in the
+/// last second", which is what makes one tap visible next to a total that only ever grows.
+pub mod judge_diag {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    /// `Judge::update` invocations. Zero here while a chart is on screen means the gate in front
+    /// of it (`!tm.paused() && pause_rewind.is_none() && mode != View`) is closed - input cannot
+    /// be the problem.
+    static UPDATE: AtomicU32 = AtomicU32::new(0);
+    /// `TOUCHES.len()` at judge time: events handed over by `repeat_all_miniquad_input`.
+    static EVENTS: AtomicU32 = AtomicU32::new(0);
+    /// Touches whose phase was `Started` - the *only* thing that can judge a click or a hold.
+    static STARTED: AtomicU32 = AtomicU32::new(0);
+    /// Click attempts that found at least one in-range note. If this is 0 while `STARTED` is not,
+    /// the tap arrived and the note rejected it.
+    static CANDIDATE: AtomicU32 = AtomicU32::new(0);
+    /// Non-miss judgements committed - the number the player would see as a hit.
+    static HIT: AtomicU32 = AtomicU32::new(0);
+    /// Rejections for `dist > X_DIFF_MAX`: right time, wrong x.
+    static X_REJECT: AtomicU32 = AtomicU32::new(0);
+    /// Rejections for `dt` outside the window: right x, wrong time.
+    static T_REJECT: AtomicU32 = AtomicU32::new(0);
+    /// Touches the inverse line transform could not place (NaN/inf) - the whole line is skipped.
+    static NO_POS: AtomicU32 = AtomicU32::new(0);
+    /// Smallest line-local `dist` seen, scaled by 10000. Compared against `X_DIFF_MAX * 10000`
+    /// (= 2362) it says *how far* the misses are missing by, which is the difference between a
+    /// coordinate that is a little off and one that is in another space entirely.
+    static MIN_DIST: AtomicU32 = AtomicU32::new(u32::MAX);
+    /// `res.time * 1000`, the chart clock the window is measured against.
+    static CHART_TIME: AtomicU32 = AtomicU32::new(0);
+
+    pub fn note_update(events: usize) {
+        UPDATE.fetch_add(1, Ordering::Relaxed);
+        EVENTS.fetch_add(events as u32, Ordering::Relaxed);
+    }
+
+    pub fn note_started() {
+        STARTED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn note_candidate() {
+        CANDIDATE.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn note_hit() {
+        HIT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn note_x_reject() {
+        X_REJECT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn note_t_reject() {
+        T_REJECT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn note_no_pos() {
+        NO_POS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Scaled and clamped: the printer is integer-only, and a line-local distance can exceed
+    /// `u32` only if the transform already went wrong - which saturating here would hide.
+    pub fn note_dist(dist: f64) {
+        let scaled = dist * 10000.0;
+        let v = if !(scaled > 0.0) {
+            0
+        } else if scaled >= 4_000_000_000.0 {
+            u32::MAX
+        } else {
+            scaled as u32
+        };
+        MIN_DIST.fetch_min(v, Ordering::Relaxed);
+    }
+
+    pub fn note_time(t: f64) {
+        let v = t * 1000.0;
+        CHART_TIME.store(if v > 0.0 && v < 4_000_000_000.0 { v as u32 } else { 0 }, Ordering::Relaxed);
+    }
+
+    /// Read and clear. Returns `(update, events, started, candidate, hit, x_reject, t_reject,
+    /// no_pos, min_dist, chart_time)`; `min_dist` is 0 when no note was ever distance-checked.
+    #[allow(clippy::type_complexity)]
+    pub fn take() -> (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+        let d = MIN_DIST.swap(u32::MAX, Ordering::Relaxed);
+        (
+            UPDATE.swap(0, Ordering::Relaxed),
+            EVENTS.swap(0, Ordering::Relaxed),
+            STARTED.swap(0, Ordering::Relaxed),
+            CANDIDATE.swap(0, Ordering::Relaxed),
+            HIT.swap(0, Ordering::Relaxed),
+            X_REJECT.swap(0, Ordering::Relaxed),
+            T_REJECT.swap(0, Ordering::Relaxed),
+            NO_POS.swap(0, Ordering::Relaxed),
+            if d == u32::MAX { 0 } else { d },
+            CHART_TIME.swap(0, Ordering::Relaxed),
+        )
+    }
+}
+
 pub mod color {
     pub use super::{
         Color, BEIGE, BLACK, BLANK, BLUE, BROWN, DARKGRAY, DARKGREEN, DARKPURPLE, GOLD, GRAY,

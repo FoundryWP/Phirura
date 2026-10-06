@@ -1169,6 +1169,45 @@ pub extern "C" fn wp81_game_frame(dt: f64) -> i32 {
             if let Ok(s) = core::str::from_utf8(&buf[..n]) {
                 log_line(s);
             }
+            // What `prpr::judge` decided in the same second. Four causes of "I tapped and nothing
+            // happened" are indistinguishable from outside - the judge never ran (`ju=0`), no
+            // press counted as a click (`js=0`), the note rejected the x (`jx`) or the time
+            // (`jt`) - and the shell can only see that a finger went down. This is the shortest
+            // path from the one place that knows to the log the shell already writes.
+            //
+            // `jd` is the smallest line-local distance touched: `X_DIFF_MAX * 10000` is 2362, so
+            // `jd` in the thousands means the finger was a little off the note while `jd` in the
+            // tens of thousands means the touch is in a different coordinate space from the chart.
+            //
+            // Skipped when the judge had nothing to report, so the home screen does not spend a
+            // line a second on `ju=0 je=0 ...`.
+            let (ju, je, js, jc, jh, jx, jt, jn, jd, jtms) = macroquad::judge_diag::take();
+            if ju + je + js + jc + jh + jx + jt + jn > 0 {
+                let mut buf = [0u8; 352];
+                let mut n = push_str(&mut buf, 0, "judge: ju=");
+                n = push_u32(&mut buf, n, ju);
+                n = push_str(&mut buf, n, " je=");
+                n = push_u32(&mut buf, n, je);
+                n = push_str(&mut buf, n, " js=");
+                n = push_u32(&mut buf, n, js);
+                n = push_str(&mut buf, n, " jc=");
+                n = push_u32(&mut buf, n, jc);
+                n = push_str(&mut buf, n, " jh=");
+                n = push_u32(&mut buf, n, jh);
+                n = push_str(&mut buf, n, " jx=");
+                n = push_u32(&mut buf, n, jx);
+                n = push_str(&mut buf, n, " jt=");
+                n = push_u32(&mut buf, n, jt);
+                n = push_str(&mut buf, n, " jn=");
+                n = push_u32(&mut buf, n, jn);
+                n = push_str(&mut buf, n, " jd=");
+                n = push_u32(&mut buf, n, jd);
+                n = push_str(&mut buf, n, " t=");
+                n = push_u32(&mut buf, n, jtms);
+                if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                    log_line(s);
+                }
+            }
         }
     }
     // Move the shim's clock. Nothing else does - `set_now_micros` has no caller here - and while it

@@ -420,6 +420,9 @@ impl Judge {
         let uptime = get_uptime();
 
         let t = res.time;
+        // The chart clock the whole judgement window is measured against. Printed so that a run of
+        // `jt=0` (timeline frozen) cannot be mistaken for a run of empty judgement candidates.
+        macroquad::judge_diag::note_time(t);
         // TODO optimize
         let mut touches: HashMap<u64, Touch> = {
             let mut touches = touches();
@@ -473,6 +476,7 @@ impl Judge {
             fn to_local(Vec2 { x, y }: Vec2) -> Point {
                 Point::new(x / screen_width() * 2. - 1., y / screen_height() * 2. - 1.)
             }
+            macroquad::judge_diag::note_update(events.len());
             let delta = (t / spd - self.last_time) / (events.len() + 1) as f64;
             let mut t = self.last_time;
             for Touch {
@@ -559,11 +563,24 @@ impl Judge {
             if !(click || flick) {
                 continue;
             }
+            // Counted here rather than at the queue: this is the point where a press either is or
+            // is not a *click* as the judge understands it, and it is click/hold - never drag,
+            // which is judged purely by position further down - that a dead tap kills.
+            if click {
+                macroquad::judge_diag::note_started();
+            }
             let t = time_of(touch);
             let mut closest = (None, X_DIFF_MAX, LIMIT_BAD, LIMIT_BAD + (X_DIFF_MAX / NOTE_WIDTH_RATIO_BASE - 1.).max(0.) * DIST_FACTOR);
             for (line_id, ((line, pos), (idx, st))) in chart.lines.iter_mut().zip(pos.iter()).zip(self.notes.iter_mut()).enumerate() {
-                let Some(pos) = pos[id] else {
-                    continue;
+                let pos = match pos[id] {
+                    Some(p) => p,
+                    None => {
+                        // The inverse line transform produced a non-finite point, so this line is
+                        // skipped entirely - which looks from outside exactly like the tap doing
+                        // nothing. Counted because it is otherwise invisible.
+                        macroquad::judge_diag::note_no_pos();
+                        continue;
+                    }
                 };
                 for id in &idx[*st..] {
                     let note = &mut line.notes[*id as usize];
@@ -581,7 +598,11 @@ impl Judge {
                     let x = &mut note.object.translation.0;
                     x.set_time(t);
                     let dist = (x.now() - pos.x).abs() as f64 / note.judge_area as f64;
+                    // The best (smallest) miss distance is what separates "the x is a little off"
+                    // from "the touch is in a different coordinate space altogether".
+                    macroquad::judge_diag::note_dist(dist);
                     if dist > X_DIFF_MAX {
+                        macroquad::judge_diag::note_x_reject();
                         continue;
                     }
                     if dt
@@ -591,6 +612,10 @@ impl Judge {
                             LIMIT_GOOD
                         }
                     {
+                        // The note was under the finger but outside the timing window. A steady
+                        // stream of these with `jd` near zero means the chart clock and the touch
+                        // clock disagree, not that the finger missed.
+                        macroquad::judge_diag::note_t_reject();
                         continue;
                     }
                     let dt = if matches!(note.kind, NoteKind::Flick | NoteKind::Drag) {
@@ -603,6 +628,9 @@ impl Judge {
                         closest = (Some((line_id, *id)), dist, dt, key);
                     }
                 }
+            }
+            if closest.0.is_some() {
+                macroquad::judge_diag::note_candidate();
             }
             if let (Some((line_id, id)), _, dt, _) = closest {
                 let line = &mut chart.lines[line_id];
@@ -792,6 +820,14 @@ impl Judge {
                         judgements.push((Judgement::Perfect, line_id, *id, diff));
                     }
                 }
+            }
+        }
+        // Misses are pushed by the miss pass whether or not a finger was involved, so only the
+        // judgements a tap can cause are reported - otherwise a silent chart would still show a
+        // busy `jh` and hide the fact that nothing the player did was ever committed.
+        for judgement in judgements.iter().map(|it| &it.0) {
+            if !matches!(judgement, Judgement::Miss) {
+                macroquad::judge_diag::note_hit();
             }
         }
         for (judgement, line_id, id, diff) in judgements {
