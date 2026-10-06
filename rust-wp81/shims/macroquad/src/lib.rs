@@ -248,10 +248,29 @@ impl From<Color> for [f32; 4] {
 }
 
 impl Default for Color {
-    /// Opaque white. `prpr::core::effect` needs `Color: Default` for its `UniformValue` impl, and
-    /// white is the identity for the multiplicative blending the effects use.
+    /// Transparent black.
+    ///
+    /// The macroquad this API came from declares `#[derive(Clone, Copy, Debug, Default, ...)]` on
+    /// `Color` - four `f32` fields, so the derived value is all zeros, the same thing as `BLANK`.
+    ///
+    /// This used to return `WHITE`, and that single guess is what made phira's fades render as
+    /// "white blocks at different levels of transparency". Every one of these ends a gradient in
+    /// `Color::default()`:
+    ///
+    /// * `prpr::ext::rect_shadow` / `drop_shadow` - the feathered outer edge of every card shadow;
+    /// * `phira::scene::song.rs:2873`, `event.rs:515`, `page/favorites.rs:1310` and `:1339` -
+    ///   `fill_rect(r, (Color::default(), .., Color::new(0., 0., 0., p * 0.7), ..))`, the black
+    ///   scrim that fades a header away as you scroll;
+    /// * `phira::page::home.rs:326` and `prpr::scene::loading.rs:216`, gradient ends again.
+    ///
+    /// With white in that slot each of them became an opaque white slab that merely changed alpha
+    /// along its length, which is exactly what was on screen.
+    ///
+    /// Nothing depended on the old answer: `prpr::core::effect` requires `Color: Default` only as
+    /// a bound on `UniformValue`, and the number it actually sends the shader is parsed from the
+    /// effect's uniform list, not read back out of this. The shim itself never calls it.
     fn default() -> Self {
-        WHITE
+        BLANK
     }
 }
 
@@ -544,11 +563,16 @@ impl QuadGl {
         draw::push_geometry(vertices, indices);
     }
 
-    pub fn scissor(&self, _rect: Option<(i32, i32, i32, i32)>) {
+    pub fn scissor(&self, rect: Option<(i32, i32, i32, i32)>) {
+        // Recorded, not applied: there is no GL scissor to set here, so the rectangle goes into
+        // the same ordered command stream as the draws and `Win2DChartRenderer` clips with it.
+        //
         // The parameter is the *tuple*, not a `Rect`: `prpr::ui` stores its scissor as
         // `Option<(i32, i32, i32, i32)>` and hands it straight through, so a `Rect` here is an
-        // E0308 at two call sites. The C# renderer applies its own scissor anyway; on the paths
-        // prpr uses the recorded geometry is already correct, so this is a no-op on WP8.1.
+        // E0308 at two call sites. It is already `(left, top, width, height)` in pixels with a
+        // top-left origin - see the `Cmd::Scissor` doc for why that is the same space the draws
+        // are in.
+        draw::push(Cmd::Scissor { rect });
     }
 
     /// The model matrix `prpr` brackets each draw with.
@@ -1721,6 +1745,19 @@ pub mod draw {
             r: f32,
             color: Color,
         },
+        /// A clip rectangle, in the same pixels every other command is in.
+        ///
+        /// `None` means "no clip". `prpr::ui::scissor` brackets each clipped region by emitting
+        /// one of these and then emitting whatever was in force before it, so the shell never has
+        /// to keep a stack - it just applies each one as it arrives.
+        ///
+        /// The tuple is `(left, top, width, height)` with a top-left origin, which is what
+        /// `prpr::ui::scissor` computes: its `pt.0`/`pt.1` and its `rect.w * vp.2 / 2` extents are
+        /// the same arithmetic as `ndc_to_pixels` under the UI camera (`zoom = (1, -aspect)`),
+        /// so the rectangle lands in exactly the space the draws inside it are drawn in.
+        Scissor {
+            rect: Option<(i32, i32, i32, i32)>,
+        },
         /// A batch handed to `QuadGl::geometry`.
         ///
         /// The vertices and indices live in their own arenas rather than inside this variant,
@@ -2327,9 +2364,14 @@ pub mod draw {
         CUR_MODE.store(mode as u32, Ordering::Relaxed);
     }
 
-    pub fn set_scissor(_r: Option<Rect>) {
-        // The C# renderer applies its own scissor; on the paths prpr uses the recorded geometry is
-        // already clipped by the caller.
+    /// The `Rect`-shaped entry point for clipping. Nothing calls it today - `prpr::ui` speaks the
+    /// tuple form through `QuadGl::scissor` - but it is forwarded rather than left as a silent
+    /// no-op so that a future caller cannot reintroduce "the list draws outside its box" without
+    /// anyone noticing.
+    pub fn set_scissor(r: Option<Rect>) {
+        draw::push(Cmd::Scissor {
+            rect: r.map(|r| (r.x as i32, r.y as i32, r.w as i32, r.h as i32)),
+        });
     }
 
     pub fn push_geometry(vertices: &[Vertex], indices: &[u16]) {
@@ -2512,6 +2554,10 @@ pub mod draw {
     pub const KIND_LINE: u32 = 2;
     pub const KIND_CIRCLE: u32 = 3;
     pub const KIND_GEOMETRY: u32 = 4;
+    /// A clip rectangle. `flags` = 1 when a clip is in force, 0 when it is being released;
+    /// `f0..f3` = left/top/width/height in pixels. Not a draw, but it has to ride in the same
+    /// ordered stream as the draws because that order *is* the state.
+    pub const KIND_SCISSOR: u32 = 5;
     // `Text` is deliberately NOT a kind: the shim cannot rasterise glyphs, the C# side owns fonts,
     // and recording a text command would need the string's characters rather than its length.
     // `draw_text` therefore records nothing, and the port's text stays on the C# path.
@@ -2534,6 +2580,9 @@ pub mod draw {
     /// * `Line`: `f0..f7` = x1/y1/x2/y2, thickness, r, g, b; `vstart` = a. The alpha is what a judge
     ///   line animates, so without it every line sat at 100% opacity for the whole chart.
     /// * `Rect` / `Circle`: `f` carries rgba already; the arena fields are zero.
+    /// * `Scissor`: `flags` = 1 while a clip is in force and 0 when it is being released;
+    ///   `f0..f3` = left/top/width/height in pixels. `v*`/`i*` are zero. This is state, not a
+    ///   draw - it is in this stream only because the stream's order is what defines it.
     #[repr(C)]
     #[derive(Copy, Clone, Debug, Default)]
     pub struct PortCmd {
@@ -2728,6 +2777,19 @@ pub mod draw {
                     rec.f[4] = color.g;
                     rec.f[5] = color.b;
                     rec.f[6] = color.a;
+                }
+                Cmd::Scissor { rect } => {
+                    rec.kind = KIND_SCISSOR;
+                    // `flags` distinguishes "clip to this" from "release the clip", because the
+                    // payload of a release is meaningless and a zero-sized rectangle would
+                    // otherwise mean "clip everything away" rather than "clip nothing".
+                    if let Some((l, t, w, h)) = rect {
+                        rec.flags = 1;
+                        rec.f[0] = l as f32;
+                        rec.f[1] = t as f32;
+                        rec.f[2] = w as f32;
+                        rec.f[3] = h as f32;
+                    }
                 }
                 Cmd::Geometry { tex, mode, vstart, vcount, istart, icount } => {
                     rec.kind = KIND_GEOMETRY;

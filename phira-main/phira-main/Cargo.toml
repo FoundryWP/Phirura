@@ -111,8 +111,9 @@ rfd = { path = "../../rust-wp81/shims/rfd" }
 # library whose build script reports `No target-specific source found: windows-arm` and fails to
 # compile `stdalign_check.c`. There is no source for this architecture, so the crate cannot be
 # built here at all. Beyond that, the port's rule is that networking belongs to the shell: this
-# shim keeps reqwest's type surface and leaves `send` unimplemented until an `http_request`
-# callback exists on the C# side.
+# shim keeps reqwest's type surface and routes `send` through `HostCallbacks::http_request`, which
+# C# implements with `PrprPort.OnHttpRequest` and answers back through `wp81_http_complete`. So no
+# socket, DNS or TLS stack is ever compiled into the port - the shell already has all three.
 reqwest = { path = "../../rust-wp81/shims/reqwest" }
 
 # `phira-mp-client` (multiplayer, an unconditional dependency of `phira`) resolves its

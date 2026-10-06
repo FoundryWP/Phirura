@@ -84,6 +84,13 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="ChartLibrary.cs" />
+    <!--
+      The shell's native text-input dialog lives in its own file rather than in GamePage.xaml.cs.
+      `GamePage.xaml.cs` is 3100 lines and its read-back is unreliable on this machine, and this is
+      a self-contained feature: one sink interface, one overlay, two buttons. Splitting a partial
+      class is free in C#, so there is no reason to fight the file for a 200-line block.
+    -->
+    <Compile Include="GamePage.Input.cs" />
     <Compile Include="GamePage.xaml.cs">
       <DependentUpon>GamePage.xaml</DependentUpon>
     </Compile>

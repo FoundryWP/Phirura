@@ -20,6 +20,12 @@
 #![allow(non_snake_case, non_camel_case_types, unused_variables)]
 
 use core::ffi::c_void;
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc, Mutex,
+};
+
+use inputbox::{backend::Backend as InputBackend, InputBox};
 
 /// The game host: builds a real `prpr` `GameScene` and ticks it. Kept out of this file so the ABI
 /// surface stays readable.
@@ -91,6 +97,51 @@ pub struct HostCallbacks {
     /// Rust anything, so the shell has to be told as it happens - and written synchronously, so the
     /// last line on disk is the last thing Rust did.
     pub log: Option<unsafe extern "C" fn(msg: *const u8, len: usize)>,
+    /// Start one HTTP request. Returns `0` when it was accepted.
+    ///
+    /// This is the only network entry point and it is deliberately fire-and-forget: the caller is a
+    /// tokio worker thread that must not wait, so the shell copies what it needs, starts the request
+    /// and answers later through `wp81_http_complete`. Everything is UTF-8 with an explicit length
+    /// because `reqwest`'s `Url` and `HeaderMap` are UTF-8 natively - a UTF-16 hop would mean two
+    /// conversions for nothing, and `log` already crosses the same way.
+    ///
+    /// `headers` is a block of `name: value\r\n` lines, `body` the raw payload (null with length 0
+    /// for a bodyless request).
+    pub http_request: Option<
+        unsafe extern "C" fn(
+            id: u32,
+            method: *const u8,
+            method_len: usize,
+            url: *const u8,
+            url_len: usize,
+            headers: *const u8,
+            headers_len: usize,
+            body: *const u8,
+            body_len: usize,
+        ) -> i32,
+    >,
+    /// Ask the shell to show a text-input dialog. Returns `0` once the request is accepted.
+    ///
+    /// phira opens one for every text field it owns - the login and password boxes, the search bar,
+    /// the mp address setting, the comment and transfer prompts, the tag editor - through the
+    /// `inputbox` crate, whose Windows backend works by *spawning a PowerShell script*. WP8.1 has
+    /// no PowerShell and no system text-dialog API at all, so the port installs its own `Backend`
+    /// and every one of those calls lands here instead. It is fire-and-forget for the same reason
+    /// `http_request` is: the answer comes back later, through `wp81_input_complete`, and the
+    /// caller must not block waiting for it.
+    ///
+    /// `buf` is borrowed for the duration of this call only and is a single length-prefixed record
+    /// that the shell copies before returning:
+    ///
+    /// ```text
+    /// u32 LE  mode            0 = text, 1 = password, 2 = multiline
+    /// 5 x { u32 LE byte_len, byte_len bytes of UTF-8 } in this order:
+    ///         title, prompt, default text, ok label, cancel label
+    /// ```
+    ///
+    /// UTF-8 with explicit lengths rather than UTF-16 for the same reason as `http_request`: the
+    /// `inputbox` side is UTF-8 natively, and a UTF-16 hop would be two conversions for nothing.
+    pub text_input: Option<unsafe extern "C" fn(req: u32, buf: *const u8, len: usize) -> i32>,
 }
 
 static mut CALLBACKS: HostCallbacks = HostCallbacks {
@@ -111,6 +162,8 @@ static mut CALLBACKS: HostCallbacks = HostCallbacks {
     present: None,
     load_asset: None,
     log: None,
+    http_request: None,
+    text_input: None,
 };
 
 /// Installed once by the shell, before anything else is called.
@@ -131,6 +184,15 @@ pub unsafe extern "C" fn wp81_install_callbacks(cb: *const HostCallbacks) {
     // scene cannot be constructed at all: `ResourcePack` falls back to
     // `fs_from_assets("respack/")`, which has no way to ask anyone for bytes.
     macroquad::set_asset_hook(asset_hook);
+    // The same handover, for the other direction: the `reqwest` shim is a separate crate with no
+    // dependency on this one, so it cannot reach `CALLBACKS`. Without this `send()` has no
+    // transport and every network call fails before it leaves the device.
+    reqwest::set_http_sender(http_sender);
+    // phira's text fields go through `inputbox`, whose Windows backend spawns `powershell.exe` -
+    // which a phone does not have, so without this every login, search and settings field would
+    // fail inside `spawn` and no dialog would ever appear. Installed here rather than behind a cfg
+    // because a desktop build reaches the same default through `inputbox` on its own.
+    prpr::scene::set_input_backend(Arc::new(ShellInput));
 }
 
 /// Forwarder for the macroquad shim's asset hook.
@@ -140,6 +202,112 @@ pub unsafe extern "C" fn wp81_install_callbacks(cb: *const HostCallbacks) {
 /// fallback - and the shell resolves both against its asset root.
 fn asset_hook(path: &str) -> Option<Vec<u8>> {
     host::load_asset(path)
+}
+
+/// Forwarder for the `reqwest` shim's transport hook.
+///
+/// A plain `fn` for the same reason `asset_hook` is one: that is what the shim stores in a `static`,
+/// and the shim has no dependency on this crate. The strings are borrowed and handed over as raw
+/// pointers for the duration of the call only - the shell copies what it needs before returning,
+/// and it returns before the request has been sent, which is the whole point: the caller is a
+/// tokio worker thread that must not wait.
+fn http_sender(id: u32, method: &str, url: &str, headers: &str, body: &[u8]) -> i32 {
+    let Some(send) = cb().http_request else {
+        log_line(&format!("http: id={id} {method} {url} refused: no shell callback"));
+        return -1;
+    };
+    log_line(&format!(
+        "http: -> id={id} {method} {url} hdr={} body={}",
+        headers.len(),
+        body.len()
+    ));
+    // SAFETY: every pointer below is a borrow that lives until `send` returns, and the length is
+    // the matching `str`/slice length. The shell reads and copies inside the call.
+    unsafe {
+        send(
+            id,
+            method.as_ptr(),
+            method.len(),
+            url.as_ptr(),
+            url.len(),
+            headers.as_ptr(),
+            headers.len(),
+            body.as_ptr(),
+            body.len(),
+        )
+    }
+}
+
+/// Delivers a finished HTTP response to the `reqwest` future that asked for it.
+///
+/// Deliberately safe to call defensively: every buffer is null-checked and length-checked on the way
+/// in, so a shell bug costs a lost response rather than a crash. It is also deliberately *not*
+/// routed through `host::GAME`: that is a `thread_local!` for the UI thread, and this arrives on a
+/// C# thread-pool continuation. The receiving state is a `static Mutex` inside the `reqwest` shim
+/// precisely so the two threads can share it.
+#[no_mangle]
+pub extern "C" fn wp81_http_complete(
+    id: u32,
+    status: u32,
+    url: *const u8,
+    url_len: usize,
+    headers: *const u8,
+    headers_len: usize,
+    body: *const u8,
+    body_len: usize,
+    err: *const u8,
+    err_len: usize,
+) -> i32 {
+    // One `unsafe` block for the whole function - the four raw buffers, nothing else.
+    // SAFETY: `read_bytes` returns an empty `Vec` for a null pointer or a zero length, and copies
+    // exactly `len` bytes otherwise, so no pointer is ever dereferenced beyond what was passed.
+    let (url, headers, body, err) = unsafe {
+        (
+            read_utf8(url, url_len),
+            read_utf8(headers, headers_len),
+            read_bytes(body, body_len),
+            read_utf8(err, err_len),
+        )
+    };
+    if status == 0 {
+        log_line(&format!("http: <- id={id} failed: {err}"));
+        reqwest::http_complete(id, Err(err));
+        return 0;
+    }
+    log_line(&format!(
+        "http: <- id={id} status={status} hdr={} body={}",
+        headers.len(),
+        body.len()
+    ));
+    reqwest::http_complete(
+        id,
+        Ok(reqwest::HttpResponse {
+            status: status as u16,
+            headers,
+            body,
+            final_url: url,
+        }),
+    );
+    0
+}
+
+/// # Safety
+/// `ptr` must be null, or readable for `len` bytes. Null and `len == 0` are legitimate values here
+/// (a bodyless request, a headerless response), not errors.
+unsafe fn read_bytes(ptr: *const u8, len: usize) -> Vec<u8> {
+    if ptr.is_null() || len == 0 {
+        return Vec::new();
+    }
+    std::slice::from_raw_parts(ptr, len).to_vec()
+}
+
+/// Lossy on purpose: a stray byte in a header block must not throw away an otherwise good
+/// response. `from_utf8_lossy` cannot fail, so this cannot panic either.
+///
+/// # Safety
+/// `ptr` must be null, or readable for `len` bytes of UTF-8.
+unsafe fn read_utf8(ptr: *const u8, len: usize) -> String {
+    String::from_utf8_lossy(&read_bytes(ptr, len)).into_owned()
 }
 
 #[inline]
@@ -158,6 +326,144 @@ pub fn log_line(msg: &str) {
         return;
     };
     unsafe { f(msg.as_ptr(), msg.len()) };
+}
+
+// ===========================================================================
+// text input
+//
+// The outbound half of `HostCallbacks::text_input`, and the inbound half
+// `wp81_input_complete`. Same shape as the HTTP bridge: the shell owns the UI, Rust
+// owns the callback, and the two meet at a request id.
+// ===========================================================================
+
+/// The `inputbox` backend that hands the dialog to the shell.
+///
+/// A unit struct on purpose: it carries no state, so it is `Send + Sync` for free, which is what
+/// `prpr::scene::set_input_backend` needs in order to hold it in a `static`.
+struct ShellInput;
+
+impl InputBackend for ShellInput {
+    fn execute_async(
+        &self,
+        input: &InputBox,
+        callback: Box<dyn FnOnce(std::io::Result<Option<String>>) + Send>,
+    ) -> std::io::Result<()> {
+        let req = INPUT_NEXT.fetch_add(1, Ordering::Relaxed);
+        let buf = encode_input_request(input);
+
+        // Registered *before* the shell is called, and the lock is not held while it runs: a shell
+        // with no dialog answers straight away, and that answer arrives through
+        // `wp81_input_complete`, which needs this very lock. Doing it the other way round
+        // deadlocks on the only path that reports a failure.
+        INPUT_CALLBACKS.lock().unwrap().push((req, callback));
+
+        log_line(&format!(
+            "input: -> req={req} mode={} title={} prompt_len={} default_len={}",
+            mode_name(input),
+            input.title.is_some(),
+            input.prompt.as_deref().map_or(0, |s| s.len()),
+            input.default.len(),
+        ));
+
+        let accepted = match cb().text_input {
+            Some(f) => unsafe { f(req, buf.as_ptr(), buf.len()) },
+            None => 1,
+        };
+        if accepted != 0 {
+            take_input_callback(req);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "the shell provided no text input dialog",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The shell's answer, handed back to `inputbox` through the callback stored for `req`.
+///
+/// Never `unsafe` beyond reading `text`: the lock is taken and released around the *removal*, so
+/// the callback itself runs with no lock held and is free to open another dialog - which the login
+/// form does on a failed sign-in.
+#[no_mangle]
+pub extern "C" fn wp81_input_complete(req: u32, text: *const u8, len: usize, ok: i32) {
+    // Cancel carries no text at all. `ok != 0` with an empty buffer is the user clearing the field
+    // and pressing confirm, which is a real answer (`Some("")`) rather than a cancellation - the
+    // distinction `inputbox`'s `Ok(Some(_)` vs `Ok(None)` is built on.
+    let value = if ok == 0 {
+        None
+    } else if text.is_null() || len == 0 {
+        Some(String::new())
+    } else {
+        Some(unsafe { read_utf8(text, len) })
+    };
+
+    let Some(callback) = take_input_callback(req) else {
+        log_line(&format!("input: <- req={req} has no stored callback (late or duplicate)"));
+        return;
+    };
+    log_line(&format!(
+        "input: <- req={req} ok={} len={}",
+        ok != 0,
+        value.as_ref().map_or(0, |s| s.len()),
+    ));
+    callback(match value {
+        Some(text) => Ok(Some(text)),
+        None => Ok(None),
+    });
+}
+
+/// Pending callbacks keyed by request id.
+///
+/// A `static Mutex<Vec<..>>` rather than a `thread_local!`, for the same reason the HTTP response
+/// slots are one: `wp81_input_complete` runs on whichever thread the shell answers on, while
+/// `execute_async` ran on whatever thread called `request_input`.
+///
+/// Each entry is *removed* before its callback runs, so a callback that opens another dialog
+/// cannot deadlock trying to reach this lock.
+static INPUT_CALLBACKS: Mutex<Vec<(u32, Box<dyn FnOnce(std::io::Result<Option<String>>) + Send>)>> =
+    Mutex::new(Vec::new());
+static INPUT_NEXT: AtomicU32 = AtomicU32::new(1);
+
+fn take_input_callback(req: u32) -> Option<Box<dyn FnOnce(std::io::Result<Option<String>>) + Send>> {
+    let mut pending = INPUT_CALLBACKS.lock().unwrap();
+    pending
+        .iter()
+        .position(|(stored, _)| *stored == req)
+        .map(|index| pending.remove(index).1)
+}
+
+/// Packs one dialog request into the record `HostCallbacks::text_input` documents.
+fn encode_input_request(input: &InputBox) -> Vec<u8> {
+    let mode: u32 = match &input.mode {
+        inputbox::InputMode::Text => 0,
+        inputbox::InputMode::Password => 1,
+        inputbox::InputMode::Multiline => 2,
+    };
+    let fields: [&str; 5] = [
+        input.title.as_deref().unwrap_or_default(),
+        input.prompt.as_deref().unwrap_or_default(),
+        &input.default,
+        input.ok_label.as_deref().unwrap_or_default(),
+        input.cancel_label.as_deref().unwrap_or_default(),
+    ];
+
+    let mut buf = Vec::with_capacity(4 + fields.iter().map(|f| 4 + f.len()).sum::<usize>());
+    buf.extend_from_slice(&mode.to_le_bytes());
+    for field in fields {
+        let bytes = field.as_bytes();
+        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(bytes);
+    }
+    buf
+}
+
+fn mode_name(input: &InputBox) -> &'static str {
+    match &input.mode {
+        inputbox::InputMode::Text => "text",
+        inputbox::InputMode::Password => "password",
+        inputbox::InputMode::Multiline => "multiline",
+    }
 }
 
 // ===========================================================================

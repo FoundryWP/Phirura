@@ -251,6 +251,15 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $exports = @(
     "wp81_anchor_port",
     "wp81_install_callbacks",
+    # The return half of the HTTP bridge: `HostCallbacks::http_request` runs Rust -> C#, and this is
+    # C# -> Rust with the finished response. Same reason as every other entry - `#[no_mangle]` does
+    # not export from a staticlib, and a missing line here builds cleanly and then fails every
+    # DllImport at runtime.
+    "wp81_http_complete",
+    # The return half of the text-input bridge: `HostCallbacks::text_input` opens the dialog, this
+    # hands back what the user typed (or `ok = 0` for Cancel). Same rule as the line above - a
+    # missing `/EXPORT:` builds cleanly and then fails every DllImport at runtime.
+    "wp81_input_complete",
     "wp81_parse_pec",
     "wp81_chart_info",
     "wp81_port_version",

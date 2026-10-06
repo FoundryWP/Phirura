@@ -1,4 +1,5 @@
 use super::Ui;
+use crate::ext::rect_shadow;
 use macroquad::prelude::*;
 use miniquad::{BlendFactor, BlendState, BlendValue, Equation};
 use once_cell::sync::Lazy;
@@ -17,9 +18,6 @@ fn alpha_blend_material_params(uniforms: Vec<(String, UniformType)>) -> Material
         textures: Vec::new(),
     }
 }
-
-static SHADOW_MATERIAL: Lazy<Material> =
-    Lazy::new(|| load_material(shader::VERTEX, shader::SHADOW_FRAGMENT, alpha_blend_material_params(ShadowConfig::uniforms())).unwrap());
 
 static RR_MATERIAL: Lazy<Material> = Lazy::new(|| {
     load_material(
@@ -77,19 +75,18 @@ impl ShadowConfig {
 }
 
 pub fn rounded_rect_shadow(ui: &mut Ui, r: Rect, config: &ShadowConfig) {
-    // r.y += elevation * 0.5;
-    let mat = *SHADOW_MATERIAL;
+    // Upstream brackets a WHITE rectangle with `gl_use_material(SHADOW_MATERIAL)` and lets
+    // `SHADOW_FRAGMENT` (below) turn that white into a soft dark halo; `rect`/`elevation`/`radius`/
+    // `base` are uniforms the shader reads. That cannot work on the WP8.1 port: `load_material`
+    // hands back a dummy and `gl_use_material` is a no-op there, so the rectangle's own fill was
+    // what reached the screen - an opaque white slab sitting exactly where the shadow belongs.
+    //
+    // `rect_shadow` writes the same shadow as geometry instead, which needs no shader: black at the
+    // card's own edge fading to fully transparent `elevation * 3` outside it. That is the same
+    // extent the shader version covered (`gr` grown by `r3` on every side), and `base * ui.alpha`
+    // is exactly what `ShadowConfig::apply` used to pass in as the `base` uniform.
     let gr = ui.rect_to_global(r);
-    mat.set_uniform("rect", vec4(gr.x, gr.y, gr.right(), gr.bottom()));
-    ShadowConfig {
-        base: config.base * ui.alpha,
-        ..*config
-    }
-    .apply(&mat);
-    gl_use_material(mat);
-    let r3 = config.elevation * 3.0;
-    draw_rectangle(gr.x - r3, gr.y - r3, gr.w + r3 * 2., gr.h + r3 * 2., WHITE);
-    gl_use_default_material();
+    rect_shadow(gr, config.elevation * 3.0, config.base * ui.alpha);
 }
 
 pub fn clip_rounded_rect<R>(ui: &mut Ui, r: Rect, radius: f32, f: impl FnOnce(&mut Ui) -> R) -> R {
@@ -135,6 +132,9 @@ void main() {
     uv = texcoord;
 }"#;
 
+    /// Not built into a material any more - `rounded_rect_shadow` draws the shadow as geometry
+    /// because this port has no shader support. Kept so the intent stays next to `RR_FRAGMENT`.
+    #[allow(dead_code)]
     pub const SHADOW_FRAGMENT: &str = r#"#version 100
 // Adapted from https://madebyevan.com/shaders/fast-rounded-rectangle-shadows/
 precision highp float;

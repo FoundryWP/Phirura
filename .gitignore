@@ -35,8 +35,37 @@ rust-wp81/shims/miniquad/target/
 rust-wp81/shims/rfd/target/
 rust-wp81/shims/sasa/target/
 
+# --- C# build output and packaging output -----------------------------------
+# MSBuild writes `bin`/`obj` beside every project and VS writes `AppPackages`
+# beside the packaged ones.  All three were committed - 163 files at the phone
+# project alone, 653 MB of `.appx`/`.appxupload` across history - which is why
+# the ignore rule that already existed in `Phirura.WindowsPhone/.gitignore`
+# never appeared to do anything: `.gitignore` has no effect on a file git is
+# already tracking.  They have now been dropped from the index *and* from
+# history; these rules are what keep them out from here on.
+#
+# Written out per project rather than as a `Phirura/**/(bin|obj|AppPackages)`
+# glob so it is obvious which project each line belongs to.  `Phirura.Windows`
+# has no `.gitignore` of its own, so it needs these; the phone project's own
+# file repeats them.
+Phirura/Phirura/Phirura.Windows/bin/
+Phirura/Phirura/Phirura.Windows/obj/
+Phirura/Phirura/Phirura.Windows/AppPackages/
+
+# Object files.  Two `wit-bindgen` `.o` were tracked and 611 `.o` blobs were in
+# history; every one of them a cargo/MSVC intermediate, none of it source.
+*.o
+
+# NOT ignored: `Phirura/packages/Win2D.win81.1.21.0/bin/` is the NuGet package's
+# own payload (Microsoft.Graphics.Canvas.*), not output of this solution.
+# Dropping it would mean an offline build cannot link, so it stays tracked.
+# Same for `rust-wp81/work/library/vendor/*/src/{bin,target}/` - those names are
+# source (`hostcheck.rs`, `addr2line.rs`, `cc`'s `apple.rs`), not output.
+
 # Written by rust-wp81/build-m1.ps1 next to the script.
 *.log
 
 prpr-macroquad/
 prpr-miniquad/
+trash/
+rust-wp81/prot-out/wp81prpr.map

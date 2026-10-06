@@ -967,10 +967,72 @@ namespace Phirura.Game
                     case 4: // Geometry: vertices carry position, uv and colour
                         DrawPortGeometry(ds, frame, c);
                         break;
+
+                    case 5: // Scissor: state rather than a draw - everything after it is clipped
+                        ApplyPortClip(ds, c, pxToDip);
+                        break;
                 }
             }
 
+            // `prpr::ui::scissor` restores whatever was in force before it on the way out of every
+            // region it opens, so this is normally already false. Popping here is what stops a frame
+            // that ever ended mid-clip from carrying that clip into the next one - which would hide
+            // part of the next frame outright rather than merely draw it wrong.
+            if (_portClipActive)
+            {
+                ds.PopAxisAlignedClip();
+                _portClipActive = false;
+            }
+
             ds.Transform = portTransform;
+        }
+
+        /// <summary>Whether a <c>PortKind.Scissor</c> clip is currently pushed on the session.</summary>
+        private bool _portClipActive;
+
+        /// <summary>
+        /// Applies one <c>PortKind.Scissor</c> record: <c>flags</c> 1 to clip, 0 to release.
+        ///
+        /// Two things this has to get right, neither of which is visible when it is wrong - it just
+        /// looks like the list ignores its box, which is the bug this fixes:
+        ///
+        /// * *Units.* The rectangle arrives in Rust pixels and Win2D wants DIPs. The transform is
+        ///   dropped to identity across the push so the px -&gt; DIP scale cannot be applied twice:
+        ///   with the scale installed the clip would be scaled by whatever convention this Win2D
+        ///   build uses on top of the conversion already done here. Identity makes both
+        ///   conventions agree, so the result does not depend on which one it is.
+        /// * *Replace, do not accumulate.* `prpr::ui::scissor` already intersects a nested clip
+        ///   with its parent before emitting it, so pushing a second clip on top of the first would
+        ///   clip twice - and `glScissor` (what this replaces) never stacked in the first place.
+        ///
+        /// An empty rectangle means "clip everything", which is what prpr emits when a region has
+        /// scrolled fully out of view; negatives are clamped because the tuple is a difference of
+        /// two coordinates and an intersection can invert it.
+        /// </summary>
+        private void ApplyPortClip(CanvasDrawingSession ds, PrprPort.PortCmd c, float pxToDip)
+        {
+            if (_portClipActive)
+            {
+                ds.PopAxisAlignedClip();
+                _portClipActive = false;
+            }
+
+            if (c.flags == 0)
+            {
+                return;
+            }
+
+            float w = c.f2 < 0f ? 0f : c.f2;
+            float h = c.f3 < 0f ? 0f : c.f3;
+
+            Matrix3x2 saved = ds.Transform;
+            ds.Transform = Matrix3x2.Identity;
+            ds.PushAxisAlignedClip(
+                new Rect(c.f0 * pxToDip, c.f1 * pxToDip, w * pxToDip, h * pxToDip),
+                CanvasAntialiasing.Aliased);
+            ds.Transform = saved;
+
+            _portClipActive = true;
         }
 
         /// <summary>Rate gate for <see cref="PortFrameStats"/>.</summary>
@@ -1007,7 +1069,7 @@ namespace Phirura.Game
             }
             _portStatsTick = now;
 
-            int nTex = 0, nRect = 0, nLine = 0, nCircle = 0, nGeo = 0;
+            int nTex = 0, nRect = 0, nLine = 0, nCircle = 0, nGeo = 0, nClipOn = 0, nClipOff = 0;
             double minX = double.MaxValue, minY = double.MaxValue;
             double maxX = double.MinValue, maxY = double.MinValue;
             double vx0 = double.MaxValue, vy0 = double.MaxValue;
@@ -1096,6 +1158,14 @@ namespace Phirura.Game
                             nVert += ve - vs;
                         }
                         break;
+
+                    case 5:
+                        // `flags` says whether this opens or closes a clip, so the two counts
+                        // together are the check: a frame that opens more than it closes (or the
+                        // reverse) is a prpr-side imbalance, and a frame with `clipOn=0` while a
+                        // scrollable list is on screen means the scissor never reached here.
+                        if (c.flags != 0) nClipOn++; else nClipOff++;
+                        break;
                 }
             }
 
@@ -1120,6 +1190,7 @@ namespace Phirura.Game
             AppLog.WriteSync("Win2D: port frame n=" + frame.Count
                 + " tex=" + nTex + " rect=" + nRect + " line=" + nLine
                 + " circ=" + nCircle + " geo=" + nGeo
+                + " clipOn=" + nClipOn + " clipOff=" + nClipOff
                 + " particles=" + PrprPort.SpriteQuads()
                 + " pd=" + PrprPort.ParticleDiag(0) + "/" + PrprPort.ParticleDiag(1)
                 + " geoTex=" + nGeoTex + " noCarrier=" + nGeoTexMissing

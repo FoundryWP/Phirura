@@ -24,19 +24,23 @@
 //! miss costs a full cross-compilation round trip - minutes, not seconds, because `-Zbuild-std`
 //! recompiles the standard library for the target. So everything `phira` and `phira-monitor` name
 //! is here: `Client`, `ClientBuilder`, `RequestBuilder`, `Response`, `StatusCode`, `Method`,
-//! `Url`, `header::*` and `redirect::Policy`. The parts that would need a real transport are the
-//! ones that return errors.
+//! `Url`, `header::*` and `redirect::Policy`. Nothing is stubbed out with a "not supported" error:
+//! the surface has to type-check at every call site `phira` reaches, and a missing method there
+//! costs a full cross-compilation round trip rather than a compile error you can read here.
 //!
-//! # What is not implemented, and why not yet
+//! # How the transport works
 //!
-//! [`RequestBuilder::send`] returns an error. Wiring it means adding an `http_request` entry to
-//! `prpr-port`'s `HostCallbacks` and implementing it in C# with `HttpClient` - and that has to be
-//! done as a *threaded* callback, because the futures here are polled from the render loop on the
-//! UI thread, where a synchronous `.Result` on a `HttpClient` call deadlocks. Doing it properly is
-//! a milestone of its own; the UI must not wait for it.
+//! [`RequestBuilder::send`] reserves an id, hands method / URL / header block / body to the shell
+//! through `HostCallbacks::http_request`, and waits for `prpr-port`'s `wp81_http_complete` to
+//! deliver the answer. The round trip is asynchronous end to end: `the_main` starts a tokio
+//! multi-thread runtime before any of this can run, so the future is polled on a worker thread, the
+//! shell answers from a C# thread-pool thread, and no UI thread is ever asked to wait. That is why
+//! the callback does not have to be pushed onto a dispatcher - see [`HttpSender`] and the note on
+//! [`http_complete`].
 //!
-//! Until then `phira` renders normally and network-backed parts of it report failure - which is
-//! also the honest state of the port.
+//! `phira` therefore gets real responses: status, header block and body all arrive, redirects are
+//! followed by the shell's filter, and network-backed paths either work or report an honest
+//! transport error.
 
 #![allow(unused_variables)]
 
@@ -937,17 +941,44 @@ impl RequestBuilder {
         self
     }
 
-    /// The actual transport call - see the crate docs for why this cannot do its job yet.
+    /// The transport call.
+    ///
+    /// Starts the request on first poll, then waits in [`http_state`] until the shell answers.
+    /// Nothing here opens a socket: see the crate docs for why the real `reqwest` cannot be built
+    /// for this target at all, and `prpr-port`'s `wp81_http_complete` for the other half of the
+    /// round trip.
     pub async fn send(self) -> Result<Response> {
         if let Some(err) = self.error {
             return Err(err);
         }
-        let url = self.url?;
-        let url_text = url.as_str().to_owned();
-        Err(Error::transport(format!(
-            "no HTTP transport for {url_text}: `reqwest` is shimmed on this build and the shell's \
-             HTTP callback is not installed yet"
-        )))
+        let mut url = self.url?;
+        // Appended only when there is something to append, so an untouched URL keeps the exact
+        // bytes it was parsed from - including an empty `?`, which some servers do test for.
+        if !self.query.is_empty() {
+            let mut query = url.query_pairs_mut();
+            for (key, value) in &self.query {
+                query.append_pair(key, value);
+            }
+            query.finish();
+        }
+        let url_text = url.to_string();
+        let method = self.method.as_str().to_owned();
+        let headers = encode_header_block(&self.headers);
+        let body = self.body.unwrap_or_default();
+
+        let id = http_begin(&method, &url_text, &headers, &body)?;
+        // Bound before the `match`: a struct literal is not allowed directly in a match scrutinee
+        // (`match X { ... }` parses the braces as the arms).
+        let outcome = HttpFuture { id }.await;
+        match outcome {
+            Ok(response) => Ok(Response::new(
+                StatusCode::from_u16(response.status),
+                decode_header_block(&response.headers),
+                Bytes::from(response.body),
+                Url::parse(&response.final_url).unwrap_or(url),
+            )),
+            Err(message) => Err(Error::transport(message)),
+        }
     }
 }
 
@@ -968,14 +999,190 @@ fn json_scalar_to_string(v: serde_json::Value) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Transport
+// ---------------------------------------------------------------------------
+
+/// Starts one request with the shell. Returns `0` when it was accepted.
+///
+/// The arguments are borrowed for the duration of the call only: `prpr-port` turns them into raw
+/// pointers and hands them to C#, which copies what it needs. The answer arrives later through
+/// [`http_complete`], from a thread this crate does not control.
+///
+/// A plain `fn` rather than a closure because that is what `prpr-port` stores in a `static` - the
+/// same reason `macroquad::set_asset_hook` takes one.
+pub type HttpSender = fn(id: u32, method: &str, url: &str, headers: &str, body: &[u8]) -> i32;
+
+static HTTP_SENDER: std::sync::Mutex<Option<HttpSender>> = std::sync::Mutex::new(None);
+
+/// Installed from `prpr-port`'s `wp81_install_callbacks`, once the shell's callbacks exist.
+pub fn set_http_sender(sender: HttpSender) {
+    *HTTP_SENDER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sender);
+}
+
+/// A finished response exactly as the shell reported it.
+#[doc(hidden)]
+pub struct HttpResponse {
+    pub status: u16,
+    /// The header block: one `name: value` per `\r\n`-separated line.
+    pub headers: String,
+    pub body: Vec<u8>,
+    /// The URL after any redirects the shell followed.
+    pub final_url: String,
+}
+
+/// What the waiting futures wait for, plus ids the shell answered before anything polled them.
+///
+/// A `static Mutex` rather than a `thread_local!`, and that is the single most important line in
+/// this transport: `send` is polled by a tokio worker while `wp81_http_complete` arrives on a C#
+/// thread-pool thread, so the two never share a thread and a thread-local slot would quietly drop
+/// every response. `host::GAME` being thread-local is correct for rendering - it would be fatal
+/// here.
+struct HttpState {
+    next_id: u32,
+    /// Waiters that have not been answered yet, so a late answer can still find them.
+    pending: Vec<(u32, std::task::Waker)>,
+    ready: Vec<(u32, std::result::Result<HttpResponse, String>)>,
+}
+
+static HTTP: std::sync::Mutex<HttpState> = std::sync::Mutex::new(HttpState {
+    next_id: 0,
+    pending: Vec::new(),
+    ready: Vec::new(),
+});
+
+/// Recovers from poisoning instead of unwrapping it: one panic inside a `poll` must not turn every
+/// later request into a panic on a thread where nothing can report it.
+fn http_state() -> std::sync::MutexGuard<'static, HttpState> {
+    HTTP.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Hands a result to the future that asked for it. Callable from any thread.
+#[doc(hidden)]
+pub fn http_complete(id: u32, outcome: std::result::Result<HttpResponse, String>) {
+    let waker = {
+        let mut state = http_state();
+        state.ready.push((id, outcome));
+        let waiter = state
+            .pending
+            .iter()
+            .position(|(known, _)| *known == id);
+        waiter.map(|index| state.pending.swap_remove(index).1)
+    };
+    // Woken outside the lock on purpose: an executor may re-poll inline, and that poll takes this
+    // same mutex.
+    if let Some(waker) = waker {
+        waker.wake();
+    }
+}
+
+/// Reserves an id and hands the request over.
+///
+/// The lock is released before the shell is called. This runs on a tokio worker, but the shell may
+/// answer from a thread-pool thread before the call returns - holding the lock across it would make
+/// that completion thread wait for a guard nobody is going to release.
+fn http_begin(
+    method: &str,
+    url: &str,
+    headers: &str,
+    body: &[u8],
+) -> std::result::Result<u32, Error> {
+    let sender = *HTTP_SENDER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(sender) = sender else {
+        return Err(Error::transport(format!(
+            "no HTTP transport for {url}: the shell's `http_request` callback is not installed"
+        )));
+    };
+    let id = {
+        let mut state = http_state();
+        let id = state.next_id;
+        state.next_id = id.wrapping_add(1);
+        id
+    };
+    match sender(id, method, url, headers, body) {
+        0 => Ok(id),
+        code => Err(Error::transport(format!(
+            "the shell refused the request for {url} (code {code})"
+        ))),
+    }
+}
+
+/// Waits for [`http_begin`]'s id to be answered.
+struct HttpFuture {
+    id: u32,
+}
+
+impl std::future::Future for HttpFuture {
+    type Output = std::result::Result<HttpResponse, String>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut state = http_state();
+        if let Some(slot) = state
+            .ready
+            .iter()
+            .position(|(known, _)| *known == this.id)
+        {
+            return std::task::Poll::Ready(state.ready.swap_remove(slot).1);
+        }
+        match state
+            .pending
+            .iter_mut()
+            .find(|(known, _)| *known == this.id)
+        {
+            Some(waiter) => waiter.1 = cx.waker().clone(),
+            None => state.pending.push((this.id, cx.waker().clone())),
+        }
+        std::task::Poll::Pending
+    }
+}
+
+/// `name: value\r\n` per line - the form the shell splits back apart.
+///
+/// UTF-8 throughout because `HeaderName`, `HeaderValue` and `Url` all are; a UTF-16 hop would cost
+/// a conversion on each side and buy nothing. The shell decides what encoding it marshals to.
+fn encode_header_block(headers: &header::HeaderMap) -> String {
+    let mut block = String::new();
+    for (name, value) in headers {
+        block.push_str(name.as_str());
+        block.push_str(": ");
+        block.push_str(&value.to_string());
+        block.push_str("\r\n");
+    }
+    block
+}
+
+fn decode_header_block(block: &str) -> header::HeaderMap {
+    let mut headers = header::HeaderMap::new();
+    for line in block.split('\n') {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        // Only the first colon separates: a value may legitimately contain more (a timestamp, a
+        // Location URL). Continuation lines never occur because `HttpClient` joins them before the
+        // block is ever built.
+        if let Some((name, value)) = line.split_once(':') {
+            headers.append(name.trim().to_owned(), value.trim().to_owned());
+        }
+    }
+    headers
+}
+
+// ---------------------------------------------------------------------------
 // Response
 // ---------------------------------------------------------------------------
 
 /// A completed response.
 ///
-/// Never constructed yet - every `send` fails first - but fully shaped, because the consumers
-/// (`recv_raw`, `File::fetch`, `fetch_terms`) decode status, headers and body in ways that must
-/// type-check for the crate to build.
+/// Built by `send` from the block the shell hands back, so the consumers (`recv_raw`,
+/// `File::fetch`, `fetch_terms`) see real status, headers and body rather than a placeholder.
 #[derive(Debug)]
 pub struct Response {
     status: StatusCode,

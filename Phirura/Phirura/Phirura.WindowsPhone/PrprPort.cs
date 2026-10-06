@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
+using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 
 namespace Phirura
 {
@@ -346,6 +349,41 @@ namespace Phirura
         private delegate void LogFn(IntPtr msg, IntPtr len);
 
         /// <summary>
+        /// Starts one HTTP request on Rust's behalf. Returns 0 when it was accepted.
+        ///
+        /// The buffers are borrowed for the duration of the call, exactly like <see cref="LogFn"/>:
+        /// this copies what it needs and returns before the request has even been sent. The answer
+        /// travels the other way through <c>wp81_http_complete</c>, from a thread-pool continuation,
+        /// so nothing here can wait and nothing there reads off the stack.
+        ///
+        /// The caller is a tokio worker thread, not the UI thread - which is what makes a plain
+        /// fire-and-forget call correct. It must stay that way: blocking here would stall a runtime
+        /// worker for the length of a round trip, and marshalling onto the dispatcher would only
+        /// trade that for a UI stall.
+        /// </summary>
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int HttpRequestFn(int id, IntPtr method, int methodLen, IntPtr url, int urlLen,
+            IntPtr headers, int headersLen, IntPtr body, int bodyLen);
+
+        /// <summary>
+        /// Asks the shell to show a text-input dialog. Returns 0 when the request was taken.
+        ///
+        /// <c>buf</c> is borrowed for this call only and holds the record documented on
+        /// <c>HostCallbacks::text_input</c> in Rust: a <c>u32</c> mode (0 = text, 1 = password,
+        /// 2 = multiline) followed by five length-prefixed UTF-8 fields - title, prompt, default
+        /// text, ok label, cancel label. The answer travels back through
+        /// <see cref="wp81_input_complete"/>.
+        ///
+        /// Unlike <see cref="HttpRequestFn"/> this one runs on the *UI* thread: phira calls
+        /// <c>request_input</c> from inside its own frame loop, on the thread that is drawing. So it
+        /// must do no more than parse and hand over - showing the dialog synchronously would mean
+        /// blocking a frame on the user, and marshalling to the dispatcher would be pointless
+        /// because we are already there.
+        /// </summary>
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int TextInputFn(uint req, IntPtr buf, int len);
+
+        /// <summary>
         /// Mirrors <c>HostCallbacks</c> in the Rust port.
         ///
         /// Laid out by hand rather than with <c>[MarshalAs]</c> because it is passed by pointer,
@@ -353,9 +391,9 @@ namespace Phirura
         /// natural one for the target. Every field is a function pointer (4 bytes on ARM), which
         /// makes the layout uniform.
         ///
-        /// FIELD ORDER IS THE ABI. <c>log</c> is appended last to match the Rust struct - if
-        /// either side gains a field in the middle, this compiles and then calls the wrong function
-        /// pointer. <see cref="CallbacksLayoutOk"/> is the guard.
+        /// FIELD ORDER IS THE ABI. <c>http_request</c> is appended last to match the Rust struct -
+        /// if either side gains a field in the middle, this compiles and then calls the wrong
+        /// function pointer. <see cref="CallbacksLayoutOk"/> is the guard.
         /// </summary>
         [StructLayout(LayoutKind.Sequential)]
         private struct HostCallbacks
@@ -377,6 +415,8 @@ namespace Phirura
             public IntPtr present;
             public IntPtr load_asset;
             public IntPtr log;
+            public IntPtr http_request;
+            public IntPtr text_input;
         }
 
         /// <summary>
@@ -384,10 +424,44 @@ namespace Phirura
         /// the C# struct cannot be counted at compile time; the point is that a mismatch is caught
         /// by <see cref="CallbacksLayoutOk"/> instead of by a crash inside a Rust callback.
         /// </summary>
-        private const int ExpectedCallbackCount = 17;
+        private const int ExpectedCallbackCount = 19;
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern void wp81_install_callbacks(ref HostCallbacks callbacks);
+
+        /// <summary>
+        /// Delivers a finished response to the future that asked for it. The other direction of the
+        /// same bridge as <see cref="HostCallbacks.http_request"/>.
+        ///
+        /// <c>byte[]</c> rather than a pinned <c>IntPtr</c>: these are blittable, so the marshaller
+        /// passes the address without copying, and there is no handle to free or leak. Lengths are
+        /// <c>int</c> because <c>usize</c> is 4 bytes on ARM - the same choice as
+        /// <see cref="AudioSfxNewFn"/>'s <c>nameLen</c>. A zero-length array is legitimate and
+        /// means "nothing here"; Rust checks the length before the pointer.
+        ///
+        /// <c>status</c> is 0 only for a transport failure, which is what Rust reads as "no
+        /// response"; real HTTP statuses start at 100.
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_http_complete(uint id, uint status,
+            byte[] url, int urlLen,
+            byte[] headers, int headersLen,
+            byte[] body, int bodyLen,
+            byte[] err, int errLen);
+
+        /// <summary>
+        /// Hands the user's answer back to Rust. The other direction of
+        /// <see cref="HostCallbacks.text_input"/>.
+        ///
+        /// <c>byte[]</c> rather than a pinned <c>IntPtr</c> for the same reason as
+        /// <see cref="wp81_http_complete"/>: it is blittable, so the marshaller passes the address
+        /// without copying and there is no handle to free. <c>text</c> is null for Cancel - an empty
+        /// string has to stay distinguishable from it, because "cleared the field and pressed
+        /// confirm" is a real answer and Rust reports it as an empty result rather than as a
+        /// cancellation.
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_input_complete(uint req, byte[] text, int len, int ok);
 
         /// <summary>Decoded audio metadata, matching <c>DecodedAudio</c> in Rust.</summary>
         [StructLayout(LayoutKind.Sequential)]
@@ -421,6 +495,12 @@ namespace Phirura
             Line = 2,
             Circle = 3,
             Geometry = 4,
+
+            /// <summary>
+            /// A clip rectangle, not a draw: <c>flags</c> is 1 while a clip is in force and 0 when
+            /// it is being released, <c>f0..f3</c> are left/top/width/height in Rust pixels.
+            /// </summary>
+            Scissor = 5,
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -1228,6 +1308,8 @@ namespace Phirura
         private static PresentFn _present;
         private static LoadAssetFn _loadAsset;
         private static LogFn _log;
+        private static HttpRequestFn _httpRequest;
+        private static TextInputFn _textInput;
 
         private static bool _installed;
 
@@ -1283,6 +1365,8 @@ namespace Phirura
             _present = OnPresent;
             _loadAsset = OnLoadAsset;
             _log = OnLog;
+            _httpRequest = OnHttpRequest;
+            _textInput = OnTextInput;
 
             HostCallbacks cb = new HostCallbacks();
             cb.audio_decode = Marshal.GetFunctionPointerForDelegate(_audioDecode);
@@ -1302,6 +1386,8 @@ namespace Phirura
             cb.present = Marshal.GetFunctionPointerForDelegate(_present);
             cb.load_asset = Marshal.GetFunctionPointerForDelegate(_loadAsset);
             cb.log = Marshal.GetFunctionPointerForDelegate(_log);
+            cb.http_request = Marshal.GetFunctionPointerForDelegate(_httpRequest);
+            cb.text_input = Marshal.GetFunctionPointerForDelegate(_textInput);
 
             wp81_install_callbacks(ref cb);
             _installed = true;
@@ -1355,6 +1441,33 @@ namespace Phirura
 
         /// <summary>Where the music callbacks go. Set by `GamePage`, cleared when it leaves.</summary>
         public static IMusicSink MusicSink;
+
+        /// <summary>
+        /// Where <see cref="HostCallbacks.text_input"/> requests go.
+        ///
+        /// <see cref="PrprPort"/> stays free of XAML for the same reason it stays free of sockets
+        /// and of <c>MediaElement</c>: it is the table Rust calls into, and the shell owns every
+        /// device and every surface. There is a difference between the two cases though, and it is
+        /// why this is a whole dialog rather than a device like <see cref="IMusicSink"/> - a phone
+        /// does have an audio device to hand over, but WP8.1 exposes *no* system text dialog at
+        /// all: no <c>MessageBox</c> with an input field, no equivalent of Android's editable
+        /// alert. Real phira shows the platform's dialog because the platform has one; here the
+        /// shell has to supply the dialog itself, and that is <c>GamePage</c>, which already runs
+        /// phira's frame loop on the UI thread.
+        ///
+        /// Returning from <c>ShowTextInput</c> does not end the request - the user has not typed
+        /// anything yet. The answer goes back through <see cref="CompleteTextInput"/> whenever the
+        /// dialog closes, which is the same split as the HTTP bridge: fire-and-forget out, an id
+        /// travelling back in.
+        /// </summary>
+        public interface ITextInputSink
+        {
+            void ShowTextInput(uint req, int mode, string title, string prompt,
+                string defaultValue, string okLabel, string cancelLabel);
+        }
+
+        /// <summary>Where text input requests go. Set by `GamePage`, cleared when it leaves.</summary>
+        public static ITextInputSink TextInputSink;
 
         // ===========================================================================
         // the callbacks themselves
@@ -1825,6 +1938,406 @@ namespace Phirura
                 // Diagnostics must never be the fault, and an exception unwinding back into Rust
                 // has no handler to land in.
             }
+        }
+
+        // ------------------------------------------------------------------
+        // HTTP: Rust -> shell -> network -> Rust
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// The client Rust's requests go out on.
+        ///
+        /// Deliberately a second one rather than <c>PhiraApi</c>'s: that client carries the shell's
+        /// own User-Agent / Accept / Accept-Language defaults, while phira's Rust client builds
+        /// those same headers per request. Sharing it would mean sending two of each, and which one
+        /// the server read would be anyone's guess.
+        ///
+        /// Never disposed and never replaced: an <c>HttpClient</c> holds a connection pool, and the
+        /// cheap-looking "create one per request" is what exhausts sockets.
+        /// </summary>
+        private static HttpClient _http;
+
+        private static HttpClient Http
+        {
+            get
+            {
+                if (_http == null)
+                {
+                    HttpClient c = new HttpClient();
+                    c.Timeout = TimeSpan.FromSeconds(45);
+                    _http = c;
+                }
+                return _http;
+            }
+        }
+
+        /// <summary>
+        /// Starts one request on Rust's behalf. Returns 0 when it was accepted.
+        ///
+        /// Copy in, return, answer later. The buffers Rust hands over are borrowed for the duration
+        /// of this call only, and the response travels back through <see cref="wp81_http_complete"/>
+        /// from a thread-pool continuation - so nothing on the caller's stack survives, which is the
+        /// point: the caller is a tokio worker that has to keep running, and blocking here would
+        /// stall the whole runtime for the length of a round trip.
+        /// </summary>
+        private static int OnHttpRequest(int id, IntPtr method, int methodLen, IntPtr url, int urlLen,
+            IntPtr headers, int headersLen, IntPtr body, int bodyLen)
+        {
+            string methodText = null;
+            string urlText = null;
+            try
+            {
+                methodText = ReadUtf8(method, methodLen);
+                urlText = ReadUtf8(url, urlLen);
+                string headerText = ReadUtf8(headers, headersLen);
+                byte[] payload = ReadBuffer(body, bodyLen);
+
+                if (methodText.Length == 0 || urlText.Length == 0)
+                {
+                    AppLog.Write("http: id=" + id + " refused: empty method or url");
+                    return -2;
+                }
+                AppLog.Write("http: -> " + methodText + " " + urlText + " id=" + id
+                    + " hdr=" + headerText.Length + " body=" + payload.Length);
+
+                // Typed as an explicit `Func<Task>` before the call: a bare lambda returning a Task
+                // is convertible to `Action` as well, and letting overload resolution guess between
+                // the two is how the request ends up scheduled as a fire-and-forget void call whose
+                // fault never reaches anyone.
+                Func<Task> send = () => SendHttpAsync(id, methodText, urlText, headerText, payload);
+                Task.Run(send);
+                return 0;
+            }
+            catch (Exception e)
+            {
+                AppLog.Write("http: id=" + id + " refused: " + (methodText ?? "?") + " "
+                    + (urlText ?? "?") + " " + e.Message);
+                return -1;
+            }
+        }
+
+        /// <summary>
+        /// phira asked for a text field: decode the record and hand it to <see cref="TextInputSink"/>.
+        ///
+        /// Runs on the UI thread, because phira calls <c>request_input</c> from inside its own frame
+        /// loop. So there is nothing to marshal and nothing to block on - the only work here is
+        /// decoding, and showing the dialog belongs to the sink because a dialog outlives this call
+        /// while this call has to return a status to Rust first.
+        ///
+        /// Every failure returns a negative code rather than throwing: an exception here unwinds
+        /// back into Rust as an unmanaged fault and takes the process down with no managed message.
+        /// </summary>
+        private static int OnTextInput(uint req, IntPtr buf, int len)
+        {
+            try
+            {
+                if (TextInputSink == null)
+                {
+                    AppLog.Write("input: -> req=" + req + " refused: no text input sink");
+                    return -1;
+                }
+                if (buf == IntPtr.Zero || len < 4)
+                {
+                    AppLog.Write("input: -> req=" + req + " refused: bad record len=" + len);
+                    return -2;
+                }
+
+                byte[] record = ReadBuffer(buf, len);
+                int at = 0;
+                int mode = (int)ReadLeU32(record, ref at);
+                string title = ReadLeString(record, ref at);
+                string prompt = ReadLeString(record, ref at);
+                string defaultValue = ReadLeString(record, ref at);
+                string okLabel = ReadLeString(record, ref at);
+                string cancelLabel = ReadLeString(record, ref at);
+
+                AppLog.Write("input: -> req=" + req + " mode=" + InputModeName(mode)
+                    + " title=" + title + " prompt_len=" + prompt.Length
+                    + " default_len=" + defaultValue.Length);
+
+                TextInputSink.ShowTextInput(req, mode, title, prompt, defaultValue, okLabel, cancelLabel);
+                return 0;
+            }
+            catch (Exception e)
+            {
+                AppLog.Write("input: -> req=" + req + " refused: " + e.Message);
+                return -3;
+            }
+        }
+
+        /// <summary>Little-endian, which is what Rust's <c>to_le_bytes</c> wrote.</summary>
+        private static uint ReadLeU32(byte[] data, ref int at)
+        {
+            if (at + 4 > data.Length)
+            {
+                throw new FormatException("text input record truncated at offset " + at);
+            }
+            uint value = (uint)(data[at] | (data[at + 1] << 8) | (data[at + 2] << 16) | (data[at + 3] << 24));
+            at += 4;
+            return value;
+        }
+
+        /// <summary>
+        /// One length-prefixed UTF-8 field. The length is checked against the buffer before it is
+        /// used, because it is the one number in the record that Rust computed and C# is trusting.
+        /// </summary>
+        private static string ReadLeString(byte[] data, ref int at)
+        {
+            int count = (int)ReadLeU32(data, ref at);
+            if (count < 0 || at + count > data.Length)
+            {
+                throw new FormatException("text input field of " + count + " bytes overruns the record");
+            }
+            string value = System.Text.Encoding.UTF8.GetString(data, at, count);
+            at += count;
+            return value;
+        }
+
+        private static string InputModeName(int mode)
+        {
+            switch (mode)
+            {
+                case 1: return "password";
+                case 2: return "multiline";
+                default: return "text";
+            }
+        }
+
+        /// <summary>
+        /// The shell's answer, back to Rust - called by `GamePage` when the dialog closes.
+        ///
+        /// <paramref name="text"/> is passed as a null array for Cancel, which is what Rust reads as
+        /// "the user dismissed this". An empty string with <paramref name="accepted"/> true stays a
+        /// real answer: clearing a field and confirming is not the same thing as pressing Cancel,
+        /// and `inputbox` reports the two as `Ok(Some(""))` and `Ok(None)`.
+        ///
+        /// The <c>catch</c> cannot name `EntryPointNotFoundException` - that type is not in the
+        /// WP8.1 reference set, so naming it is a compile error - hence the type *name* match,
+        /// which is the same test without the missing type. It is the case that matters here: a
+        /// shell running an older `wp81prpr.dll` would otherwise take the process down the first
+        /// time somebody tapped a text field.
+        /// </summary>
+        public static void CompleteTextInput(uint req, string text, bool accepted)
+        {
+            byte[] bytes = accepted ? System.Text.Encoding.UTF8.GetBytes(text ?? string.Empty) : null;
+            int count = bytes == null ? 0 : bytes.Length;
+            try
+            {
+                int rc = wp81_input_complete(req, bytes, count, accepted ? 1 : 0);
+                AppLog.Write("input: <- req=" + req + " accepted=" + accepted
+                    + " len=" + count + " rc=" + rc);
+            }
+            catch (Exception e)
+            {
+                AppLog.Write("input: <- req=" + req + " failed (" + e.GetType().Name + "): " + e.Message);
+            }
+        }
+
+        /// <summary>
+        /// The request itself, on the pool.
+        ///
+        /// Every failure is funnelled into <paramref name="failure"/> rather than allowed to
+        /// escape: an exception out of an <c>async Task</c> nobody is awaiting is simply lost, and
+        /// the Rust future would then wait forever for an answer that is never coming.
+        /// </summary>
+        private static async Task SendHttpAsync(int id, string method, string url,
+            string headerBlock, byte[] body)
+        {
+            int status = 0;
+            string finalUrl = url;
+            string responseHeaders = "";
+            byte[] payload = null;
+            string failure = null;
+
+            try
+            {
+                var request = new HttpRequestMessage(new HttpMethod(method), new Uri(url));
+                if (body.Length > 0
+                    || method.Equals("POST", StringComparison.OrdinalIgnoreCase)
+                    || method.Equals("PUT", StringComparison.OrdinalIgnoreCase)
+                    || method.Equals("PATCH", StringComparison.OrdinalIgnoreCase))
+                {
+                    // An empty body still needs content to measure, or WinRT/WININET has nothing to
+                    // put a Content-Length on and some servers reject a POST that arrives without
+                    // one.
+                    request.Content = new ByteArrayContent(body);
+                }
+
+                ApplyRequestHeaders(request, headerBlock);
+
+                HttpResponseMessage response = await Http.SendAsync(request);
+                status = (int)response.StatusCode;
+                responseHeaders = BuildHeaderBlock(response);
+                payload = await response.Content.ReadAsByteArrayAsync();
+                if (response.RequestMessage != null && response.RequestMessage.RequestUri != null)
+                {
+                    finalUrl = response.RequestMessage.RequestUri.AbsoluteUri;
+                }
+                AppLog.Write("http: <- id=" + id + " status=" + status + " body=" + payload.Length);
+            }
+            catch (Exception e)
+            {
+                // Cleared as well as reported: if the status had already been read when the body
+                // threw, handing Rust a 200 with no body would read as a successful empty response
+                // instead of as a failure, and `error_for_status` would pass it through.
+                failure = e.Message;
+                status = 0;
+                finalUrl = url;
+                responseHeaders = "";
+                payload = null;
+                AppLog.Write("http: <- id=" + id + " failed: " + failure);
+            }
+
+            try
+            {
+                CompleteHttp(id, status, finalUrl, responseHeaders, payload ?? new byte[0], failure);
+            }
+            catch (Exception e)
+            {
+                AppLog.Write("http: id=" + id + " complete failed: " + e.Message);
+            }
+        }
+
+        /// <summary>
+        /// Routes the header block Rust produced onto the request.
+        ///
+        /// The split is not cosmetic: <c>content-type</c> and <c>content-length</c> belong to the
+        /// content collection, and putting them on the request collection is how a JSON POST ends up
+        /// going out with no Content-Type at all - which comes back as a 415 from the far side and
+        /// looks like a server problem.
+        /// </summary>
+        private static void ApplyRequestHeaders(HttpRequestMessage request, string headerBlock)
+        {
+            if (string.IsNullOrEmpty(headerBlock))
+            {
+                return;
+            }
+            string[] lines = headerBlock.Split('\n');
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string line = lines[i].TrimEnd('\r');
+                if (line.Length == 0)
+                {
+                    continue;
+                }
+                int colon = line.IndexOf(':');
+                if (colon <= 0)
+                {
+                    continue;
+                }
+                string name = line.Substring(0, colon).Trim();
+                string value = line.Substring(colon + 1).Trim();
+
+                bool contentHeader = name.Equals("content-type", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("content-length", StringComparison.OrdinalIgnoreCase);
+                bool added;
+                if (contentHeader && request.Content != null)
+                {
+                    added = request.Content.Headers.TryAddWithoutValidation(name, value);
+                }
+                else if (contentHeader)
+                {
+                    added = false;
+                }
+                else
+                {
+                    added = request.Headers.TryAddWithoutValidation(name, value);
+                }
+                if (!added)
+                {
+                    // Logged rather than swallowed: `authorization` is the one that would hurt, and
+                    // "the token went out" is not otherwise visible from either end.
+                    AppLog.Write("http: header dropped: " + name);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Response headers as <c>name: value</c> lines - the form the Rust side rebuilds a
+        /// <c>HeaderMap</c> from. Repeated headers are joined with ", ", which is what the HTTP
+        /// grammar asks for outside of Set-Cookie, and phira reads no Set-Cookie.
+        /// </summary>
+        private static string BuildHeaderBlock(HttpResponseMessage response)
+        {
+            System.Text.StringBuilder block = new System.Text.StringBuilder();
+            foreach (var pair in response.Headers)
+            {
+                block.Append(pair.Key).Append(": ").Append(JoinHeaderValues(pair.Value)).Append("\r\n");
+            }
+            if (response.Content != null)
+            {
+                foreach (var pair in response.Content.Headers)
+                {
+                    block.Append(pair.Key).Append(": ").Append(JoinHeaderValues(pair.Value)).Append("\r\n");
+                }
+            }
+            return block.ToString();
+        }
+
+        private static string JoinHeaderValues(IEnumerable<string> values)
+        {
+            if (values == null)
+            {
+                return string.Empty;
+            }
+            return string.Join(", ", values);
+        }
+
+        private static void CompleteHttp(int id, int status, string url, string headers,
+            byte[] body, string err)
+        {
+            byte[] urlBytes = ToBytes(url);
+            byte[] headerBytes = ToBytes(headers);
+            byte[] errBytes = ToBytes(err);
+            wp81_http_complete((uint)id, (uint)status,
+                urlBytes, urlBytes.Length,
+                headerBytes, headerBytes.Length,
+                body, body.Length,
+                errBytes, errBytes.Length);
+        }
+
+        private static byte[] ToBytes(string text)
+        {
+            return string.IsNullOrEmpty(text) ? new byte[0] : System.Text.Encoding.UTF8.GetBytes(text);
+        }
+
+        /// <summary>
+        /// Reads a borrowed UTF-8 buffer out of Rust. Null and a non-positive length are
+        /// legitimate - an empty method, an empty header block - so they read as "nothing here"
+        /// rather than as an error.
+        ///
+        /// Capped rather than trusted: a garbage length is the one failure mode here that would
+        /// otherwise allocate megabytes before the copy itself faulted.
+        /// </summary>
+        private static string ReadUtf8(IntPtr ptr, int len)
+        {
+            if (ptr == IntPtr.Zero || len <= 0)
+            {
+                return string.Empty;
+            }
+            if (len > 1048576)
+            {
+                len = 1048576;
+            }
+            byte[] bytes = new byte[len];
+            Marshal.Copy(ptr, bytes, 0, len);
+            return System.Text.Encoding.UTF8.GetString(bytes, 0, len);
+        }
+
+        /// <summary>
+        /// The body, uncapped on purpose: a chart archive or a font legitimately runs to megabytes,
+        /// so the length is taken as given - which it can be, because Rust wrote it from a slice it
+        /// owns.
+        /// </summary>
+        private static byte[] ReadBuffer(IntPtr ptr, int len)
+        {
+            if (ptr == IntPtr.Zero || len <= 0)
+            {
+                return new byte[0];
+            }
+            byte[] bytes = new byte[len];
+            Marshal.Copy(ptr, bytes, 0, len);
+            return bytes;
         }
 
         /// <summary>

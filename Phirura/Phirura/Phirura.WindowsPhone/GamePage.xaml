@@ -156,6 +156,47 @@
             </StackPanel>
         </Grid>
 
+        <!--
+            Native text input.
+
+            phira opens an `inputbox` dialog for every text field it owns - login and password, the
+            search bar, the mp address setting, comment and transfer prompts, the tag editor. Real
+            phira gets the platform's dialog for free; WP8.1 exposes *no* system text dialog at all,
+            so this is the one piece of this page that the shell has to draw itself rather than
+            borrow. It is here for the same reason `MediaElement` is here: the device does not
+            exist on the Rust side.
+
+            An overlay Grid rather than a `Popup`, because it has to sit above the game surface and
+            swallow touches - a Grid with an opaque background does both by being last in z-order,
+            while a Popup lives outside the visual tree and would need its own coordinate space.
+
+            The button labels, the title and the prompt are all overwritten from Rust: `inputbox`
+            localises them (`ttl!`), so hard-coding anything here would fight the labels phira
+            already chose.
+        -->
+        <Grid x:Name="InputOverlay" Background="#F207070B" Visibility="Collapsed">
+            <Border HorizontalAlignment="Center" VerticalAlignment="Center" Width="380"
+                    Background="#FF1B1B24" CornerRadius="6" Padding="18,16,18,12">
+                <StackPanel>
+                    <TextBlock x:Name="InputTitle" Text="" FontSize="20" Foreground="#FFF2F2F6"
+                               TextWrapping="Wrap" />
+                    <TextBlock x:Name="InputPrompt" Text="" FontSize="13" Foreground="#FF9A9AAA"
+                               TextWrapping="Wrap" Margin="0,8,0,0" />
+
+                    <TextBox x:Name="InputField" Margin="0,16,0,0" FontSize="16" />
+                    <PasswordBox x:Name="InputSecretField" Margin="0,16,0,0" FontSize="16"
+                                 Visibility="Collapsed" />
+
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
+                        <Button x:Name="InputCancelButton" Content="Cancel" MinWidth="96"
+                                Click="InputCancel_Click" />
+                        <Button x:Name="InputOkButton" Content="OK" MinWidth="96" Margin="12,0,0,0"
+                                Click="InputOk_Click" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+
         <!-- Loading overlay -->
         <Grid x:Name="LoadingOverlay" Background="#FF07070B">
             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">

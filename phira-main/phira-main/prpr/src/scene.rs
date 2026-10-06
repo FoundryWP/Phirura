@@ -156,6 +156,24 @@ pub static INPUT_CANCELLED: Mutex<Option<String>> = Mutex::new(None);
 #[cfg(not(target_arch = "wasm32"))]
 pub static CHOSEN_FILE: Mutex<(Option<String>, Option<String>)> = Mutex::new((None, None));
 
+/// The backend `request_input` opens its dialog through, when the port has installed one.
+///
+/// `inputbox::backend::default_backend()` decides by *spawning a program*: `yad` if it is on
+/// `PATH`, otherwise a PowerShell script on Windows. WP8.1 has neither `yad` nor `powershell.exe`,
+/// so every `request_input` in phira - the login and password fields, the search box, the mp
+/// address setting, the comment/transfer prompts, the tag editor - would fail inside `spawn` and
+/// the user would simply never see a dialog. This is the same shape as the other port hooks: a
+/// `static` the port fills in at startup, and the platform default when it has not.
+static PORT_INPUT_BACKEND: Mutex<Option<Arc<dyn Backend + Send + Sync>>> = Mutex::new(None);
+
+/// Installs the backend [`request_input`] will use from now on.
+///
+/// `Send + Sync` because the dialog outlives the call that opened it - the result arrives on
+/// whatever thread the shell answers on - and because this `static` is shared between them.
+pub fn set_input_backend(backend: Arc<dyn Backend + Send + Sync>) {
+    *PORT_INPUT_BACKEND.lock().unwrap() = Some(backend);
+}
+
 fn show_inputbox(config: InputBox, backend: &dyn Backend) {
     let result = config.show_with_async(backend, |result| match result {
         Ok(Some(text)) => {
@@ -192,7 +210,42 @@ pub fn request_input(id: impl Into<String>, mut config: InputBox) {
     if config.ok_label.is_none() {
         config = config.ok_label(ttl!("confirm"));
     }
-    show_inputbox(config, &*default_backend());
+    // `&*` rather than `&`: a `&Box<dyn Backend>` only unsize-casts to `&dyn Backend` if
+    // `Box<dyn Backend>` itself implements `Backend`, which it does not - so the deref has to be
+    // spelled out for the coercion to find it.
+    show_inputbox(config, &*input_backend());
+}
+
+/// The backend for one `request_input`.
+///
+/// The port's is taken out of the lock and the lock released *before* `show_inputbox` runs,
+/// because our backend can complete synchronously - a shell with no dialog answers immediately -
+/// and that completion re-enters this module through `INPUT_TEXT`. Holding the lock across the
+/// call would deadlock on exactly the path that matters.
+///
+/// The platform default stays a separate arm rather than being wrapped into the same type: it is a
+/// `Box<dyn Backend>` with no auto-traits, so it cannot be turned into `dyn Backend + Send + Sync`
+/// without an `unsafe impl` this code does not need. Both arms hand `show_inputbox` a `&dyn
+/// Backend`, which is all it asks for.
+fn input_backend() -> Box<dyn Backend> {
+    match PORT_INPUT_BACKEND.lock().unwrap().clone() {
+        Some(backend) => Box::new(SharedInputBackend(backend)),
+        None => default_backend(),
+    }
+}
+
+/// Re-boxes the installed `Arc<dyn Backend + Send + Sync>` so both arms of `input_backend` have
+/// one type. `Send + Sync` is what lets the `Arc` live in a `static` in the first place.
+struct SharedInputBackend(Arc<dyn Backend + Send + Sync>);
+
+impl Backend for SharedInputBackend {
+    fn execute_async(
+        &self,
+        input: &InputBox,
+        callback: Box<dyn FnOnce(std::io::Result<Option<String>>) + Send>,
+    ) -> std::io::Result<()> {
+        self.0.execute_async(input, callback)
+    }
 }
 
 pub fn take_input() -> Option<(String, String)> {

@@ -724,6 +724,11 @@ namespace Phirura
                 // The other half of the same wiring. Without it `sfx_new`/`sfx_play` only logged, so
                 // every sound phira asked for - the note hits above all - was silent by construction.
                 PrprPort.SfxSink = this;
+                // Text input goes the same way: phira's `request_input` lands in
+                // `HostCallbacks.text_input`, which hands the request here. Installed alongside
+                // the other two because a login or search prompt can be opened the instant
+                // `MainScene` is up - which is while `PhiraBoot` still holds the thread.
+                PrprPort.TextInputSink = this;
 
                 StartRustEngine();
                 if (!_rustCreated)
