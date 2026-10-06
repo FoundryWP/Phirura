@@ -1188,12 +1188,15 @@ namespace Phirura
             // the next press of the same id overwrites it before it can be read.
             if (UseRustEngine)
             {
-                // `_clock` is null in phira mode, where the timeline is `_phiraTime` instead. The
-                // stamp has to happen either way: `PushRustTouches` falls back to the *frame's*
-                // time when it finds no entry, which is up to a frame late, and `prpr` ages the
-                // touch from the stamp - so phira would judge every press one frame late while the
-                // chart path judged it on time.
-                _rustPressTime[id] = (_clock != null) ? _clock.Now : _phiraTime;
+                // Stamped from the *engine's* judgement clock, not the music clock or `_phiraTime`.
+                // `prpr::judge` ages a touch with `t - (uptime - it.time) * speed`, where `uptime`
+                // is the value `wp81_game_time` returns - the engine's own `CLOCK`, which
+                // accumulates `dt` per frame. `_phiraTime` accumulates a separately measured `dt`
+                // and the music clock is absolute; both drift from `CLOCK`, and the judge uses
+                // only the *difference*, so either stamp reads as a judgement error that grows
+                // with play time. A hold lives long enough for that error to reach its stored
+                // `time`, which is why holds never registered while taps looked merely flaky.
+                _rustPressTime[id] = PrprPort.GameTime();
             }
             try
             {
@@ -1562,6 +1565,12 @@ namespace Phirura
         /// </summary>
         private void PushRustTouches(double t)
         {
+            // The frame's engine time, sampled once. `prpr::judge` reads its `uptime` from the
+            // engine clock and compares it against these stamps, so the two must come from the
+            // same timeline: `t` is the shell's own (music clock or `_phiraTime`), which drifts
+            // from the engine's `CLOCK` - and the judge uses only the *difference*, so any gap
+            // is a judgement error, not a cosmetic one.
+            double engineTime = PrprPort.GameTime();
             // Every finger still down gets an event this frame, not only the ones that moved:
             // `prpr` takes the touch *state* from `touches()` and the *events* from its own queue,
             // and a frame with no event for a finger reads as "nothing is holding that note".
@@ -1592,7 +1601,7 @@ namespace Phirura
                         touch.Phase = TouchPhase.Stationary;
                     }
                 }
-                double time = t;
+                double time = engineTime;
                 // Pre-declared: the project compiles as C# 5, which has no inline `out` declarations.
                 double pressed;
                 if (touch.Phase == TouchPhase.Started

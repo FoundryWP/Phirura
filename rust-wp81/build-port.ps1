@@ -302,6 +302,7 @@ $exports = @(
     # create that takes the process down leaves nothing to read afterwards.
     "wp81_game_progress",
     "wp81_game_set_time",
+    "wp81_game_time",
     "wp81_game_touch",
     # Read in the turn after a failed create. `tracing` has no subscriber on the phone, so this is
     # the only place the reason for `-1`/`-2`/`-100` survives at all.

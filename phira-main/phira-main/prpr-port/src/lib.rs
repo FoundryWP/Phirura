@@ -1413,6 +1413,19 @@ pub extern "C" fn wp81_game_touch(id: u32, phase: u32, x: f32, y: f32, time: f64
     };
     macroquad::input::push_touch(id as u64, phase, x, y, time)
 }
+/// The engine's judgement clock, for stamping touches.
+///
+/// `prpr::judge` ages a touch with `t - (uptime - it.time) * speed`, where `uptime` is exactly
+/// this value and `t` derives from the same clock. The shell must stamp every touch with a time
+/// sampled from *this* timeline - its own `_phiraTime` or music clock drifts from the engine's
+/// `CLOCK` (one accumulates `dt`, the other is absolute), and `prpr` uses only the difference,
+/// so a foreign stamp reads as a judgement error that grows with every second of play. That is
+/// the mechanism behind "hold notes never register": the hold's stored `time` ages wrong the
+/// moment the two clocks disagree by a frame.
+#[no_mangle]
+pub extern "C" fn wp81_game_time() -> f64 {
+    macroquad::miniquad::uptime_secs()
+}
 
 /// Decode a NUL-terminated UTF-16 string from the shell.
 ///

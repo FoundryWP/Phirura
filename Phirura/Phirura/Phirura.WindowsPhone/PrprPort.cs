@@ -288,6 +288,16 @@ namespace Phirura
         /// </summary>
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern void wp81_game_set_time(double t);
+        /// <summary>
+        /// The engine's judgement clock - the value <c>prpr::judge</c> uses as
+        /// <c>uptime</c> in <c>t - (uptime - touch.time) * speed</c>. Touches must be stamped
+        /// from this, not from the music clock or <c>_phiraTime</c>: those drift from the
+        /// engine's <c>CLOCK</c> (one is absolute, the other accumulates <c>dt</c>), and the
+        /// judge uses only the difference, so a foreign stamp is a judgement error that grows
+        /// with play time. That drift is what made hold notes impossible to register.
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern double wp81_game_time();
 
         // --- the Rust -> C# direction -------------------------------------
 
@@ -860,6 +870,13 @@ namespace Phirura
         public static int GameTouch(uint id, uint phase, float x, float y, double time)
         {
             return wp81_game_touch(id, phase, x, y, time);
+        }
+        /// <summary>
+        /// The engine's judgement clock, for stamping touches. See <c>wp81_game_time</c>.
+        /// </summary>
+        public static double GameTime()
+        {
+            return wp81_game_time();
         }
 
         /// <summary>
