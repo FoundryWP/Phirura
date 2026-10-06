@@ -3427,8 +3427,17 @@ pub mod judge_diag {
     /// `res.time * 1000`, the chart clock the window is measured against.
     static CHART_TIME: AtomicU32 = AtomicU32::new(0);
 
-    pub fn note_update(events: usize) {
+    /// Counted as the *first* statement of `Judge::update`, ahead of the autoplay early return.
+    ///
+    /// Deliberately separated from `note_events`: if this is non-zero while every other field is
+    /// zero, the judge ran and chose to ignore the player (autoplay, or a gate in front of it),
+    /// which is a different bug from "the judge never got called" - and the only way to tell them
+    /// apart is to count entry before anything can return.
+    pub fn note_enter() {
         UPDATE.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn note_events(events: usize) {
         EVENTS.fetch_add(events as u32, Ordering::Relaxed);
     }
 

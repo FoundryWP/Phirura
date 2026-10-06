@@ -362,11 +362,20 @@ pub fn create(folder: &str, chart_name: &str) -> i32 {
 
         step(progress::INFO_READY);
 
-        // Autoplay by default. The judge needs a music clock it can trust, and the shell has not
-        // wired its audio position back yet - autoplay is what lets the scene run and render
-        // without one, which is the whole point of this milestone.
-        let mut config = Config::default();
-        config.mods.insert(Mods::AUTOPLAY);
+        // No autoplay here, and it must stay that way.
+        //
+        // This line used to force `Mods::AUTOPLAY`, on the grounds that the shell had not wired
+        // its audio position back yet. Two problems with that: the clock is wired now (the shell
+        // drives `TimeManager` off `host::CLOCK`, and the frame line prints `music=<state>`), and
+        // autoplay is not a cosmetic default - `Judge::update` returns on its very first line when
+        // it is set (`judge.rs:413`), so *nothing* the player presses is ever read. A chart you
+        // cannot hit is not a chart you can practise on, which is the only thing this build is for.
+        //
+        // `GameMode::Normal` does not add it back: `GameScene::new` only touches mods for
+        // `TweakOffset` (adds) and `Exercise` (removes), and phira's own song page passes
+        // `Mods::default()`.
+        // `Mods::default()` is already empty, so there is nothing to clear.
+        let config = Config::default();
 
         // The scene wants background + illustration textures. The shell owns the real art; a 1x1
         // black handle is enough here because all `prpr` does with it is measure and tint.

@@ -410,6 +410,9 @@ impl Judge {
     }
 
     pub fn update(&mut self, res: &mut Resource, chart: &mut Chart, bad_notes: &mut Vec<BadNote>) {
+        // Before the autoplay return, so a run of `ju>0` with everything else at zero means the
+        // judge is running and declining to read the player - not that nobody called it.
+        macroquad::judge_diag::note_enter();
         if res.config.autoplay() {
             self.auto_play_update(res, chart);
             return;
@@ -476,7 +479,7 @@ impl Judge {
             fn to_local(Vec2 { x, y }: Vec2) -> Point {
                 Point::new(x / screen_width() * 2. - 1., y / screen_height() * 2. - 1.)
             }
-            macroquad::judge_diag::note_update(events.len());
+            macroquad::judge_diag::note_events(events.len());
             let delta = (t / spd - self.last_time) / (events.len() + 1) as f64;
             let mut t = self.last_time;
             for Touch {
