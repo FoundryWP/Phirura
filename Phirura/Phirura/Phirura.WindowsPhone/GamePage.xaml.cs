@@ -1235,8 +1235,21 @@ namespace Phirura
             TouchInput cur;
             if (_active.TryGetValue(id, out cur))
             {
-                cur.Phase = TouchPhase.Cancelled;
-                _active[id] = cur;
+                // WP8.1 raises this for **every** pointer captured by `CapturePointer`, and it
+                // raises it *after* `PointerReleased` - so it was overwriting a correct `Ended`
+                // with `Cancelled` on the way to `PushRustTouches`, on every single touch. The
+                // Rust phase census proved it: `e0` in every sampled window while `c` carried all
+                // 97 presses, and there is nowhere else in this file that writes `Cancelled`.
+                //
+                // That is the whole "button draws its pressed look and never clicks" report. A UI
+                // button completes on `Ended`; `Cancelled` means "aborted, ignore" - and held
+                // drags, which never end, were unaffected. Only a finger still down may be
+                // cancelled; one that already ended must keep its `Ended`.
+                if (cur.Phase != TouchPhase.Ended && cur.Phase != TouchPhase.Cancelled)
+                {
+                    cur.Phase = TouchPhase.Cancelled;
+                    _active[id] = cur;
+                }
                 _toRemove.Add(id);
             }
         }
