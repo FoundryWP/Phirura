@@ -234,7 +234,12 @@ impl Data {
                 continue;
             };
             crate::log_line(&format!("Data::init: load_info {filename}"));
+            // Bracketed because the boot parks somewhere in here and `load_info` itself is a chain
+            // of `FileSystem::load_file` awaits. Whether the "returned" line appears separates "this
+            // call never comes back" from "it came back and something after it stopped".
+            crate::log_line("Data::init: load_info -> entering prpr::fs::load_info");
             let result = prpr::fs::load_info(fs.deref_mut()).await;
+            crate::log_line("Data::init: load_info -> returned from prpr::fs::load_info");
             match result {
                 Ok(info) => {
                     crate::log_line(&format!("Data::init: load_info ok for {filename}"));

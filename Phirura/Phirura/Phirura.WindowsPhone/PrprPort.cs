@@ -1812,7 +1812,13 @@ namespace Phirura
                 }
                 byte[] bytes = new byte[n];
                 Marshal.Copy(msg, bytes, 0, n);
-                AppLog.WriteSync("rust: " + System.Text.Encoding.UTF8.GetString(bytes, 0, n));
+                // `Write`, not `WriteSync`. This runs on the render thread (Rust calls it from
+                // `wp81_game_frame`), and `WriteSync` waits up to 500 ms for the disk flush - so the
+                // periodic Rust lines were stalling the frame loop once a second, which is a large
+                // part of "it freezes very easily". `Write` queues the line and returns; the only
+                // thing given up is that the very last line may be lost if the process dies, which
+                // is already true of every other line in this file.
+                AppLog.Write("rust: " + System.Text.Encoding.UTF8.GetString(bytes, 0, n));
             }
             catch (Exception)
             {

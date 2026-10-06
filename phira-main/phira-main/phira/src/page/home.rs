@@ -410,6 +410,17 @@ impl Page for HomePage {
         }
         let t = s.t;
         let rt = s.rt;
+        // Parked for the shell's log: this page's buttons are all behind the gate below, and the
+        // gate depends on `rt`, so these two numbers decide whether the page can be pressed at all.
+        // The third and fourth are the touch position *as `prpr::ui` sees it* - the rects a button
+        // hit-tests against are in this same space, so comparing it with where the finger actually
+        // landed is what says whether the two agree.
+        macroquad::dbg::set4(
+            rt,
+            self.char_screen_p.now(rt),
+            touch.position.x,
+            touch.position.y,
+        );
         if self.login.touch(touch, s.t) {
             return Ok(true);
         }

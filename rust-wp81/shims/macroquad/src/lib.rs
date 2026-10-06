@@ -626,24 +626,15 @@ impl QuadGl {
 
     /// The projection `prpr::ui` composes its transforms against.
     ///
-    /// Was `Mat4::IDENTITY`, and that is the one value that cannot be right. `prpr::ui` derives its
-    /// **hit-test rectangles** from this matrix while the shell draws the same geometry through its
-    /// own camera, so an identity here puts the rectangles in a different space from the pixels the
-    /// touches arrive in: everything still *looks* correctly placed, and no button ever hits. That is
-    /// exactly "the button shows its pressed look and never fires", and why drag notes (judged from
-    /// the raw touch list, no rectangle involved) worked while every UI button was dead.
-    ///
-    /// Upstream macroquad returns the camera's projection; on this platform the camera *is* the
-    /// screen, so it is the y-down pixel -> NDC ortho that `touch_transform` already assumes.
+    /// **Left as the identity deliberately.** It was briefly changed to the screen's ortho on the
+    /// theory that the UI's hit-test rectangles were in a different space from the touches; the
+    /// device said otherwise twice over - the buttons did not come alive *and* the layout did not
+    /// move, so `prpr::ui` does not derive its layout from this at all. It was then reverted after
+    /// the boot started failing at stage 6 (`phira never reached its first frame`), because this is
+    /// the only change in that build that the home page's construction could plausibly depend on.
+    /// **Do not "correct" this again without a device test that shows it is the cause.**
     pub fn get_projection_matrix(&self) -> Mat4 {
-        let w = crate::window::screen_width();
-        let h = crate::window::screen_height();
-        if w <= 0.0 || h <= 0.0 {
-            // Nothing has reported a size yet. Identity is no worse than a guess here and keeps the
-            // function total, which matters because it is called every frame.
-            return Mat4::IDENTITY;
-        }
-        Mat4::orthographic_rh(0.0, w, h, 0.0, -1.0, 1.0)
+        Mat4::IDENTITY
     }
 
     /// Sets a shader uniform. The value is dropped: the C# renderer owns pipelines, and prpr's
@@ -1130,6 +1121,16 @@ pub mod input {
     /// `get_touches()` reads, which is every button in the scene and the whole `Ui`. Supplying
     /// only one of the two gives the characteristic half-working input: notes judge but nothing
     /// on screen can be pressed, or the reverse.
+    /// The frame's touch queue.
+    ///
+    /// **`thread_local!`, and it has to stay that way.** It was briefly changed to
+    /// `std::sync::Mutex<Vec<Touch>>` on the theory that the shell pushes on a different thread from
+    /// the one running the replay. That theory is not confirmed, and the change **broke the boot** -
+    /// `phira boot -> -2, never reached its first frame` - which is the signature of a primitive the
+    /// device will not give this DLL: `std::sync::Mutex` needs OS synchronisation this target does
+    /// not provide, the same class of failure as `std::thread` aborting with `0xC0000409`. Reverted
+    /// to the last configuration that booted. **Do not reintroduce a lock here without a device test
+    /// that shows the boot still reaches its first frame.**
     thread_local! {
         static PENDING: std::cell::RefCell<Vec<Touch>> = std::cell::RefCell::new(Vec::new());
     }
@@ -1154,6 +1155,9 @@ pub mod input {
     ///
     /// `time` is uptime, not wall time - see `wp81_game_touch`.
     pub fn push_touch(id: u64, phase: TouchPhase, x: f32, y: f32, time: f64) -> i32 {
+        LAST_PUSH[0].store(x.to_bits(), core::sync::atomic::Ordering::Relaxed);
+        LAST_PUSH[1].store(y.to_bits(), core::sync::atomic::Ordering::Relaxed);
+        PUSH_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         PENDING.with(|q| {
             let mut q = q.borrow_mut();
             if q.len() >= TOUCH_CAP {
@@ -1165,6 +1169,7 @@ pub mod input {
                 position: Vec2::new(x, y),
                 time,
             });
+            note_phase_pushed(phase);
             0
         })
     }
@@ -1200,6 +1205,26 @@ pub mod input {
         PENDING.with(|q| q.borrow().len())
     }
 
+    /// The last position `push_touch` was handed, and how many pushes there have been.
+    ///
+    /// This is the value the shell sent, *before* anything transforms it - so comparing it with what
+    /// `prpr::ui` ends up seeing separates "the shell sends garbage" from "`touch_transform` destroys
+    /// it". The device showed the UI receiving exactly `(0, 0)`, which an integer print of NaN also
+    /// produces, and `touch_transform` divides by the viewport (`judge.rs:382`) - so the question is
+    /// whether the position was ever good.
+    static LAST_PUSH: [core::sync::atomic::AtomicU32; 2] =
+        [core::sync::atomic::AtomicU32::new(0), core::sync::atomic::AtomicU32::new(0)];
+    static PUSH_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+    /// `(x, y, count)` as received at the FFI boundary.
+    pub fn last_push() -> (f32, f32, u32) {
+        (
+            f32::from_bits(LAST_PUSH[0].load(core::sync::atomic::Ordering::Relaxed)),
+            f32::from_bits(LAST_PUSH[1].load(core::sync::atomic::Ordering::Relaxed)),
+            PUSH_COUNT.load(core::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
     /// Events handed to a handler by `repeat_all_miniquad_input` since start.
     pub fn replayed_count() -> usize {
         REPLAYED.load(core::sync::atomic::Ordering::Relaxed)
@@ -1207,6 +1232,68 @@ pub mod input {
 
     pub(crate) fn note_replay() {
         REPLAYED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Phase census in `TouchPhase` declaration order: Started, Stationary, Moved, Ended,
+    /// Cancelled.
+    ///
+    /// Two of them, because the two ends of the queue answer different questions and only the
+    /// pair splits the "button is dead" bug in half. `ph` is what the shell pushed at the FFI
+    /// boundary, `rph` what `repeat_all_miniquad_input` handed `prpr::judge`'s `Handler`. An
+    /// `e=0` on the first says the shell never sent an Ended; `e` present there but missing on
+    /// the second says the replay ate it; both present moves the fault past the queue entirely,
+    /// into `Main`/`Ui` dispatch - which is where a button that answers its press but never
+    /// fires would have to live.
+    ///
+    /// Both are **windowed**: reading zeros them, so the printed number means "of that phase in
+    /// the last second" and one tap is visible instead of drowned in a total that only grows.
+    /// Not thread-local, like `REPLAYED` - the replay runs on the game thread and the shell reads
+    /// from the same one.
+    static PHASE_PUSHED: [core::sync::atomic::AtomicU32; 5] = [
+        core::sync::atomic::AtomicU32::new(0),
+        core::sync::atomic::AtomicU32::new(0),
+        core::sync::atomic::AtomicU32::new(0),
+        core::sync::atomic::AtomicU32::new(0),
+        core::sync::atomic::AtomicU32::new(0),
+    ];
+    static PHASE_REPLAYED: [core::sync::atomic::AtomicU32; 5] = [
+        core::sync::atomic::AtomicU32::new(0),
+        core::sync::atomic::AtomicU32::new(0),
+        core::sync::atomic::AtomicU32::new(0),
+        core::sync::atomic::AtomicU32::new(0),
+        core::sync::atomic::AtomicU32::new(0),
+    ];
+
+    fn phase_slot(p: TouchPhase) -> usize {
+        match p {
+            TouchPhase::Started => 0,
+            TouchPhase::Stationary => 1,
+            TouchPhase::Moved => 2,
+            TouchPhase::Ended => 3,
+            TouchPhase::Cancelled => 4,
+        }
+    }
+
+    /// Counted only once the event is actually in the queue: a push rejected by `TOUCH_CAP`
+    /// never reaches a handler, and counting it would report a loss as if it had happened.
+    pub(crate) fn note_phase_pushed(p: TouchPhase) {
+        PHASE_PUSHED[phase_slot(p)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn note_phase_replayed(p: TouchPhase) {
+        PHASE_REPLAYED[phase_slot(p)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Both censuses, read and cleared. One writer and one reader on one thread, so the reset
+    /// cannot lose a count.
+    pub fn phase_counts() -> ([u32; 5], [u32; 5]) {
+        let mut pushed = [0u32; 5];
+        let mut replayed = [0u32; 5];
+        for i in 0..5 {
+            pushed[i] = PHASE_PUSHED[i].swap(0, core::sync::atomic::Ordering::Relaxed);
+            replayed[i] = PHASE_REPLAYED[i].swap(0, core::sync::atomic::Ordering::Relaxed);
+        }
+        (pushed, replayed)
     }
 
     /// macroquad's name for the same list.
@@ -3029,6 +3116,7 @@ pub mod utils {
         let mut ctx = crate::miniquad::Context;
         crate::input::for_each_pending(|t| {
             crate::input::note_replay();
+            crate::input::note_phase_replayed(t.phase);
             handler.touch_event(&mut ctx, t.phase, t.id, t.position.x, t.position.y, t.time);
         });
     }
@@ -3039,6 +3127,49 @@ pub mod color {
         Color, BEIGE, BLACK, BLANK, BLUE, BROWN, DARKGRAY, DARKGREEN, DARKPURPLE, GOLD, GRAY,
         GREEN, LIGHTGRAY, LIME, MAROON, ORANGE, PINK, PURPLE, RED, SKYBLUE, VIOLET, WHITE, YELLOW,
     };
+}
+
+/// A two-slot channel for values that only the game crate can see.
+///
+/// `phira` has no way to write to the shell's log: `prpr_port` depends on it, not the other way
+/// round, and `tracing` has no subscriber on this target. But `phira` *does* depend on macroquad, so
+/// a pair of floats parked here can be picked up by the frame entry point and printed. Two is enough
+/// for "the value being tested" and "the threshold it is tested against", which is the shape almost
+/// every UI gate in this codebase has.
+pub mod dbg {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    static A: AtomicU32 = AtomicU32::new(0);
+    static B: AtomicU32 = AtomicU32::new(0);
+    static C: AtomicU32 = AtomicU32::new(0);
+    static D: AtomicU32 = AtomicU32::new(0);
+
+    pub fn set(a: f32, b: f32) {
+        set4(a, b, 0.0, 0.0);
+    }
+
+    pub fn set4(a: f32, b: f32, c: f32, d: f32) {
+        A.store(a.to_bits(), Ordering::Relaxed);
+        B.store(b.to_bits(), Ordering::Relaxed);
+        C.store(c.to_bits(), Ordering::Relaxed);
+        D.store(d.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn get() -> (f32, f32) {
+        (
+            f32::from_bits(A.load(Ordering::Relaxed)),
+            f32::from_bits(B.load(Ordering::Relaxed)),
+        )
+    }
+
+    pub fn get4() -> (f32, f32, f32, f32) {
+        (
+            f32::from_bits(A.load(Ordering::Relaxed)),
+            f32::from_bits(B.load(Ordering::Relaxed)),
+            f32::from_bits(C.load(Ordering::Relaxed)),
+            f32::from_bits(D.load(Ordering::Relaxed)),
+        )
+    }
 }
 
 pub mod texture {

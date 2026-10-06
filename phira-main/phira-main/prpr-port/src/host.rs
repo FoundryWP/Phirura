@@ -527,11 +527,13 @@ pub fn boot_phira(data_dir: Option<String>, auto_open: Option<String>, auto_play
         phira::boot();
         crate::log_line("phira: window stored, polling the_main");
 
+        let mut polls = 0u32;
         for i in 0..BOOT_POLLS {
             if macroquad::app::reached_first_frame() {
                 return Ok(());
             }
             let poll = macroquad::app::poll();
+            polls = i + 1;
             if i == 0 {
                 // Whether the *first* poll returned Pending or Ready is the whole difference
                 // between "construction is running across many frames" and "it finished or died
@@ -551,7 +553,7 @@ pub fn boot_phira(data_dir: Option<String>, auto_open: Option<String>, auto_play
             }
         }
         Err(format!(
-            "phira never reached its first frame (reached={}, exited={})",
+            "phira never reached its first frame after {polls} polls (reached={}, exited={})",
             macroquad::app::reached_first_frame(),
             macroquad::app::has_exited()
         ))

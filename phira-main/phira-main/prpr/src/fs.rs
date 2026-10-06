@@ -96,12 +96,25 @@ impl FileSystem for ExternalFileSystem {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let mut file = self.0.open(path)?;
-            tokio::task::spawn_blocking(move || {
-                let mut res = Vec::new();
-                file.read_to_end(&mut res)?;
-                Ok(res)
-            })
-            .await?
+            // Read inline rather than through `tokio::task::spawn_blocking`.
+            //
+            // `spawn_blocking` hands the closure to the runtime's **blocking pool**, which creates
+            // threads on demand - and this target will not give this DLL working threads (`std::thread`
+            // aborts with `0xC0000409` here). When a blocking thread cannot be created the task is
+            // never run and the await **never resolves**. That is what parked the boot:
+            //
+            //     rust: Data::init: load_info -> entering prpr::fs::load_info
+            //     rust: phira: poll 0 -> Pending (parked, booting)      <- never returns
+            //     rust: phira: boot_phira -> -2: ... after 64 polls
+            //
+            // and it is also why the chart cover never loaded - same function, same read. It is
+            // intermittent because it depends on whether a blocking thread happens to get created.
+            //
+            // The file is local and there is no async I/O to preserve here, so reading it inline is
+            // both correct and cheaper: one fewer thread hop per asset.
+            let mut res = Vec::new();
+            file.read_to_end(&mut res)?;
+            Ok(res)
         }
     }
 

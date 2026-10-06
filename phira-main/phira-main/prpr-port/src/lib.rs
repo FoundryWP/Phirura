@@ -787,7 +787,7 @@ pub extern "C" fn wp81_game_frame(dt: f64) -> i32 {
         FRAME_TICK = FRAME_TICK.wrapping_add(1);
         if FRAME_TICK % 60 == 0 {
             let draws = macroquad::draw::particle_diag(0);
-            let mut buf = [0u8; 128];
+            let mut buf = [0u8; 320];
             let mut n = push_str(&mut buf, 0, "input: pending=");
             n = push_u32(&mut buf, n, macroquad::input::pending_len() as u32);
             n = push_str(&mut buf, n, " replayed=");
@@ -802,6 +802,48 @@ pub extern "C" fn wp81_game_frame(dt: f64) -> i32 {
             n = push_u32(&mut buf, n, tex_new);
             n = push_str(&mut buf, n, " texRebuilt=");
             n = push_u32(&mut buf, n, tex_rebuilt);
+            // Whatever the game crate parked for us, scaled by 1000 so it fits the integer printer.
+            let (dbg_a, dbg_b) = macroquad::dbg::get();
+            n = push_str(&mut buf, n, " gate=");
+            n = push_u32(&mut buf, n, (dbg_a * 1000.0) as u32);
+            n = push_str(&mut buf, n, " thr=");
+            n = push_u32(&mut buf, n, (dbg_b * 1000.0) as u32);
+            // The touch position as `prpr::ui` sees it (slots C/D), next to the page's own gate.
+            //
+            // Signed and scaled by 1000, like `gate`/`thr` above. It used to be `tx as u32`, and
+            // that single cast is what sent the whole "touch arrives as (0,0)" investigation after
+            // the transform: these are NDC coordinates in (-1, 1), and `f32 as u32` saturates - a
+            // negative, a NaN and anything below 1.0 all print as 0 - so the field read 0 for
+            // every touch, correctly transformed ones included. `+123` now means 0.123.
+            let (_, _, tx, ty) = macroquad::dbg::get4();
+            n = push_str(&mut buf, n, " tx=");
+            n = push_str(&mut buf, n, if tx < 0.0 { "-" } else { "+" });
+            n = push_u32(&mut buf, n, (tx.abs() * 1000.0) as u32);
+            n = push_str(&mut buf, n, " ty=");
+            n = push_str(&mut buf, n, if ty < 0.0 { "-" } else { "+" });
+            n = push_u32(&mut buf, n, (ty.abs() * 1000.0) as u32);
+            // What the shell pushed against what reached `prpr::judge`'s handler, per phase -
+            // the pair that says whether a dead button lost its Ended on the way in.
+            let (pushed, replayed) = macroquad::input::phase_counts();
+            n = push_str(&mut buf, n, " ph=");
+            n = push_phases(&mut buf, n, pushed);
+            n = push_str(&mut buf, n, " rph=");
+            n = push_phases(&mut buf, n, replayed);
+            // The position as received at the FFI boundary, and the screen size the transform divides
+            // by. `px=0` means the shell sent garbage; `px` sane with `tx=0` means the transform did.
+            let (px, py, pn) = macroquad::input::last_push();
+            n = push_str(&mut buf, n, " px=");
+            n = push_u32(&mut buf, n, px as u32);
+            n = push_str(&mut buf, n, " py=");
+            n = push_u32(&mut buf, n, py as u32);
+            n = push_str(&mut buf, n, " pn=");
+            n = push_u32(&mut buf, n, pn);
+            n = push_str(&mut buf, n, " sw=");
+            n = push_u32(&mut buf, n, macroquad::window::screen_width() as u32);
+            n = push_str(&mut buf, n, " sh=");
+            n = push_u32(&mut buf, n, macroquad::window::screen_height() as u32);
+            n = push_str(&mut buf, n, " now=");
+            n = push_u32(&mut buf, n, macroquad::clock::now_secs() as u32);
             if let Ok(s) = core::str::from_utf8(&buf[..n]) {
                 log_line(s);
             }
@@ -826,6 +868,25 @@ fn push_str(buf: &mut [u8], at: usize, s: &str) -> usize {
         }
     }
     at
+}
+
+/// `s0/n0/m0/e0/c0` - the five `TouchPhase` slots in declaration order (Started, Stationary,
+/// Moved, Ended, Cancelled), pulled from `macroquad::input::phase_counts`.
+///
+/// Its own writer because it is the only field built from an array: both call sites would
+/// otherwise have to repeat the slot order, and a reordered `match` in the shim would silently
+/// relabel every count while still looking like a well-formed line.
+fn push_phases(buf: &mut [u8], at: usize, c: [u32; 5]) -> usize {
+    let mut at = push_str(buf, at, "s");
+    at = push_u32(buf, at, c[0]);
+    at = push_str(buf, at, "/n");
+    at = push_u32(buf, at, c[1]);
+    at = push_str(buf, at, "/m");
+    at = push_u32(buf, at, c[2]);
+    at = push_str(buf, at, "/e");
+    at = push_u32(buf, at, c[3]);
+    at = push_str(buf, at, "/c");
+    push_u32(buf, at, c[4])
 }
 
 fn push_u32(buf: &mut [u8], at: usize, mut n: u32) -> usize {
