@@ -19,7 +19,11 @@ namespace Phirura
     /// </summary>
     public static class AppLog
     {
-        private const string FileName = "phirura.log";
+        // Public: LogServer opens the same file by name. Public rather than a duplicated literal
+        // because a literal here that ever drifted from this one would make the HTTP channel
+        // serve an empty file forever while the log filled up normally - a silent, total failure
+        // of the thing it exists for, with nothing on screen to say so.
+        public const string FileName = "phirura.log";
         // 4 MB rather than 256 KB. Rotation keeps only the tail, so at this build's write rate
         // 256 KB discarded roughly the first eight minutes of every session - which is exactly
         // where a reproduction lands. The run that was pulled to investigate "the hit sound cuts

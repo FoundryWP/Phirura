@@ -111,6 +111,7 @@
     <Compile Include="PrprPort.cs" />
     <Compile Include="NativeProbe.cs" />
     <Compile Include="SfxPlayer.cs" />
+    <Compile Include="LogServer.cs" />
     <Compile Include="Win2DChartRenderer.cs" />
     <Compile Include="RustRenderer.cs" />
     <Compile Include="RustStage1Page.xaml.cs">

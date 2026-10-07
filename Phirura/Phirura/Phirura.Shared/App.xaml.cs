@@ -55,6 +55,15 @@ namespace Phirura
             AppLog.Write("=== Phirura launched ===");
 
 #if WINDOWS_PHONE_APP
+            // Started before anything else that can fail, on purpose. The log server is the
+            // channel you reach for when the app is wedged or silent, and a channel opened after
+            // the wedge is exactly as useful as no channel. It never throws - Start() is
+            // idempotent and reports its own failure through AppLog - and it binds
+            // asynchronously, so it cannot delay or hang the launch either.
+            LogServer.Start();
+#endif
+
+#if WINDOWS_PHONE_APP
             // Native toolchain diagnostics, OFF by default.
             //
             // These are how the Rust-on-WP8.1 workstream (see rust-wp81/) gets evidence off a real

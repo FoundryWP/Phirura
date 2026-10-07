@@ -42,5 +42,10 @@
   </Applications>
   <Capabilities>
     <Capability Name="internetClientServer" />
+    <!-- Required to *listen* on the LAN rather than only to reach out: without it the in-app log
+         server (LogServer.cs) has no channel at all, and reading phirura.log at runtime goes back
+         to ISETool plus its mp3 collision. Dev-only in effect - it grants nothing an app on a
+         development phone should not have. -->
+    <Capability Name="privateNetworkClientServer" />
   </Capabilities>
 </Package>
