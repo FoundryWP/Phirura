@@ -218,13 +218,32 @@ fn decode_pcm(data: &[u8]) -> Result<(Vec<f32>, u32, u32)> {
 
 /// Enough for the longest asset name in the resource pack, with room to spare.
 ///
-/// 96 rather than 48 because the *music* name now travels through here too, and a music name is
-/// not an asset name: it is `<local_path>/<file>` - `download/79814/4347843821313567.mp3` is 35
-/// bytes - and `phira` composes it without knowing how long the chart's id or the file's name will
-/// be. Truncation is silent (`new_named` copies up to the cap and stops), so a cap sized for
-/// `click` would have handed the shell a path that points at nothing and the chart would have gone
-/// back to playing in silence with a *plausible* log line beside it.
-pub const NAME_CAP: usize = 96;
+/// 192 rather than 48 because the *music* name now travels through here too, and a music name is
+/// not an asset name: it is `preview|<from>|<to>|<local_path>/<file>` -
+/// `preview|999.9|999.9|download/79814/4347843821313567.mp3` is 52 bytes - and `phira` composes it
+/// without knowing how long the chart's id or the file's name will be. Truncation is silent
+/// (`new_named`/`from_raw_named` copy up to the cap and stop), so a cap sized for `click` would
+/// have handed the shell a path that points at nothing and the chart would have gone back to
+/// playing in silence with a *plausible* log line beside it. `name_len` is a `u8`, so 255 is the
+/// ceiling; 192 clears every name seen so far with margin.
+pub const NAME_CAP: usize = 192;
+
+/// Copy a name into the fixed slot, truncating rather than rejecting.
+///
+/// Two constructors need this and neither may fail: refusing a clip would silence a sound that is
+/// otherwise fine, and a truncated name still identifies the sound far better than no name at all.
+fn copy_name(name: &str) -> ([u8; NAME_CAP], u8) {
+    let mut buf = [0u8; NAME_CAP];
+    let mut len = 0usize;
+    for b in name.bytes() {
+        if len == NAME_CAP {
+            break;
+        }
+        buf[len] = b;
+        len += 1;
+    }
+    (buf, len as u8)
+}
 
 impl AudioClip {
     /// Decode a compressed buffer via the shell.
@@ -247,23 +266,14 @@ impl AudioClip {
             frame_count: 0,
         };
         let _ = unsafe { shell::wp81_audio_decode(data.as_ptr(), data.len(), &mut info) };
-        // Truncated rather than rejected: a long name still identifies the sound far better than no
-        // name at all, and refusing the clip would silence it.
-        let mut buf = [0u8; NAME_CAP];
-        let mut len = 0usize;
-        for b in name.bytes() {
-            if len == NAME_CAP {
-                break;
-            }
-            buf[len] = b;
-            len += 1;
-        }
+        // Truncated rather than rejected: see `copy_name`.
+        let (buf, len) = copy_name(name);
         Ok(AudioClip {
             id: 0,
             sample_rate: rate,
             frame_count,
             name: buf,
-            name_len: len as u8,
+            name_len: len,
             pcm: Some(std::sync::Arc::new(pcm)),
             pcm_channels: channels,
             pcm_rate: rate,
@@ -309,12 +319,26 @@ impl AudioClip {
 
     /// Build a clip from already-decoded frames. The frames are not retained - see the module note.
     pub fn from_raw(frames: Vec<Frame>, sample_rate: u32) -> Self {
+        Self::from_raw_named("", frames, sample_rate)
+    }
+
+    /// As [`Self::from_raw`], but records which file these frames came from.
+    ///
+    /// A preview is *built* rather than read - `phira` slices the chart's soundtrack down to the
+    /// `[preview_start, preview_end]` window named in the json - so it can never arrive through
+    /// `new_named`, which takes compressed bytes. Without a name the shell heard `""`, failed both
+    /// of its path tests, and fell through to the one chart it had resolved before boot: every
+    /// preview on the song page played the packaged chart's audio, whole and un-cut. The name is
+    /// `preview|<from>|<to>|<local_path>/<file>` so the shell can put the file at the same window
+    /// the frames were cut from.
+    pub fn from_raw_named(name: &str, frames: Vec<Frame>, sample_rate: u32) -> Self {
+        let (buf, len) = copy_name(name);
         AudioClip {
             id: 0,
             sample_rate,
             frame_count: frames.len() as u64,
-            name: [0u8; NAME_CAP],
-            name_len: 0,
+            name: buf,
+            name_len: len,
             pcm: None,
             pcm_channels: 0,
             pcm_rate: 0,

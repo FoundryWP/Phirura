@@ -574,8 +574,29 @@ pub unsafe extern "C" fn wp81_audio_pcm(
     } else {
         String::from_utf8_lossy(unsafe { core::slice::from_raw_parts(key, key_len) }).into_owned()
     };
+    // tag 0 (music) is deliberately *not* handed to the mixer on this build.
+    //
+    // The only reader of a tag-0 clip is `wp81_mix_music_new` - the call that attaches
+    // `s_music.clip` to a source voice and submits it, i.e. the only thing that makes those
+    // samples audible. It has no caller here: `wp81_audio_music_*` forwards to
+    // `cb().audio_music_*` (the shell plays through its own MediaElement instead), and the
+    // shell's complete set of `wp81_mix_*` imports is `ready`/`diag`/`sfx_play`. So the ingest
+    // would store a 29.2 MB i16 copy of a 159 s stereo track - `frames=7663104 ch=2` straight
+    // from the device log - that no voice will ever read, on the run where total resident
+    // memory was already 55.7 MB of textures plus that track when the process was killed
+    // mid-frame with no exception written anywhere. `wp81mix.cpp` guards the same failure from
+    // the other side (`return 4` when XAudio2 never came up, "keeping a 34 MB copy resident for
+    // a mixer that does not exist"), and this is that guard for the case where the engine is up
+    // but Stage C's music voice is not wired. Stage C enables it again by removing this arm.
+    //
+    // `-2` = "not attempted", kept outside `wp81_mix_pcm`'s own 0/1/2/3/4 so a future silent
+    // chart can never be misread as an ingest failure - the line stays on the record either
+    // way, and the value is ignored at both call sites, so nothing the caller can observe
+    // changes except the number printed here.
     let rc = if frames.is_null() {
         1
+    } else if tag == 0 {
+        -2
     } else {
         wp81_mix_pcm(
             tag as i32,

@@ -3,11 +3,13 @@
     Mirror a chart + the engine's shared assets onto the phone's LocalFolder.
 
 .DESCRIPTION
-    `PrprPort.ReadAsset` resolves EVERYTHING under one `AssetRoot`, and the engine asks for two
-    different shapes of path through it: `190/57649733.json` (a chart folder, prefixed) and
-    `respack/info.yml`, `back.png`, `rank/A.png` (shared assets, relative to the root). So the
-    phone's root has to contain both, exactly like the desktop layout this script mirrors -
-    `E:\_phirura_m1\charts`, which is the layout `build-m1.ps1` has already been run against.
+    `PrprPort.ReadAsset` resolves TWO roots in order - `AssetRoot` (`<LocalFolder>\charts`) then
+    `AssetPackRoot` (`<LocalFolder>\respack`) - because the engine asks for two different shapes of
+    path through it and never says which root it means: `190/57649733.json` is a chart folder,
+    while `respack/info.yml`, `back.png`, `rank/A.png` are the engine's own files and come through
+    bare. The desktop source this script mirrors is still the ONE flat `E:\_phirura_m1\charts`
+    layout that `build-m1.ps1` has already been run against - the split into `charts` + `respack`
+    happens here, at stage time, so the desktop tree never has to be reorganised.
 
     The push is `ISETool rs`. Its semantics differ from `ts` in two ways that were measured on the
     real device rather than read off the help text:
@@ -39,7 +41,8 @@ param(
     [string]$Source = "E:\_phirura_m1\charts",
 
     # Staging area on the PC. Its CONTENTS become the contents of LocalFolder, so the chart lives
-    # at $Out\charts\<folder> and not at $Out\<folder>.
+    # at $Out\charts\<folder> and not at $Out\<folder>, and the engine's own files at
+    # $Out\respack\<name>. The two are built from one flat $Source by the split below.
     [string]$Out = "E:\_phirura_stage",
 
     # Chart folder inside $Source. Kept as a parameter so a wrong source fails here rather than as
@@ -108,22 +111,57 @@ if (Test-Path $Out) {
 }
 New-Item -ItemType Directory -Path $Out -Force | Out-Null
 
-# The source is copied AS `charts`, not unpacked into LocalFolder's root.
+# The source is SPLIT into two roots, not unpacked into LocalFolder's root.
 #
-# `$Source` defaults to `E:\_phirura_m1\charts`, and `rs` pushes the CONTENTS of `$Out` to
-# LocalFolder. The engine reads from `<LocalFolder>\charts` - `RustStage1Page` builds exactly
-# `LocalFolder.Path + "\charts"`, which is also the desktop layout, since `E:\_phirura_m1` holds
-# nothing but `charts`. So copying `$Source\*` straight into `$Out` put `190`, `demo`, `respack`
-# and every shared png/ogg at LocalFolder's root instead, and `GetFolderFromPathAsync(<LocalState>\charts)`
-# had nothing to open.
+# `rs` pushes the CONTENTS of `$Out` to LocalFolder, so whatever is built here is exactly what the
+# phone ends up with. Two roots since FIXLIST #6 (choice C):
 #
-# That is what `GameCreate -> -2 (ParseFailed)` was on the phone: not a parser, not IO permissions,
-# and not TLS - all ten asset requests failed in ~80 ms each with the charts folder absent, so the
-# engine fell through every `info.yml`/`info.txt`/`info.csv` candidate and gave up. The comment on
-# `$Out` above had it right; this line did not.
-$dest = Join-Path $Out "charts"
-New-Item -ItemType Directory -Path $dest -Force | Out-Null
-Copy-Item "$Source\*" -Destination $dest -Recurse -Force
+#   $Out\charts   -> `LocalFolder\charts`   charts: `190\`, `demo\`, later `download\`/`custom\`
+#   $Out\respack  -> `LocalFolder\respack`  the engine's own files: `font.ttf`, the UI sprites,
+#                                           the hit sounds, `rank\`, `mod\`, `respack\`
+#
+# phira asks for both by bare relative name and never says which folder it means - `190/info.yml`
+# next to `rank/phi.png` - so `PrprPort.ReadAsset` probes `AssetRoot` first and `AssetPackRoot`
+# second. Chart names start with their own folder, engine names are bare, so the two sets cannot
+# collide; the order only decides which walk happens first.
+#
+# The split exists because `Assets\charts` used to hold both, which made a chart folder look like
+# where the game's art had been parked. Nothing about the engine's contract changes: it still sees
+# one flat namespace through `ReadAsset`.
+#
+# HISTORY, kept because it is why the `charts` folder must exist at all: copying `$Source\*`
+# straight into `$Out` put `190`, `demo`, `respack` and every shared png/ogg at LocalFolder's root
+# instead, and `GetFolderFromPathAsync(<LocalState>\charts)` had nothing to open. That is what
+# `GameCreate -> -2 (ParseFailed)` was on the phone - not a parser, not IO permissions, not TLS:
+# all ten asset requests failed in ~80 ms each with the charts folder absent, so the engine fell
+# through every `info.yml`/`info.txt`/`info.csv` candidate and gave up.
+$destCharts = Join-Path $Out "charts"
+$destPack = Join-Path $Out "respack"
+New-Item -ItemType Directory -Path $destCharts -Force | Out-Null
+New-Item -ItemType Directory -Path $destPack -Force | Out-Null
+
+# Content test, not a name list: a top-level folder is a chart when it carries a chart file
+# (`.json`/`.pec`) of its own - `190\57649733.json`, `demo\chart.json`. `respack\`, `rank\` and
+# `mod\` hold only sprites, sounds and `info.yml`, so they belong to the engine. Testing for the
+# chart file rather than for known names means a chart dropped in later stages itself, and it is
+# the same rule the package side of the split uses, so `Assets\` and LocalFolder stay congruent.
+# `respack\info.yml` alone is not enough to make something a chart - that is the resource pack's
+# own descriptor, which is exactly the trap a bare `info.yml` test would fall into.
+foreach ($item in Get-ChildItem -LiteralPath $Source) {
+    $to = if ($item.PSIsContainer -and
+              ((Test-Path (Join-Path $item.FullName "*.json")) -or
+               (Test-Path (Join-Path $item.FullName "*.pec")))) { $destCharts } else { $destPack }
+    # Copy, never Move: `$Source` is the read-only desktop layout that `build-m1.ps1` was run
+    # against, and consuming it would break the next `-Push`.
+    Copy-Item -LiteralPath $item.FullName -Destination $to -Recurse -Force
+}
+
+# Printed every `-Push`: if a chart were routed to the pack root (or `respack\` to the charts
+# root) the app would still boot - `ReadAsset` falls back - and the only visible symptom would be
+# `asset resolved from pack root: 190/info.yml` deep in the log. This puts the routing decision
+# where it is read first.
+"  -> charts : {0}" -f ((Get-ChildItem -LiteralPath $destCharts -Name) -join ", ")
+"  -> pack   : {0}" -f ((Get-ChildItem -LiteralPath $destPack -Name) -join ", ")
 
 $staged = Get-ChildItem $Out -Recurse -File
 "staged: {0} files, {1} MB -> {2}" -f $staged.Count,
@@ -223,7 +261,7 @@ if ($Push) {
     if ($LASTEXITCODE -ne 0) { Write-Warning "ISETool rs exit $LASTEXITCODE" }
     # Confirm with the path that would have failed had the `ts` wrapping been replicated here.
     & $ise "dir:charts" $Device $ProductId 2>&1 | Out-Null
-    "pushed -> LocalFolder\charts"
+    "pushed -> LocalFolder\charts + LocalFolder\respack"
 }
 
 # (3b removed: the restore moved inside step 3, before `rs`. Doing it after the push

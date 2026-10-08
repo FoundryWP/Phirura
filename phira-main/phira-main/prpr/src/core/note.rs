@@ -291,33 +291,46 @@ impl Note {
                     let ratio = style.hold_ratio();
                     // body
                     // TODO (end_height - height) is not always total height
-                    draw_tex(
-                        res,
-                        **(if res.res_pack.info.hold_repeat {
-                            style.hold_body.as_ref().unwrap()
-                        } else {
-                            tex
-                        }),
-                        order,
-                        -scale,
-                        bottom,
-                        color,
-                        DrawTextureParams {
-                            source: Some({
-                                if res.res_pack.info.hold_repeat {
-                                    let hold_body = style.hold_body.as_ref().unwrap();
-                                    let width = hold_body.width();
-                                    let height = hold_body.height();
-                                    Rect::new(0., 0., 1., (top - bottom) / scale / 2. * width / height)
-                                } else {
-                                    style.hold_body_rect()
-                                }
+                    //
+                    // Both `top` and `bottom` are differences of two *scaled* positions, and either
+                    // can come out on the wrong side of the other: a note resting above its line, a
+                    // hold whose end was never clamped, or exactly the case the TODO above admits.
+                    // A negative height is worse than an empty draw - it goes into `dest_size` *and*
+                    // into the atlas's source rectangle, so the body is sampled with a negative v
+                    // extent and comes out at an arbitrary size rather than not at all. That is the
+                    // reported "the hold's size is not stable", and no shape it can produce is the
+                    // one that was asked for. Degenerate sizes are skipped rather than drawn, since
+                    // a source rectangle with no height has nothing to sample.
+                    let body = (top - bottom).max(0.);
+                    if body > 0. {
+                        draw_tex(
+                            res,
+                            **(if res.res_pack.info.hold_repeat {
+                                style.hold_body.as_ref().unwrap()
+                            } else {
+                                tex
                             }),
-                            dest_size: Some(vec2(scale * 2., top - bottom)),
-                            ..Default::default()
-                        },
-                        false,
-                    );
+                            order,
+                            -scale,
+                            bottom,
+                            color,
+                            DrawTextureParams {
+                                source: Some({
+                                    if res.res_pack.info.hold_repeat {
+                                        let hold_body = style.hold_body.as_ref().unwrap();
+                                        let width = hold_body.width();
+                                        let height = hold_body.height();
+                                        Rect::new(0., 0., 1., body / scale / 2. * width / height)
+                                    } else {
+                                        style.hold_body_rect()
+                                    }
+                                }),
+                                dest_size: Some(vec2(scale * 2., body)),
+                                ..Default::default()
+                            },
+                            false,
+                        );
+                    }
                     // head
                     if res.time < self.time || res.res_pack.info.hold_keep_head {
                         let r = style.hold_head_rect();

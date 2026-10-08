@@ -1927,6 +1927,37 @@ namespace Phirura
         private static string _assetRoot;
 
         /// <summary>
+        /// Where the engine's *own* files live, as distinct from a chart's.
+        ///
+        /// These used to share one folder: `LocalFolder\charts` held `font.ttf`, `rank\`, `mod\`,
+        /// the resource pack, the UI sprites and the hit sounds *next to* `190\` and `demo\`, and
+        /// that is exactly what made `Assets\charts` read as though a chart folder were where the
+        /// game's art had been parked. The split puts charts in `LocalFolder\charts` and the
+        /// engine's files in `LocalFolder\respack`.
+        ///
+        /// phira asks for both by bare relative name - `font.ttf` and `rank/phi.png` alongside
+        /// `190/info.yml` - and never says which root it means, so <see cref="ReadAsset"/> probes
+        /// this one as a fallback after <see cref="AssetRoot"/>. The two never hold the same name:
+        /// a chart's names start with its own folder, the engine's are bare.
+        ///
+        /// Null means "one root only", which is byte-for-byte the pre-split behaviour.
+        /// </summary>
+        public static string AssetPackRoot
+        {
+            get { return _assetPackRoot; }
+            set
+            {
+                if (_assetPackRoot != value)
+                {
+                    _assetPackRoot = value;
+                    _assetCache.Clear();
+                }
+            }
+        }
+
+        private static string _assetPackRoot;
+
+        /// <summary>
         /// Whole-file cache, keyed by the relative name.
         ///
         /// The game re-requests the same illustrations and the font on every scene entry (and the
@@ -2477,49 +2508,92 @@ namespace Phirura
         /// </summary>
         private static byte[] ReadAsset(string relative)
         {
-            string root = _assetRoot;
-            if (string.IsNullOrEmpty(root))
-            {
-                return null;
-            }
-
             string normalised = relative.Replace('/', '\\').TrimStart('\\');
             if (normalised.Length == 0)
             {
                 return null;
             }
 
-            // One segment at a time.
+            // Charts first, then the engine's own folder.
             //
-            // The engine asks for the *whole* path - `190/info.yml`, `rank/phi.png` - relative to
-            // the charts root, so the name handed to WinRT is usually a sub-path. Asking WinRT for
-            // that in one call does not resolve the intermediate folder: it reports the file as
-            // missing, and because the engine treats any negative result as "absent" that would
-            // present as every chart failing to load rather than as an IO error. Walking the
-            // segments is the form that works, and it is what `ChartLibrary` does for the same
-            // reason. The whole-file cache above means this walk happens once per distinct asset,
-            // not once per frame.
-            Windows.Storage.StorageFolder folder =
-                Windows.Storage.StorageFolder.GetFolderFromPathAsync(root).AsTask().Result;
-
-            string[] parts = normalised.Split(new char[] { '\\' },
-                StringSplitOptions.RemoveEmptyEntries);
-            for (int i = 0; i + 1 < parts.Length; i++)
+            // The order is the pre-split layout kept on purpose: everything below used to live
+            // under `AssetRoot`, so probing it first means a store that has not been re-staged yet
+            // resolves exactly as it always did, and only a miss pays for the second walk. The two
+            // roots never hold the same name - a chart's names start with its own folder
+            // (`190/info.yml`) while the engine's are bare (`font.ttf`, `rank/phi.png`) - so the
+            // order cannot choose the wrong file, only how many folders open before the right one.
+            byte[] data = ReadAssetFrom(_assetRoot, normalised);
+            if (data == null && !string.IsNullOrEmpty(_assetPackRoot))
             {
-                folder = folder.GetFolderAsync(parts[i]).AsTask().Result;
+                data = ReadAssetFrom(_assetPackRoot, normalised);
+                if (data != null)
+                {
+                    // One line, and only when the split actually did the work. Logged because a
+                    // file found *here* and nowhere else is the failure mode this split
+                    // introduces: if `respack\` had not been staged, the same request would fall
+                    // through and surface as `asset missing:` with nothing to say that both roots
+                    // had been tried.
+                    AppLog.WriteSync("PrprPort: asset resolved from pack root: " + normalised);
+                }
             }
-            Windows.Storage.StorageFile file = folder.GetFileAsync(parts[parts.Length - 1]).AsTask().Result;
+            return data;
+        }
 
-            Windows.Storage.Streams.IBuffer buffer =
-                Windows.Storage.FileIO.ReadBufferAsync(file).AsTask().Result;
-
-            byte[] bytes = new byte[buffer.Length];
-            using (Windows.Storage.Streams.DataReader reader =
-                   Windows.Storage.Streams.DataReader.FromBuffer(buffer))
+        /// <summary>
+        /// One root's worth of the read above, returning null rather than throwing.
+        ///
+        /// A miss is the normal outcome for the root that does not carry this name, and after the
+        /// split it is on the path for half of every request. Throwing instead would leave the
+        /// second root unprobed - it would surface as *every* engine asset missing rather than as
+        /// one lookup that looked in the wrong folder. A root that was never staged at all is
+        /// just another miss, so a bad `-Push` becomes a diagnostic rather than an exception
+        /// crossing the FFI boundary; the caller's own `asset missing:` line is what reports it.
+        /// </summary>
+        private static byte[] ReadAssetFrom(string root, string normalised)
+        {
+            if (string.IsNullOrEmpty(root))
             {
-                reader.ReadBytes(bytes);
+                return null;
             }
-            return bytes;
+            try
+            {
+                // One segment at a time.
+                //
+                // The engine asks for the *whole* path - `190/info.yml`, `rank/phi.png` - relative
+                // to the root, so the name handed to WinRT is usually a sub-path. Asking WinRT for
+                // that in one call does not resolve the intermediate folder: it reports the file
+                // as missing, and because the engine treats any negative result as "absent" that
+                // would present as every chart failing to load rather than as an IO error. Walking
+                // the segments is the form that works, and it is what `ChartLibrary` does for the
+                // same reason. The whole-file cache above means this walk happens once per
+                // distinct asset, not once per frame.
+                Windows.Storage.StorageFolder folder =
+                    Windows.Storage.StorageFolder.GetFolderFromPathAsync(root).AsTask().Result;
+
+                string[] parts = normalised.Split(new char[] { '\\' },
+                    StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i + 1 < parts.Length; i++)
+                {
+                    folder = folder.GetFolderAsync(parts[i]).AsTask().Result;
+                }
+                Windows.Storage.StorageFile file =
+                    folder.GetFileAsync(parts[parts.Length - 1]).AsTask().Result;
+
+                Windows.Storage.Streams.IBuffer buffer =
+                    Windows.Storage.FileIO.ReadBufferAsync(file).AsTask().Result;
+
+                byte[] bytes = new byte[buffer.Length];
+                using (Windows.Storage.Streams.DataReader reader =
+                       Windows.Storage.Streams.DataReader.FromBuffer(buffer))
+                {
+                    reader.ReadBytes(bytes);
+                }
+                return bytes;
+            }
+            catch (System.Exception)
+            {
+                return null;
+            }
         }
 
         // ===========================================================================

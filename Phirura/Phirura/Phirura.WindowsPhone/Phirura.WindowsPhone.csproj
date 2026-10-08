@@ -172,6 +172,7 @@
         failure mode of forgetting one is a device-only symptom.
     -->
     <Content Include="Assets\charts\**\*" />
+    <Content Include="Assets\respack\**\*" />
   </ItemGroup>
   <ItemGroup>
     <!--

@@ -45,6 +45,12 @@ namespace Phirura
         {
             this.InitializeComponent();
             this.Suspending += this.OnSuspending;
+            // Paired with Suspending, on purpose. A log that simply stops is otherwise
+            // indistinguishable from a crash, and port 8765 going quiet is otherwise
+            // indistinguishable from the app dying - when the usual cause is the phone
+            // locking its screen and the socket stopping accepting. These two lines are
+            // what make "interrupted" and "faulted" different readings of the same file.
+            this.Resuming += OnResuming;
 
             // Without this, an exception in a UI handler kills the process with no trace
             // on a phone (Debug.WriteLine never reaches a file). Handled stays false so
@@ -116,12 +122,21 @@ namespace Phirura
         // ambiguous under `using System;` + `using Windows.UI.Xaml;`.
         private void OnUnhandledException(object sender, Windows.UI.Xaml.UnhandledExceptionEventArgs e)
         {
-            AppLog.Write("UNHANDLED", e.Exception);
+            // `WriteSync`, not `Write`. `Write` queues the append onto the thread pool, and a
+            // queued continuation is precisely what never runs when the next thing to happen is
+            // the process dying - so the one message worth having was the one that got dropped.
+            // Handled stays false (see the constructor), so this exception does still take the
+            // process down: this line is the last one, and it has to be on disk already.
+            // `e.Handled` rides along because "the framework kept the app alive despite this"
+            // and "the app stopped right here" read the same in a log that simply ends.
+            AppLog.WriteSync("UNHANDLED handled=" + e.Handled, e.Exception);
         }
 
         private void OnUnobservedTaskException(object sender, System.Threading.Tasks.UnobservedTaskExceptionEventArgs e)
         {
-            AppLog.Write("UNOBSERVED TASK", e.Exception);
+            // Same reason as above: this fires on the way down, where the queue has no thread
+            // left to drain it.
+            AppLog.WriteSync("UNOBSERVED TASK", e.Exception);
         }
 
         /// <summary>
@@ -229,8 +244,24 @@ namespace Phirura
         {
             var deferral = e.SuspendingOperation.GetDeferral();
 
-            // TODO: Save application state and stop any background activity
+            // Sync, because termination can follow immediately and there may be no thread pool
+            // left to drain a queued append. This is the line that says the session was
+            // interrupted rather than crashed.
+            AppLog.WriteSync("=== suspending ===");
             deferral.Complete();
+        }
+
+        /// <summary>
+        /// The other half of <see cref="OnSuspending"/>.
+        ///
+        /// The listener is deliberately *not* restarted here. `LogServer.Start()` is guarded by
+        /// an interlocked flag and would return immediately, so calling it would only look like
+        /// a repair that did not happen; the honest thing is to report the state the original
+        /// bind is actually in, which is what the line below does.
+        /// </summary>
+        private void OnResuming(object sender, object e)
+        {
+            AppLog.WriteSync("=== resumed === logServer=" + LogServer.State);
         }
     }
 }

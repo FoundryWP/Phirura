@@ -415,20 +415,44 @@ impl ChartsView {
             if t > transit.start_time + transit_time().unwrap_or_default() {
                 if transit.back {
                     if transit.delete {
+                        // Nothing in here may leave `update`. The record is dropped whether or not
+                        // the folder went, because a card pointing at a folder that has already
+                        // vanished is the worse of the two failures. This block used to carry two
+                        // `unwrap`s (a card whose `chart` was `None`, and an index taken from
+                        // `transit.id`) plus three `?`s, so a folder that was already gone, a name
+                        // the shell rejects - the reported os error 123 - or a chart with neither a
+                        // local path nor an id each closed the entire app on the tap of 删除铺面.
                         let data = get_data_mut();
-                        let item = &self.charts.as_ref().unwrap()[transit.id as usize];
-                        let path = if let Some(path) = &item.chart.as_ref().unwrap().local_path {
-                            path.clone()
-                        } else {
-                            format!("download/{}", item.chart.as_ref().unwrap().info.id.unwrap())
-                        };
-                        std::fs::remove_dir_all(format!("{}/{path}", dir::charts()?))?;
-
-                        if let Some(chart) = data.find_chart_by_path(path.as_str()) {
-                            data.charts.remove(chart);
+                        let item = &transit.chart;
+                        let path = item
+                            .local_path
+                            .clone()
+                            .or_else(|| item.info.id.map(|id| format!("download/{id}")));
+                        match &path {
+                            Some(path) => match dir::charts() {
+                                Ok(root) => {
+                                    if let Err(err) = std::fs::remove_dir_all(format!("{}/{path}", root)) {
+                                        crate::log_line(&format!("charts_view: delete folder failed for {path}: {err}"));
+                                    }
+                                }
+                                Err(err) => {
+                                    crate::log_line(&format!("charts_view: delete folder failed for {path}: {err:?}"));
+                                }
+                            },
+                            None => crate::log_line(
+                                "charts_view: chart has neither local_path nor id; folder left in place",
+                            ),
                         }
 
-                        save_data()?;
+                        if let Some(path) = &path {
+                            if let Some(chart) = data.find_chart_by_path(path.as_str()) {
+                                data.charts.remove(chart);
+                            }
+                        }
+
+                        if let Err(err) = save_data() {
+                            crate::log_line(&format!("charts_view: save after delete failed: {err:?}"));
+                        }
                         NEED_UPDATE.store(true, Ordering::SeqCst);
                     } else {
                         self.back_fade_in = Some((transit.id, t));

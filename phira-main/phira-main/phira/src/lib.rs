@@ -203,6 +203,29 @@ static LOG_SINK: Mutex<Option<fn(&str)>> = Mutex::new(None);
 /// `static` free of lifetime questions about who owns the callback.
 pub fn set_log_sink(sink: fn(&str)) {
     *LOG_SINK.lock().unwrap() = Some(sink);
+
+    // A panic on this target is not a crash report, it is the process simply ending: there is no
+    // console, the `log` crate is compiled out, and the shell only ever sees that the callback it
+    // invoked never came back. Every `unwrap` on a chart that came back unlike what was expected -
+    // a missing id, a truncated json, a note index past the end of its line - therefore looked
+    // exactly like "opening this chart closes the game", with no line anywhere to say which one.
+    // This hook is the only account of a panic that survives the unwind across the FFI boundary,
+    // so it is installed the moment the sink that has to receive it exists.
+    std::panic::set_hook(Box::new(|info| {
+        let payload = info.payload();
+        let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_owned()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            String::from("non-string panic payload")
+        };
+        let at = match info.location() {
+            Some(l) => format!("{}:{}", l.file(), l.line()),
+            None => String::from("?"),
+        };
+        crate::log_line(&format!("PANIC {at}: {msg}"));
+    }));
 }
 
 /// Forward a line to the host, if one was installed.
@@ -227,7 +250,14 @@ mod dir {
         let s = format!("{}/{}", DATA_PATH.lock().unwrap().as_ref().map(|it| it.as_str()).unwrap_or("."), s);
         let path = std::path::Path::new(&s);
         if !path.exists() {
-            std::fs::create_dir_all(path)?;
+            if let Err(err) = std::fs::create_dir_all(path) {
+                // The path is composed here from whatever the host handed in, so this is the one
+                // place a malformed directory can be named together with the name that was asked
+                // for. `os error 123` arrived in the report with neither, and a caller that only
+                // ever sees `Err` cannot tell a bad path from a full disk.
+                crate::log_line(&format!("dir: create '{s}' failed: {err}"));
+                return Err(err.into());
+            }
         }
         Ok(s)
     }
@@ -245,7 +275,21 @@ mod dir {
     }
 
     pub fn cache_image_local() -> Result<String> {
-        ensure(&format!("{}/image", cache()?))
+        // `cache()` hands back an already *rooted* path - `ensure` prefixed `DATA_PATH` on the way
+        // out - so feeding it straight back into `ensure` prefixed it a second time, giving
+        // `{DATA_PATH}/{DATA_PATH}/cache/image`. With a rooted `DATA_PATH` that puts a second
+        // `C:` in the middle of the path, which Windows rejects outright as os error 123: the
+        // error reported after a chart download. It is also why every cover went black.
+        // `thumbnail_path` builds on this, so `Path::exists` said no, the JPEG save then failed
+        // with the same 123, the illustration task returned Err, and `Illustration::settle` had
+        // only a silent `warn!` for it. The folder still has to exist, so it is created here -
+        // once, without re-entering `ensure`.
+        let s = format!("{}/image", cache()?);
+        let path = std::path::Path::new(&s);
+        if !path.exists() {
+            std::fs::create_dir_all(path)?;
+        }
+        Ok(s)
     }
 
     pub fn root() -> Result<String> {

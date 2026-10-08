@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Threading.Tasks;
 using Windows.Networking;
 using Windows.Networking.Sockets;
@@ -44,6 +44,17 @@ namespace Phirura
         private static string _state = "not started";
 
         /// <summary>
+        /// The listener's state, for a line that has to say whether the HTTP channel is still
+        /// there. Read rather than re-probed: asking the OS instead would answer a different
+        /// question (does this machine have an address) from the one worth logging (did this
+        /// listener ever bind, and is it still bound).
+        /// </summary>
+        public static string State
+        {
+            get { return _state; }
+        }
+
+        /// <summary>
         /// Starts the listener. Idempotent, never throws, and safe to call from the UI thread.
         /// </summary>
         public static void Start()
@@ -79,8 +90,17 @@ namespace Phirura
                         }
                         _state = "listening";
                         string url = LocalUrl();
-                        AppLog.Write("LogServer: listening on port " + Port
-                            + (url == null ? " (no IPv4 yet)" : " -> " + url + "/log"));
+                        // Sync, and explicit about the unreachable case. This is the one line
+                        // that says whether the HTTP channel exists; "(no IPv4 yet)" read as a
+                        // transient state that would sort itself out, and it does not sort
+                        // itself out - there is then no HTTP channel left to ask. The file is
+                        // still readable through ISETool, so this is also the one place that
+                        // can say so and hand back the command that still works.
+                        AppLog.WriteSync("LogServer: listening on port " + Port
+                            + (url == null
+                                ? " -> unreachable: no non-loopback IPv4 (Wi-Fi off, or no DHCP lease). "
+                                  + "Read this file instead: stage-chart.ps1 -PullLog"
+                                : " -> " + url + "/log"));
                     }, TaskScheduler.Default);
             }
             catch (Exception ex)

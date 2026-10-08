@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading.Tasks;
 using Microsoft.Graphics.Canvas;
 using Phirura.Core;
@@ -78,6 +79,9 @@ namespace Phirura
         /// it, and only the second one is audible.
         /// </summary>
         private double _musicLastPos = -1.0;
+        private double _previewFrom = -1.0;
+        private double _previewTo = -1.0;
+        private int _previewLogTick;
 
         /// <summary>
         /// <see cref="Environment.TickCount"/> of the first sample that found the position
@@ -862,8 +866,24 @@ namespace Phirura
         private static async Task EnsureBundledAssetsAsync()
         {
             Windows.Storage.StorageFolder local = Windows.Storage.ApplicationData.Current.LocalFolder;
+            await SeedRootAsync(local, "charts");
+            await SeedRootAsync(local, "respack");
+        }
+
+        /// <summary>
+        /// Copy `<Assets>\<name>` into `LocalFolder\<name>` once, guarded by a `.seeded` marker.
+        ///
+        /// One call per root since the split (FIXLIST #6, choice C): `Assets\charts` now carries
+        /// only the demo charts and `Assets\respack` the engine's own files, so seeding from the
+        /// old single folder would leave `LocalFolder\respack` empty and every bare name would
+        /// come back as `asset not found: font.ttf`. Each root gets its own marker so that
+        /// re-seeding one cannot skip the other - they are populated independently, and `-Push`
+        /// replaces LocalFolder outright, which wipes both markers together.
+        /// </summary>
+        private static async Task SeedRootAsync(Windows.Storage.StorageFolder local, string name)
+        {
             Windows.Storage.StorageFolder dest = await local.CreateFolderAsync(
-                "charts", Windows.Storage.CreationCollisionOption.OpenIfExists);
+                name, Windows.Storage.CreationCollisionOption.OpenIfExists);
             try
             {
                 await dest.GetFileAsync(".seeded");
@@ -876,7 +896,19 @@ namespace Phirura
 
             Windows.Storage.StorageFolder pkg =
                 await Windows.ApplicationModel.Package.Current.InstalledLocation.GetFolderAsync("Assets");
-            pkg = await pkg.GetFolderAsync("charts");
+            try
+            {
+                pkg = await pkg.GetFolderAsync(name);
+            }
+            catch (Exception ex)
+            {
+                // A package built before the split has no `Assets\respack`. Logged rather than
+                // swallowed, because what surfaces downstream is `asset not found: font.ttf` with
+                // no mention of which folder was never populated - and this is the only place
+                // that knows the folder was absent rather than merely empty.
+                AppLog.Write("GamePage: seed '" + name + "' absent from the package", ex);
+                return;
+            }
 
             int n = await CopyTreeAsync(pkg, dest);
             await dest.CreateFileAsync(".seeded", Windows.Storage.CreationCollisionOption.ReplaceExisting);
@@ -1555,9 +1587,17 @@ namespace Phirura
                 // what the root had actually been. The chart is deliberately NOT resolved here:
                 // `Data::init` reads it with `std::fs` from
                 // `LocalFolder\data\charts\custom\190`, a completely different path.
-                string assetRoot = Windows.Storage.ApplicationData.Current.LocalFolder.Path + "\\charts";
+                // Two roots since the split (FIXLIST #6, choice C): charts stay under `charts\`,
+                // and the engine's own files - fonts, `rank\`, `mod\`, the resource pack, the UI
+                // sprites, the hit sounds - live under `respack\`. `ReadAsset` probes them in this
+                // order; a store staged before the split just misses the second one and behaves
+                // exactly as it did before.
+                string localFolder = Windows.Storage.ApplicationData.Current.LocalFolder.Path;
+                string assetRoot = localFolder + "\\charts";
                 PrprPort.AssetRoot = assetRoot;
-                AppLog.WriteSync("GamePage: phira asset root = " + assetRoot);
+                PrprPort.AssetPackRoot = localFolder + "\\respack";
+                AppLog.WriteSync("GamePage: phira asset root = " + assetRoot
+                    + ", pack root = " + PrprPort.AssetPackRoot);
 
                 var boot = System.Diagnostics.Stopwatch.StartNew();
                 AppLog.WriteSync("GamePage: phira boot (screen " + _rustW + "x" + _rustH + " px @ "
@@ -1821,7 +1861,13 @@ namespace Phirura
                 double drawMs = _frames > 0 ? (_sumDraw / ticksPerMs) / _frames : 0.0;
                 double presMs = _frames > 0 ? (_sumPresent / ticksPerMs) / _frames : 0.0;
                 double maxMs = _maxFrame / ticksPerMs;
-                AppLog.Write("GamePage: fps=" + fps.ToString("0.#")
+                // `WriteSync`, not `Write`: every other line on this page is queued, and a
+                // queued line is precisely what a budget kill throws away. The memory figure
+                // appended below has to be on disk before the *next* frame can be the fatal one,
+                // which is the only way the last line before a kill says `mem=… lvl=High`
+                // instead of vanishing with it. Bounded by `WriteSync` itself: a wedged chain
+                // (ISETool holding phirura.log) makes it return at once rather than stall the UI.
+                AppLog.WriteSync("GamePage: fps=" + fps.ToString("0.#")
                     + " rustMs=" + rustMs.ToString("0.0")
                     + " drawMs=" + drawMs.ToString("0.0")
                     + " presMs=" + presMs.ToString("0.0")
@@ -1849,7 +1895,34 @@ namespace Phirura
                     // still. `music=Playing ... mGuard=0 mStall=3` is the state check passing
                     // and the position check failing - the one case the state line alone
                     // reports as healthy, and the one the report describes.
-                    + " mStall=" + _musicStalls);
+                    + " mStall=" + _musicStalls
+                    // Memory, on the same tick as the frame stats above.
+                    //
+                    // WP8.1 disposes of an app that overruns its budget by terminating the
+                    // process outright - no managed exception, no UnhandledException, nothing
+                    // written anywhere - and that is precisely the signature of the 00:49:41
+                    // death: `OnDraw`'s `catch (Exception)` never fired (no `port draw failed`,
+                    // no `port draw device lost`), no `PANIC`/`UNHANDLED` marker exists, and the
+                    // StreamSocketListener went with the process. This is the only measurement
+                    // that can tell that apart from a native fault inside the command replay, so
+                    // it samples usage, the ceiling the OS is currently holding us to, and the
+                    // level enum (`Low`/`Medium`/`High`/`OverLimit`) in one figure: `mem=85.2/
+                    // 96.0MB lvl=High` would close the case on its own.
+                    //
+                    // Fully qualified because GamePage does not `using Windows.System;` and
+                    // `Windows.System` is not implied by `namespace Phirura`. All three members
+                    // were byte-verified against the phone `Windows.winmd` before use rather
+                    // than taken from the docs list, which can describe a surface this target
+                    // does not ship.
+                    //
+                    // `WriteSync`, not `Write`: `Write` only queues the append, and on this
+                    // failure mode the queue is exactly what is thrown away. The line has to be
+                    // on disk *before* the next frame can be the one that ends the process, so
+                    // it waits like the per-second frame census already does (bounded - a wedged
+                    // chain makes `WriteSync` return immediately rather than block the UI).
+                    + " mem=" + (Windows.System.MemoryManager.AppMemoryUsage / (1024.0 * 1024.0)).ToString("0.0")
+                    + "/" + (Windows.System.MemoryManager.AppMemoryUsageLimit / (1024.0 * 1024.0)).ToString("0.0")
+                    + "MB lvl=" + Windows.System.MemoryManager.AppMemoryUsageLevel);
                 _frames = 0;
                 _sumRust = 0; _sumDraw = 0; _sumPresent = 0; _maxFrame = 0;
             }
@@ -2096,16 +2169,27 @@ namespace Phirura
         /// Rust resolves that clip for itself - `resource.rs:296` runs `load_clip!`, which walks
         /// `.wav`, `.mp3`, `.ogg` inside the pack's own fs - and the shell never sees the bytes,
         /// so the only way to play it is to know where the file landed. The pack is phira's own
-        /// `assets` folder, pushed into `LocalFolder\charts` beside `font.ttf` and therefore under
-        /// the same root <see cref="PrprPort.AssetRoot"/> already serves; `ending.ogg` sits at
-        /// that root and `respack/ending.ogg` under the sub-folder, so both are tried before
-        /// giving up. Failing is silent by design: a missing BGM is a quieter result page, while
-        /// falling back to the chart music is the bug being removed.
+        /// `assets` folder; since the split (FIXLIST #6, choice C) it is pushed into
+        /// `LocalFolder\respack`, which <see cref="PrprPort.AssetPackRoot"/> serves, while a store
+        /// staged before the split still holds it under `LocalFolder\charts` beside `font.ttf`,
+        /// which <see cref="PrprPort.AssetRoot"/> serves - so both roots are probed. Within each,
+        /// the bare name first and `respack/` under it, because `ending.*` sits at the pack root
+        /// and the pack root itself is one level down either way. Failing is silent by design: a
+        /// missing BGM is a quieter result page, while falling back to the chart music is the bug
+        /// being removed.
         /// </summary>
         private static async Task ResolvePhiraEndingMusicAsync()
         {
             PhiraEndingMusicUri = null;
-            string[] roots = { "", "respack\\" };
+            // Two LocalFolder roots since the split (FIXLIST #6, choice C): the pack moved to
+            // `respack`, and `charts` is where a store staged before the split still has it, so
+            // that store keeps working without being re-pushed. Inside each root the bare name is
+            // tried before the pack's own `respack\` sub-folder, because `ending.*` sits at the
+            // pack root - i.e. `respack\ending.mp3` after the split and `charts\respack\ending.mp3`
+            // before it. Probing order is `charts` first for the same reason `ReadAsset` does it:
+            // it is the pre-split layout, so anything that resolved before still resolves now.
+            string[] folderRoots = { "charts", "respack" };
+            string[] subs = { "", "respack\\" };
             // `.ogg` deliberately absent. This list is probed in order and `ending.ogg`
             // is present in the seeded asset tree, so it won every time - the result page
             // then asked MediaElement to open a source it cannot decode and played
@@ -2113,31 +2197,54 @@ namespace Phirura
             // cannot help while an undecodable extension is listed at all; only the
             // formats this profile actually plays belong here.
             string[] exts = { ".mp3", ".wav" };
-            foreach (string root in roots)
+            foreach (string folderRoot in folderRoots)
             {
-                foreach (string ext in exts)
+                foreach (string sub in subs)
                 {
-                    try
+                    foreach (string ext in exts)
                     {
-                        Windows.Storage.StorageFolder charts =
-                            await Windows.Storage.ApplicationData.Current.LocalFolder
-                                .GetFolderAsync("charts");
-                        string name = "ending" + ext;
-                        if (!string.IsNullOrEmpty(root))
+                        try
                         {
-                            charts = await charts.GetFolderAsync("respack");
+                            Windows.Storage.StorageFolder dir =
+                                await Windows.Storage.ApplicationData.Current.LocalFolder
+                                    .GetFolderAsync(folderRoot);
+                            if (sub.Length > 0)
+                            {
+                                dir = await dir.GetFolderAsync("respack");
+                            }
+                            string name = "ending" + ext;
+                            await dir.GetFileAsync(name);
+                            PhiraEndingMusicUri = "ms-appdata:///local/" + folderRoot + "/"
+                                + (sub.Length == 0 ? "" : "respack/") + name;
+                            AppLog.Write("GamePage: phira ending music = " + PhiraEndingMusicUri);
+                            return;
                         }
-                        await charts.GetFileAsync(name);
-                        PhiraEndingMusicUri = "ms-appdata:///local/charts/"
-                            + (root.Length == 0 ? "" : "respack/") + name;
-                        AppLog.Write("GamePage: phira ending music = " + PhiraEndingMusicUri);
-                        return;
-                    }
-                    catch (Exception)
-                    {
-                        // Not this root/extension pair - keep going, same order `load_clip!` uses.
+                        catch (Exception)
+                        {
+                            // Not this root/sub/extension triple - keep going, same order
+                            // `load_clip!` uses.
+                        }
                     }
                 }
+            }
+            // Last resort: the copy shipped inside the package itself. `Assets\respack\ending.mp3`
+            // is where it sits since the split (FIXLIST #6, choice C): the engine's own files now
+            // live under `Assets\respack` beside the resource pack rather than under the folder
+            // that holds charts. `ms-appx` is a valid
+            // `MediaElement.Source` once the file is confirmed to be in the package - which this
+            // probe is what confirms. Tried after the LocalFolder copies because those are the
+            // ones a pushed resource pack can replace.
+            try
+            {
+                await Windows.Storage.StorageFile.GetFileFromApplicationUriAsync(
+                    new Uri("ms-appx:///Assets/respack/ending.mp3"));
+                PhiraEndingMusicUri = "ms-appx:///Assets/respack/ending.mp3";
+                AppLog.Write("GamePage: phira ending music = " + PhiraEndingMusicUri + " (packaged)");
+                return;
+            }
+            catch (Exception)
+            {
+                // Not in this package either.
             }
             AppLog.Write("GamePage: no res-pack ending clip; the result page will be silent");
         }
@@ -2198,6 +2305,37 @@ namespace Phirura
                 || n.EndsWith(".flac") || n.EndsWith(".m4a") || n.EndsWith(".aac");
         }
 
+        /// <summary>
+        /// True for the resource pack's own clip, which `load_clip!("ending")` names `ending`.
+        ///
+        /// That name has neither a `/` nor an extension, so it failed <see cref="IsChartMusicPath"/>
+        /// and used to fall through to the duration guess below: whenever the ending clip happened
+        /// to measure within a second of the chart's own track, the result page played the chart's
+        /// music instead - the "sometimes plays the preset audio" report. A name costs nothing to
+        /// test and is exact, so it decides on its own. It is tested *after* the path check so that
+        /// a chart whose own file happens to be called `ending.mp3` still wins, because that one
+        /// carries a directory with it.
+        /// </summary>
+        private static bool IsResPackEndingName(string source)
+        {
+            if (string.IsNullOrEmpty(source))
+            {
+                return false;
+            }
+            string n = source.Trim().Replace('\\', '/').ToLowerInvariant();
+            int slash = n.LastIndexOf('/');
+            if (slash >= 0)
+            {
+                n = n.Substring(slash + 1);
+            }
+            int dot = n.LastIndexOf('.');
+            if (dot > 0)
+            {
+                n = n.Substring(0, dot);
+            }
+            return n == "ending";
+        }
+
         /// <summary>Opens the chart's music on the shell's `Player`. See <see cref="PrprPort.IMusicSink"/>.</summary>
         public void MusicNew(string source, double rate, float amp, double loopMix, double clipSecs)
         {
@@ -2239,9 +2377,48 @@ namespace Phirura
             // long only plays the wrong BGM. `NaturalDuration` and Rust's `frame_count /
             // sample_rate` come from different readings of the same file and routinely disagree
             // by the encoder padding, so anything tighter would misclassify the chart itself.
+            // `preview|<from>|<to>|<path>` - phira cuts the chart's soundtrack down to the window
+            // named in the json and hands the shell the file it was cut from, because a preview is
+            // built rather than read. Before this the preview's name was empty, it failed every
+            // test below, `isChart` stayed true, and the song page played the *packaged* chart's
+            // audio - whole, from the start - instead of the selected chart's preview window.
+            double previewFrom = -1.0;
+            double previewTo = -1.0;
+            string path = source;
+            if (!string.IsNullOrEmpty(source) && source.StartsWith("preview|", StringComparison.Ordinal))
+            {
+                string rest = source.Substring("preview|".Length);
+                int bar1 = rest.IndexOf('|');
+                int bar2 = bar1 < 0 ? -1 : rest.IndexOf('|', bar1 + 1);
+                if (bar1 >= 0 && bar2 > bar1)
+                {
+                    double.TryParse(rest.Substring(0, bar1), NumberStyles.Float, CultureInfo.InvariantCulture, out previewFrom);
+                    double.TryParse(rest.Substring(bar1 + 1, bar2 - bar1 - 1), NumberStyles.Float, CultureInfo.InvariantCulture, out previewTo);
+                    path = rest.Substring(bar2 + 1);
+                }
+                if (previewTo <= previewFrom)
+                {
+                    previewFrom = -1.0;
+                    previewTo = -1.0;
+                }
+                if (string.IsNullOrEmpty(path))
+                {
+                    // A server preview: the bytes exist in Rust but there is no file on disk for
+                    // MediaElement to open. Silence with a line saying so beats reaching for
+                    // whichever chart happened to be resolved before boot.
+                    _previewFrom = -1.0;
+                    _previewTo = -1.0;
+                    _clock.StartFree();
+                    AppLog.Write("GamePage: music_new preview has no local file -> silent clock");
+                    return;
+                }
+            }
+            _previewFrom = previewFrom;
+            _previewTo = previewTo;
+
             string uri = PhiraMusicUri;
             bool isChart = true;
-            if (IsChartMusicPath(source))
+            if (IsChartMusicPath(path))
             {
                 // The engine named this clip's own file, relative to phira's data root - which is
                 // exactly where `EnsureBundledChartAsync` and the downloader put them, and exactly
@@ -2249,8 +2426,19 @@ namespace Phirura
                 // branch that works for a chart the shell never resolved itself: a downloaded one
                 // measured 274.9 s against the packaged chart's 214.8 s, missed the test below,
                 // and played the res pack's `ending` in place of its own music.
-                uri = "ms-appdata:///local/data/charts/" + source;
+                uri = "ms-appdata:///local/data/charts/" + path;
                 isChart = true;
+            }
+            else if (IsResPackEndingName(path))
+            {
+                // The result page's own BGM, named. Decided by name rather than by duration, so a
+                // clip whose length happens to resemble the chart's can no longer be mistaken for
+                // it - which is the whole "sometimes the preset audio plays" failure. `null` here
+                // means the pack was not found, and silence is the intended answer for that: the
+                // comment on `ResolvePhiraEndingMusicAsync` records that falling back to the
+                // chart's music is the bug, not the fix.
+                isChart = false;
+                uri = PhiraEndingMusicUri;
             }
             else if (PhiraMusicSeconds > 0.05 && clipSecs > 0.05
                 && Math.Abs(clipSecs - PhiraMusicSeconds) > 1.0)
@@ -2379,8 +2567,54 @@ namespace Phirura
         /// pause the engine asked for is left alone - restarting that would make pausing
         /// impossible and would be a worse bug than the one it fixes.
         /// </summary>
+        /// <summary>
+        /// Keeps the song page's audio inside the window the chart's json names.
+        ///
+        /// phira has already cut the frames to `[previewFrom, previewTo]`, but the element plays the
+        /// *file*, which carries on past it - the "rather than playing the whole track" half of the
+        /// report. The window is closed here, alongside the rest of the music's health, so a
+        /// preview needs no timer of its own. The jump goes through <see cref="MusicSeek"/> because
+        /// that moves clock and element together and clears the stall history this backwards jump
+        /// would otherwise be read as; the throttle keeps a seek the element declines to honour
+        /// from becoming a per-frame retry.
+        /// </summary>
+        private void GuardPreview()
+        {
+            if (_previewFrom < 0.0 || !_mediaReady || unchecked(Environment.TickCount - _previewLogTick) < 250)
+            {
+                return;
+            }
+            _previewLogTick = Environment.TickCount;
+            double pos;
+            try
+            {
+                pos = Player.Position.TotalSeconds;
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("GamePage.GuardPreview", ex);
+                return;
+            }
+            if (pos < _previewTo)
+            {
+                return;
+            }
+            AppLog.Write("GamePage: preview loop -> " + _previewFrom.ToString("0.#")
+                + " at " + pos.ToString("0.##") + " to=" + _previewTo.ToString("0.#"));
+            MusicSeek(_previewFrom);
+            try
+            {
+                Player.Play();
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("GamePage.GuardPreview.Play", ex);
+            }
+        }
+
         private void GuardMusic()
         {
+            GuardPreview();
             if (!_musicWantPlaying || _finished || _paused)
             {
                 return;
@@ -2701,6 +2935,15 @@ namespace Phirura
                     PhiraMusicSeconds = Player.NaturalDuration.TimeSpan.TotalSeconds;
                 }
                 _clock.Reanchor();
+                if (_previewFrom >= 0.0)
+                {
+                    // The element opened at 0, but the preview window starts part-way into the
+                    // file. `MusicSeek` moves clock and element together and is also what clears
+                    // the stall detector's history, which a jump this size would read as a stall.
+                    MusicSeek(_previewFrom);
+                    AppLog.Write("MediaOpened(phira): preview window "
+                        + _previewFrom.ToString("0.#") + ".." + _previewTo.ToString("0.#"));
+                }
                 if (_clock.IsRunning)
                 {
                     try

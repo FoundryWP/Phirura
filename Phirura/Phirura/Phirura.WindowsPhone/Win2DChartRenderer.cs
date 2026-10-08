@@ -1,8 +1,9 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Graphics.Canvas;
+using Microsoft.Graphics.Canvas.Brushes;
 using Microsoft.Graphics.Canvas.Geometry;
 using Microsoft.Graphics.Canvas.UI.Xaml;
 using Phirura.Core;
@@ -907,6 +908,60 @@ namespace Phirura.Game
             }
             _portTextures.Clear();
             PortTexturesBound = 0;
+            DisposePortGradients();
+        }
+
+        /// <summary>
+        /// One brush per distinct pair of end colours, reused across frames and across triangles.
+        ///
+        /// The shadow's eight triangles all share a single pair - transparent edge to shadow
+        /// colour - so the whole ring costs one native brush rather than eight a frame, and the
+        /// palette a chart can produce is small enough that the dictionary stays flat. The start
+        /// and end points are rewritten on every use (they are the only per-triangle part), so a
+        /// hit is a property set and nothing else.
+        ///
+        /// Disposed alongside the carriers because both are D2D resources created from a device
+        /// that can go away: `DisposePortTextures` is what runs on a device loss and on game
+        /// teardown, and a brush outliving its device is the same failure as a render target
+        /// outliving it.
+        /// </summary>
+        private readonly Dictionary<ulong, CanvasLinearGradientBrush> _portGradients =
+            new Dictionary<ulong, CanvasLinearGradientBrush>();
+
+        private void DisposePortGradients()
+        {
+            foreach (KeyValuePair<ulong, CanvasLinearGradientBrush> kv in _portGradients)
+            {
+                kv.Value.Dispose();
+            }
+            _portGradients.Clear();
+        }
+
+        /// <summary>
+        /// The brush for a two-colour gradient, creating it on the first request for that pair.
+        ///
+        /// Keyed on the two packed colours rather than on the geometry: the colours are what the
+        /// brush *is*, and the endpoints are set by the caller each time. Ordered, so a shadow
+        /// fading outwards and one fading inwards are different brushes and neither reuses the
+        /// other's direction.
+        /// </summary>
+        private CanvasLinearGradientBrush PortGradientBrush(CanvasDrawingSession ds, Color c0, Color c1)
+        {
+            uint k0 = PackColor(c0);
+            uint k1 = PackColor(c1);
+            ulong key = ((ulong)k0 << 32) | k1;
+            CanvasLinearGradientBrush brush;
+            if (!_portGradients.TryGetValue(key, out brush) || brush == null)
+            {
+                brush = new CanvasLinearGradientBrush(ds, c0, c1);
+                _portGradients[key] = brush;
+            }
+            return brush;
+        }
+
+        private static uint PackColor(Color c)
+        {
+            return (uint)((c.R << 24) | (c.G << 16) | (c.B << 8) | c.A);
         }
 
         /// <summary>
@@ -938,9 +993,6 @@ namespace Phirura.Game
             PortCommands = frame.Count;
             PrprPort.PortCmd[] cmds = frame.Commands;
 
-            // Geometry census, throttled to ~1 Hz - see the method below.
-            PortFrameStats(frame, cmds);
-
             // px -> DIP, the one conversion nobody notices until it is missing.
             //
             // Rust projects in the device pixels `GameSetScreen` handed it; a Win2D drawing session
@@ -962,6 +1014,10 @@ namespace Phirura.Game
 
             for (int i = 0; i < frame.Count; i++)
             {
+                // Recorded before the dispatch, not after: a command that takes the process down
+                // never reaches the next line, and the census lines emitted inside `DrawPortTexture`
+                // / `DrawPortGeometry` read this field to report which slot they were replayed from.
+                _portCmdIdx = i;
                 PrprPort.PortCmd c = cmds[i];
                 // The kind's high bits carry the flip flags for textures, so mask before dispatching.
                 uint kind = c.kind & 0xFFFF;
@@ -973,10 +1029,24 @@ namespace Phirura.Game
                         break;
 
                     case 1: // Rect: x/y/w/h then r/g/b/a
-                        ds.FillRectangle(
-                            c.f0, c.f1, c.f2, c.f3,
-                            FloatColor(c.f4, c.f5, c.f6, c.f7));
-                        break;
+                        {
+                            ds.FillRectangle(
+                                c.f0, c.f1, c.f2, c.f3,
+                                FloatColor(c.f4, c.f5, c.f6, c.f7));
+                            // A solid bar is the simplest shape this dispatcher can produce,
+                            // so a reported-missing one cannot be at fault in its geometry or
+                            // its texture - only in where it was drawn. Once a second, with
+                            // the box it was allowed to land in.
+                            if (unchecked(Environment.TickCount - _rectLogTick) >= 1000)
+                            {
+                                _rectLogTick = Environment.TickCount;
+                                AppLog.WriteSync("Win2D: rect (" + c.f0.ToString("0.#") + ","
+                                    + c.f1.ToString("0.#") + "," + c.f2.ToString("0.#") + ","
+                                    + c.f3.ToString("0.#") + ") a=" + c.f7.ToString("0.##")
+                                    + ClipTag() + " i=" + _portCmdIdx);
+                            }
+                            break;
+                        }
 
                     case 2: // Line: x1/y1/x2/y2, thickness, then r/g/b, and the alpha in `vstart`
                         ds.DrawLine(
@@ -1012,6 +1082,19 @@ namespace Phirura.Game
             }
 
             ds.Transform = portTransform;
+
+            // Geometry census, throttled to ~1 Hz - see the method below.
+            //
+            // Deliberately *after* the replay loop instead of before it, which is where it sat
+            // until the 00:49:41 crash. This line is `WriteSync`, so it is on disk the moment it
+            // returns - but while it ran first it could only prove the frame had been *reached*.
+            // A process that died inside the loop therefore left `port frame n=77` looking
+            // exactly like the last line of a healthy frame, which is why that death could not be
+            // read off the log at all. Positioned here, the line's presence *is* the proof that
+            // all `n` commands replayed, and `untext`/`texdraw` emitted from inside the loop with
+            // no census behind them proves the opposite while naming the last command reached via
+            // `i=`. Same single line per second, same cost - only later in the same method.
+            PortFrameStats(frame, cmds);
         }
 
         /// <summary>
@@ -1051,14 +1134,37 @@ namespace Phirura.Game
                 _portClipLayer.Dispose();
                 _portClipLayer = null;
             }
+            _clipRectTag = "";
+
+            float w = c.f2 < 0f ? 0f : c.f2;
+            float h = c.f3 < 0f ? 0f : c.f3;
+
+            // Logged on both edges. `clipOn`/`clipOff` on the frame summary only say that a
+            // layer was opened; what it was opened *to* is the number that decides whether
+            // anything inside it can appear, and an empty or far-off-screen rectangle makes
+            // every such draw vanish while that summary still reads healthy. Change-triggered
+            // and capped, because sixty frames a second of the same two lines would bury the
+            // rest of the log.
+            string sig = (c.flags == 0 ? "off" : "on") + " (" + c.f0.ToString("0.#") + ","
+                + c.f1.ToString("0.#") + "," + w.ToString("0.#") + "," + h.ToString("0.#") + ")";
+            int now = Environment.TickCount;
+            if (unchecked(now - _clipLogTick) >= 1000)
+            {
+                _clipLogTick = now;
+                _clipLogCount = 0;
+                _clipSig = "";
+            }
+            if (_clipLogCount < 8 && sig != _clipSig)
+            {
+                _clipLogCount++;
+                _clipSig = sig;
+                AppLog.WriteSync("Win2D: clip " + sig);
+            }
 
             if (c.flags == 0)
             {
                 return;
             }
-
-            float w = c.f2 < 0f ? 0f : c.f2;
-            float h = c.f3 < 0f ? 0f : c.f3;
 
             Matrix3x2 saved = ds.Transform;
             ds.Transform = Matrix3x2.Identity;
@@ -1066,6 +1172,20 @@ namespace Phirura.Game
                 1f,
                 new Rect(c.f0 * pxToDip, c.f1 * pxToDip, w * pxToDip, h * pxToDip));
             ds.Transform = saved;
+            _clipRectTag = sig.Substring(3);
+        }
+
+        /// <summary>
+        /// Where the draws on this line were allowed to land, or `none`.
+        ///
+        /// Appended to every probe that describes a draw, so those numbers are read against the
+        /// box they were drawn inside rather than on their own. A glyph can have an on-screen
+        /// destination, a source inside the atlas, a non-zero alpha and a carrier with content,
+        /// and still paint nothing if that box does not contain it.
+        /// </summary>
+        private string ClipTag()
+        {
+            return _portClipLayer == null ? " clp=none" : " clp=" + _clipRectTag;
         }
 
         /// <summary>Rate gate for <see cref="PortFrameStats"/>.</summary>
@@ -1103,6 +1223,12 @@ namespace Phirura.Game
             _portStatsTick = now;
 
             int nTex = 0, nRect = 0, nLine = 0, nCircle = 0, nGeo = 0, nClipOn = 0, nClipOff = 0;
+            // Command indices, not counts: everything above counts *how many* of each kind the
+            // frame had, and a frame can have the right counts in the wrong order. The ending
+            // page shows its cover and hides the panel and glyphs drawn on top of it, which is
+            // only contradictory if the cover is first - so the indices settle it outright.
+            int iTex = -1, iRect = -1, iGeoFirst = -1, iGeoLast = -1, iClipFirst = -1;
+            string rectColor = "-";
             double minX = double.MaxValue, minY = double.MaxValue;
             double maxX = double.MinValue, maxY = double.MinValue;
             double vx0 = double.MaxValue, vy0 = double.MaxValue;
@@ -1114,6 +1240,23 @@ namespace Phirura.Game
             // still looks busy while nothing appears - and "the notes and the UI are missing" is
             // exactly that, seen from the outside. These two numbers name it.
             int nGeoTex = 0, nGeoTexMissing = 0;
+            // uv extents across every batch that actually names a texture, plus one such id.
+            // `noCarrier` cannot see this class of fault: the carrier is present and the alpha
+            // is non-zero and nothing is skipped, yet the draw still yields nothing, because
+            // the source rectangle is derived from these numbers and lands off the atlas.
+            float uvMinU = float.MaxValue, uvMinV = float.MaxValue;
+            float uvMaxU = float.MinValue, uvMaxV = float.MinValue;
+            int nUv = 0;
+            uint geoTexId = 0;
+            // Where the textured batches actually sit, and whether any coordinate is NaN.
+            // `vertBbox` cannot answer either question: it is dominated by the background
+            // rect, which spans the whole screen whatever the text does, and a NaN
+            // coordinate is skipped by the `<` comparisons rather than showing up as an
+            // extreme - so a frame full of broken glyph positions still reads as a normal
+            // full-screen bbox. These two close that gap.
+            float tgx0 = float.MaxValue, tgy0 = float.MaxValue;
+            float tgx1 = float.MinValue, tgy1 = float.MinValue;
+            int nTGeo = 0, nTGeoBad = 0;
             // The first geometry vertex's colour and how many of the frame's vertices are fully
             // transparent. A stride mismatch between the shim's record and this reader shows up here
             // as an all-zero colour long before it shows up as a blank screen.
@@ -1127,10 +1270,17 @@ namespace Phirura.Game
                 {
                     case 0:
                         nTex++;
+                        if (iTex < 0) iTex = i;
                         break;
 
                     case 1:
                         nRect++;
+                        if (iRect < 0)
+                        {
+                            iRect = i;
+                            rectColor = c.f4.ToString("0.##") + "," + c.f5.ToString("0.##")
+                                + "," + c.f6.ToString("0.##") + "," + c.f7.ToString("0.##");
+                        }
                         if (c.f0 < minX) minX = c.f0;
                         if (c.f1 < minY) minY = c.f1;
                         if (c.f0 + c.f2 > maxX) maxX = c.f0 + c.f2;
@@ -1147,6 +1297,8 @@ namespace Phirura.Game
 
                     case 4:
                         nGeo++;
+                        if (iGeoFirst < 0) iGeoFirst = i;
+                        iGeoLast = i;
                         // The positions live in the vertex arena, not in `c.f0..f5`: for kind 4
                         // `f0` is the draw mode (0 = triangles, 1 = lines) and f1..f5 are unused.
                         // The first version of this logged those fields and duly reported
@@ -1164,6 +1316,10 @@ namespace Phirura.Game
                             if (c.flags != 0)
                             {
                                 nGeoTex++;
+                                if (geoTexId == 0)
+                                {
+                                    geoTexId = c.flags;
+                                }
                                 if (!_portTextures.ContainsKey(c.flags))
                                 {
                                     nGeoTexMissing++;
@@ -1171,8 +1327,34 @@ namespace Phirura.Game
                             }
                             for (int vi = vs; vi < ve; vi++)
                             {
+                                if (c.flags != 0)
+                                {
+                                    float u = frame.Vertices[vi].u;
+                                    float v = frame.Vertices[vi].v;
+                                    if (u < uvMinU) uvMinU = u;
+                                    if (u > uvMaxU) uvMaxU = u;
+                                    if (v < uvMinV) uvMinV = v;
+                                    if (v > uvMaxV) uvMaxV = v;
+                                    nUv++;
+                                }
                                 float gx = frame.Vertices[vi].x;
                                 float gy = frame.Vertices[vi].y;
+                                if (c.flags != 0)
+                                {
+                                    if (float.IsNaN(gx) || float.IsInfinity(gx)
+                                        || float.IsNaN(gy) || float.IsInfinity(gy))
+                                    {
+                                        nTGeoBad++;
+                                    }
+                                    else
+                                    {
+                                        if (gx < tgx0) tgx0 = gx;
+                                        if (gx > tgx1) tgx1 = gx;
+                                        if (gy < tgy0) tgy0 = gy;
+                                        if (gy > tgy1) tgy1 = gy;
+                                        nTGeo++;
+                                    }
+                                }
                                 if (gx < vx0) vx0 = gx;
                                 if (gy < vy0) vy0 = gy;
                                 if (gx > vx1) vx1 = gx;
@@ -1197,10 +1379,22 @@ namespace Phirura.Game
                         // together are the check: a frame that opens more than it closes (or the
                         // reverse) is a prpr-side imbalance, and a frame with `clipOn=0` while a
                         // scrollable list is on screen means the scissor never reached here.
-                        if (c.flags != 0) nClipOn++; else nClipOff++;
+                        if (c.flags != 0)
+                        {
+                            nClipOn++;
+                            if (iClipFirst < 0) iClipFirst = i;
+                        }
+                        else
+                        {
+                            nClipOff++;
+                        }
                         break;
                 }
             }
+
+            int lastKind = frame.Count > 0
+                ? (int)(cmds[frame.Count - 1].kind & 0xFFFF)
+                : -1;
 
             string bbox = nRect == 0
                 ? "-"
@@ -1213,6 +1407,16 @@ namespace Phirura.Game
                 ? "-"
                 : "(" + vx0.ToString("0.#") + "," + vy0.ToString("0.#") + ")-("
                     + vx1.ToString("0.#") + "," + vy1.ToString("0.#") + ")n=" + nVert;
+
+            string tgSummary = nTGeo == 0
+                ? "-"
+                : "(" + tgx0.ToString("0.#") + "," + tgy0.ToString("0.#") + ")-("
+                  + tgx1.ToString("0.#") + "," + tgy1.ToString("0.#") + ")";
+
+            string uvSummary = nUv == 0
+                ? "-"
+                : uvMinU.ToString("0.###") + "," + uvMinV.ToString("0.###")
+                  + "-" + uvMaxU.ToString("0.###") + "," + uvMaxV.ToString("0.###");
 
             double dipW = _canvas == null ? 0.0 : _canvas.ActualWidth;
             double dipH = _canvas == null ? 0.0 : _canvas.ActualHeight;
@@ -1227,6 +1431,21 @@ namespace Phirura.Game
                 + " particles=" + PrprPort.SpriteQuads()
                 + " pd=" + PrprPort.ParticleDiag(0) + "/" + PrprPort.ParticleDiag(1)
                 + " geoTex=" + nGeoTex + " noCarrier=" + nGeoTexMissing
+                // The one number none of the fields above can show. A textured batch is drawn
+                // by mapping [u0,u1]x[v0,v1] off the atlas onto the destination quad; if the uv
+                // is not normalised to the atlas, that source rectangle falls outside the
+                // image and `DrawImage` produces nothing at all - no exception, no missing
+                // carrier, no alpha0, just silence. That is exactly the report: gradient bars
+                // (untextured geometry) and the background (its own texture command) draw,
+                // while every glyph and sprite does not.
+                + " geoUv=" + uvSummary + " geoTexId=" + geoTexId
+                // Paint order, which is the only reading the counts above cannot give. A
+                // cover drawn last hides every panel and glyph the page put in front of it
+                // while leaving itself perfectly visible - the exact reported picture, and
+                // the only fault the rest of this line is unable to see.
+                + " ord=t" + iTex + " r" + iRect + " g" + iGeoFirst + ".." + iGeoLast
+                + " c" + iClipFirst + " last=" + lastKind + " rc=" + rectColor
+                + " geoBbox=" + tgSummary + " geoNaN=" + nTGeoBad
                 + " alpha0=" + nAlphaZero + "/" + nVert + " vtx0=" + firstVtx
                 + " rectBbox=" + bbox + " vertBbox=" + vertBbox
                 + " canvasDip=" + dipW.ToString("0.##") + "x" + dipH.ToString("0.##")
@@ -1683,6 +1902,44 @@ namespace Phirura.Game
                 _lastQuad = quad;
                 _lastSrc = src;
 
+                // What this draw was really asked to do. The two numbers that decide whether
+                // anything can appear are the destination quad (did it land on screen) and
+                // the source rectangle (is it inside the atlas's *used* region). A flipped
+                // v axis hides best of all: the uv still reads 0..1 and the carrier is still
+                // present, but the source rows are the never-written bottom of the atlas, so
+                // the draw succeeds and paints transparency. The glyph rows are known from
+                // the `port texture ... delta` lines, so `src.Y` settles it.
+                _texDraws++;
+                // Census rather than sample. The old gate - first three, then every
+                // four-thousandth - walks past whatever a static page is showing and keeps
+                // reporting the same few shapes, which is how a page can be measured in
+                // detail while the element in the report is never logged. Change-triggered,
+                // so every distinct destination lands within about a second, with a budget so
+                // a scrolling list still cannot flood the file.
+                float tdw = maxX - minX, tdh = maxY - minY;
+                bool tFresh = minX != _lastTdX || minY != _lastTdY
+                    || tdw != _lastTdW || tdh != _lastTdH;
+                int tNow = Environment.TickCount;
+                if (unchecked(tNow - _tdLogTick) >= 1000)
+                {
+                    _tdLogTick = tNow;
+                    _tdLogBudget = 40;
+                    _lastTdX = float.MinValue;
+                    tFresh = true;
+                }
+                if (tFresh && _tdLogBudget > 0)
+                {
+                    _tdLogBudget--;
+                    _lastTdX = minX; _lastTdY = minY; _lastTdW = tdw; _lastTdH = tdh;
+                    AppLog.WriteSync("Win2D: texdraw id=" + texId
+                        + " dst=(" + minX.ToString("0.#") + "," + minY.ToString("0.#")
+                        + "," + (maxX - minX).ToString("0.#") + "," + (maxY - minY).ToString("0.#") + ")"
+                        + " src=(" + src.X.ToString("0.#") + "," + src.Y.ToString("0.#")
+                        + "," + src.Width.ToString("0.#") + "," + src.Height.ToString("0.#") + ")"
+                        + " a=" + alpha.ToString("0.##")
+                        + " atlas=" + tex.PixelWidth + "x" + tex.PixelHeight
+                        + ClipTag() + " i=" + _portCmdIdx);
+                }
                 ds.DrawImage(tex.Target, quad, src, alpha, CanvasImageInterpolation.Linear);
                 return;
             }
@@ -1696,11 +1953,109 @@ namespace Phirura.Game
             // thousands a second: frame time climbed steadily over a session (78 fps in the first
             // minute, 26 by minute ten) until the render thread was saturated enough that touches
             // were no longer serviced.
+            // The untextured half of this method has never had a probe. `geoTex` counts only
+            // the batches that name a texture, so a gradient, a panel or a button body can be
+            // emitted, drawn and clipped away while the frame summary reads entirely healthy -
+            // and the ending page's half-panel is exactly such a shape. One line a second says
+            // where it landed, at what alpha and colour, and whether a layer was over it. The
+            // box is computed only when the line is due: this runs per untextured triangle per
+            // frame, and the arithmetic is not worth doing sixty times over to be thrown away.
+            float ux0 = Math.Min(a.x, Math.Min(b.x, c.x));
+            float uy0 = Math.Min(a.y, Math.Min(b.y, c.y));
+            float ux1 = Math.Max(a.x, Math.Max(b.x, c.x));
+            float uy1 = Math.Max(a.y, Math.Max(b.y, c.y));
+            // Same census as `texdraw`: the once-a-second gate always caught the first
+            // untextured shape in the frame, so a panel or gradient drawn later in the same
+            // frame was structurally invisible to this line - which is the shape of the
+            // reported missing background.
+            bool uFresh = ux0 != _lastUnX || uy0 != _lastUnY
+                || (ux1 - ux0) != _lastUnW || (uy1 - uy0) != _lastUnH;
+            int uNow = Environment.TickCount;
+            if (unchecked(uNow - _unLogTick) >= 1000)
+            {
+                _unLogTick = uNow;
+                _unLogBudget = 40;
+                _lastUnX = float.MinValue;
+                uFresh = true;
+            }
+            // `cv*` rather than `v*`: the textured half above already owns `v0`/`v1` as UV bounds,
+            // and C# forbids reusing the name anywhere later in the same method body. Computed ahead
+            // of the census line instead of after it so that line can say which of the two fills
+            // below this triangle is about to run: a death on a flat fill and a death on the
+            // gradient fill leave the same surviving line otherwise, and only one of the two
+            // implicates the brush cache.
+            Color cv0 = FloatColor(a.r, a.g, a.b, a.a);
+            Color cv1 = FloatColor(b.r, b.g, b.b, b.a);
+            Color cv2 = FloatColor(c.r, c.g, c.b, c.a);
+            bool uFlat = cv0 == cv1 && cv1 == cv2;
+            if (uFresh && _unLogBudget > 0)
+            {
+                _unLogBudget--;
+                _lastUnX = ux0; _lastUnY = uy0;
+                _lastUnW = ux1 - ux0; _lastUnH = uy1 - uy0;
+                AppLog.WriteSync("Win2D: untext dst=(" + ux0.ToString("0.#") + "," + uy0.ToString("0.#")
+                    + "," + (ux1 - ux0).ToString("0.#") + "," + (uy1 - uy0).ToString("0.#")
+                    + ") a=" + alpha.ToString("0.##")
+                    + " rgb=" + a.r.ToString("0.##") + "," + a.g.ToString("0.##") + "," + a.b.ToString("0.##")
+                    + ClipTag() + " i=" + _portCmdIdx + " g=" + (uFlat ? 0 : 1));
+            }
+            if (uFlat)
+            {
+                // Genuinely flat - a solid panel, a note body, a judge-line stroke. One fill, and
+                // the shape the census above has been measuring all along.
+                using (CanvasGeometry tri = PortTriangle(ds, a, b, c))
+                {
+                    ds.FillGeometry(tri, FloatColor(a.r, a.g, a.b, alpha));
+                }
+                return;
+            }
+
+            // The vertices disagree, so this is a real gradient, and filling it with one colour is
+            // what turned `rect_shadow`'s outer-edge-to-inner-edge fade into eight flat patches
+            // whose alphas alternated 0.33 / 0.67 - the visible seams and horizontal banding in the
+            // report. Barycentric vertex colours form an affine field over the triangle, and an
+            // affine field is linear along any segment of it, so a linear brush spanning the two
+            // vertices whose colours differ most traces prpr's gradient instead of averaging it
+            // away. prpr's gradients are one-dimensional by construction (the two outer vertices of
+            // a shadow band share a colour), which is the case where this is exact rather than
+            // merely closer.
+            float d01 = ColorDist(cv0, cv1);
+            float d02 = ColorDist(cv0, cv2);
+            float d12 = ColorDist(cv1, cv2);
+            Color e0, e1;
+            float ax, ay, bx, by;
+            if (d01 >= d02 && d01 >= d12)
+            {
+                e0 = cv0; ax = a.x; ay = a.y; e1 = cv1; bx = b.x; by = b.y;
+            }
+            else if (d02 >= d12)
+            {
+                e0 = cv0; ax = a.x; ay = a.y; e1 = cv2; bx = c.x; by = c.y;
+            }
+            else
+            {
+                e0 = cv1; ax = b.x; ay = b.y; e1 = cv2; bx = c.x; by = c.y;
+            }
+            CanvasLinearGradientBrush grad = PortGradientBrush(ds, e0, e1);
+            grad.StartPoint = new Vector2(ax, ay);
+            grad.EndPoint = new Vector2(bx, by);
             using (CanvasGeometry tri = PortTriangle(ds, a, b, c))
             {
-                ds.FillGeometry(tri, FloatColor(a.r, a.g, a.b, alpha));
+                ds.FillGeometry(tri, grad);
             }
         }
+
+        private static float ColorDist(Color x, Color y)
+        {
+            float dr = x.R - y.R, dg = x.G - y.G, db = x.B - y.B, da = x.A - y.A;
+            return dr * dr + dg * dg + db * db + da * da;
+        }
+
+        /// <summary>
+        /// How many textured triangles have been drawn, for rate-limiting the `texdraw` line.
+        /// Strided rather than per-frame: this runs a few thousand times a second in play.
+        /// </summary>
+        private int _texDraws;
 
         /// <summary>
         /// Builds the solid-colour triangle the textured path cannot cover.
@@ -2145,7 +2500,20 @@ namespace Phirura.Game
             // itself that decides whether "white" means "the texture really is white" or "the
             // texture is fine and something else is hiding it", and re-probing every delta would
             // pay for an answer that cannot change.
-            bool firstBand = full;
+            // Probed on every upload, full or delta - and a delta is where this question
+            // actually lives.
+            //
+            // The band below is patched in with `CanvasBlend.Copy`, which makes the
+            // destination region *become* the source, transparent pixels included. So an
+            // empty delta is not "adds nothing": it erases the rectangle it names. Every
+            // byte of text reaches a glyph atlas through exactly that path - a full read
+            // happens once at registration, before most glyphs exist - which means the
+            // content of a delta is the one reading the probe could get wrong without
+            // anything else in the frame changing.
+            //
+            // Restricted to the first band so an upload still costs one line: a full read
+            // is four bands of the same atlas, and the answer does not vary within it.
+            bool firstBand = true;
             System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
             try
             {
@@ -2177,7 +2545,8 @@ namespace Phirura.Game
                         {
                             firstBand = false;
                             AppLog.WriteSync("Win2D: port texture " + id + " band0 "
-                                + w + "x" + band + " " + BandSummary(rgba));
+                                + w + "x" + band + " @" + x + "," + y
+                        + " " + BandSummary(rgba));
                         }
                         PaintPortBand(ds.Device, target, x, y + row, w, band, rgba);
                         row += band;
@@ -2422,6 +2791,30 @@ namespace Phirura.Game
         private bool _hasLastQuad;
         private Rect _lastQuad;
         private Rect _lastSrc;
+
+        // What the clip layer in force is clipping to, empty when there is none. `texdraw`
+        // proves a glyph was drawn on screen out of a carrier whose content is there; it says
+        // nothing about whether a layer was covering it. The ending page is the only scene in
+        // active use that opens one, so without this the two readings "the text is drawn
+        // wrongly" and "the text is drawn correctly and then cut away" are the same line.
+        private string _clipRectTag = "";
+        private string _clipSig = "";
+        private int _clipLogTick = int.MinValue / 2;
+        private int _clipLogCount;
+        private int _rectLogTick = int.MinValue / 2;
+        // Last destination logged by each census, as floats so the hot path can compare
+        // without building a string, plus its budget for the current second.
+        private float _lastTdX = float.MinValue, _lastTdY, _lastTdW, _lastTdH;
+        private float _lastUnX = float.MinValue, _lastUnY, _lastUnW, _lastUnH;
+        private int _tdLogTick = int.MinValue / 2, _tdLogBudget;
+        private int _unLogTick = int.MinValue / 2, _unLogBudget;
+        // Index into the current frame's command list of the command being replayed, kept in a
+        // field because `DrawPortTexture`/`DrawPortGeometry` are called from the replay loop but
+        // declared far from it. The process dies inside the loop, so the last line that survives
+        // is the census line of the faulting command; without this number that line says what
+        // shape was being drawn but not whether it was command 14 of 57 or the very last one,
+        // and those two cases point at completely different code.
+        private int _portCmdIdx = -1;
 
         // Scratch for the six vertices of one quad, reused rather than allocated: `TryDrawPortQuad`
         // runs once per sprite per frame, and a fresh array there would be the same per-frame garbage

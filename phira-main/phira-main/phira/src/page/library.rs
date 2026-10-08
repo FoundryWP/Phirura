@@ -1038,25 +1038,50 @@ impl Page for LibraryPage {
             }
         }
         if self.delete_multi.swap(false, Ordering::Relaxed) {
-            let selected = self.tabs.selected_mut().view.multi_select.take().unwrap();
-            let selected = selected.into_iter().collect::<HashSet<_>>();
-            let data = get_data_mut();
-            let mut local_paths = HashSet::new();
-            for chart in &selected {
-                if let Some(path) = chart.find_local_path()? {
-                    match std::fs::remove_dir_all(format!("{}/{path}", dir::charts()?)) {
-                        Ok(_) => {}
-                        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                        Err(err) => return Err(err.into()),
+            // The flag is raised by a dialog that can outlive the selection it was raised from,
+            // so `.take().unwrap()` turned "selection already cleared" into a panic on the delete
+            // button itself. The three `?`s below had the same shape: failing to resolve a chart's
+            // path, failing to open the charts root, or failing to remove a folder that is already
+            // gone each ended the process instead of just the operation. None of them do now.
+            let selected = self
+                .tabs
+                .selected_mut()
+                .view
+                .multi_select
+                .take()
+                .map(|it| it.into_iter().collect::<HashSet<_>>());
+            match selected {
+                None => crate::log_line("library: delete_multi raised with no selection; nothing deleted"),
+                Some(selected) => {
+                    let data = get_data_mut();
+                    let mut local_paths = HashSet::new();
+                    for chart in &selected {
+                        let path = match chart.find_local_path() {
+                            Ok(Some(path)) => Some(path),
+                            Ok(None) => None,
+                            Err(err) => {
+                                crate::log_line(&format!("library: delete could not resolve a path: {err:?}"));
+                                None
+                            }
+                        };
+                        let Some(path) = path else { continue };
+                        match dir::charts() {
+                            Ok(root) => match std::fs::remove_dir_all(format!("{}/{path}", root)) {
+                                Ok(_) => {}
+                                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                                Err(err) => crate::log_line(&format!("library: delete folder failed for {path}: {err}")),
+                            },
+                            Err(err) => crate::log_line(&format!("library: delete folder failed for {path}: {err:?}")),
+                        }
+                        local_paths.insert(path);
                     }
-                    local_paths.insert(path);
+                    data.charts.retain(|it| !local_paths.contains(it.local_path.as_str()));
+                    let _ = save_data();
+                    show_message(tl!("multi-deleted")).ok();
+                    s.reload_local_charts();
+                    self.sync_local(s);
                 }
             }
-            data.charts.retain(|it| !local_paths.contains(it.local_path.as_str()));
-            let _ = save_data();
-            show_message(tl!("multi-deleted")).ok();
-            s.reload_local_charts();
-            self.sync_local(s);
         }
         if self.order_meta_menu.changed() {
             match self.order_meta_menu.selected() {

@@ -637,8 +637,11 @@ namespace Phirura
                 return;
             }
 
-            string root = Windows.Storage.ApplicationData.Current.LocalFolder.Path + "\\charts";
+            // Two roots since the split (FIXLIST #6, choice C); see `PrprPort.AssetPackRoot`.
+            string localFolder = Windows.Storage.ApplicationData.Current.LocalFolder.Path;
+            string root = localFolder + "\\charts";
             PrprPort.AssetRoot = root;
+            PrprPort.AssetPackRoot = localFolder + "\\respack";
             AppLog.WriteSync("RustStage1: engine create \"" + EngineFolder + "/" + EngineChart
                 + "\" root=" + root + " screen=" + _vpW + "x" + _vpH + " (engine thread)");
 

@@ -170,6 +170,11 @@ impl Illustration {
                 match illu {
                     Err(err) => {
                         warn!(?err, "failed to load illustration");
+                        // `warn!` writes nothing on this target, and this arm is the only place a
+                        // failed cover is noticed at all - so a chart with a perfectly good
+                        // illustration on disk was just a black page, with no line anywhere in the
+                        // log to say that anything had been attempted.
+                        crate::log_line(&format!("illustration failed: {err:?}"));
                     }
                     Ok(illu) => {
                         self.texture = Images::into_texture(illu);

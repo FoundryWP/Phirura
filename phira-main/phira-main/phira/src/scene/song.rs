@@ -166,7 +166,12 @@ fn create_music(clip: AudioClip) -> Result<Music> {
     Ok(music)
 }
 
-fn with_effects((mut frames, sample_rate): (Vec<Frame>, u32), range: Option<(f32, f32)>) -> Result<AudioClip> {
+/// Cut a decoded soundtrack down to the preview window and shape its ends.
+///
+/// `name` rides out on the clip so the shell can find the file these frames were cut from - see
+/// `AudioClip::from_raw_named`. It is `preview|<from>|<to>|<local_path>/<file>` for a chart's own
+/// soundtrack, and `preview|0|0|` for a server preview the shell has no file to open.
+fn with_effects(name: &str, (mut frames, sample_rate): (Vec<Frame>, u32), range: Option<(f32, f32)>) -> Result<AudioClip> {
     if let Some((begin, end)) = range {
         frames.drain(((end * sample_rate as f32) as usize).min(frames.len())..);
         frames.drain(..((begin * sample_rate as f32) as usize));
@@ -184,7 +189,7 @@ fn with_effects((mut frames, sample_rate): (Vec<Frame>, u32), range: Option<(f32
         frame.0 *= s;
         frame.1 *= s;
     }
-    Ok(AudioClip::from_raw(frames, sample_rate))
+    Ok(AudioClip::from_raw_named(name, frames, sample_rate))
 }
 
 async fn load_local_tuple(local_path: &str, def_illu: SafeTexture, info: ChartInfo) -> Result<LocalTuple> {
@@ -214,7 +219,12 @@ async fn load_local_tuple(local_path: &str, def_illu: SafeTexture, info: ChartIn
     if info.preview_end.unwrap_or(info.preview_start + 1.) > length {
         tl!(bail "edit-preview-invalid");
     }
-    let preview = with_effects((frames, sample_rate), Some((info.preview_start, info.preview_end.unwrap_or(info.preview_start + 15.))))?;
+    // Named with the file it came from *and* the window it was cut from: the shell needs the first
+    // to open the right audio - it used to fall through to whichever chart it had resolved before
+    // boot - and the second to put that file where these frames start.
+    let preview_range = (info.preview_start, info.preview_end.unwrap_or(info.preview_start + 15.));
+    let preview_name = format!("preview|{:.1}|{:.1}|{local_path}/{}", preview_range.0, preview_range.1, info.music);
+    let preview = with_effects(&preview_name, (frames, sample_rate), Some(preview_range))?;
     let illu = local_illustration(local_path.to_owned(), def_illu, true);
     illu.notify.notify_one();
 
@@ -493,13 +503,19 @@ impl SongScene {
                     if let Some(path) = local_path {
                         let mut fs = fs_from_path(&path)?;
                         let info = fs::load_info(fs.as_mut()).await?;
-                        with_effects(
-                            AudioClip::decode(fs.load_file(&info.music).await?)?,
-                            Some((info.preview_start, info.preview_end.unwrap_or(info.preview_start + 15.))),
-                        )
+                        let range = (info.preview_start, info.preview_end.unwrap_or(info.preview_start + 15.));
+                        let name = format!("preview|{:.1}|{:.1}|{path}/{}", range.0, range.1, info.music);
+                        with_effects(&name, AudioClip::decode(fs.load_file(&info.music).await?)?, Some(range))
                     } else {
-                        let chart = Ptr::<Chart>::new(id.unwrap()).fetch().await?;
-                        with_effects(AudioClip::decode(chart.preview.fetch().await?.to_vec())?, None)
+                        // Same as the download path: an idless chart cannot be fetched, and the
+                        // `unwrap` that used to be here was a panic on a page that otherwise
+                        // rendered fine.
+                        let chart_id = id.ok_or_else(|| anyhow::anyhow!("chart has no id; cannot fetch its preview"))?;
+                        let chart = Ptr::<Chart>::new(chart_id).fetch().await?;
+                        // Server preview: the bytes are here but the shell has no file to open, and
+                        // the empty path after the third bar is what tells it to stay silent rather
+                        // than reach for whichever chart it resolved before boot.
+                        with_effects("preview|0|0|", AudioClip::decode(chart.preview.fetch().await?.to_vec())?, None)
                     }
                 }
             })),
@@ -709,7 +725,15 @@ impl SongScene {
                         tokio::fs::remove_dir_all(&path).await?;
                     }
 
-                    let local_path = format!("download/{}", chart.id.unwrap());
+                    // The id came off the wire as an option, and an `unwrap` here closed the whole
+                    // app on a chart that had downloaded perfectly well - the shape of the reported
+                    // "reading a chart crashes the game". An `Err` ends this download instead, and
+                    // the download path is what surfaces it.
+                    let chart_id = match chart.id {
+                        Some(id) => id,
+                        None => anyhow::bail!("downloaded chart has no id; refusing to name its folder"),
+                    };
+                    let local_path = format!("download/{chart_id}");
                     let to_path = format!("{}/{local_path}", dir::charts()?);
                     let to_path = Path::new(&to_path);
                     {
