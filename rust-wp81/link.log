@@ -1,9 +1,0 @@
-﻿Microsoft (R) Incremental Linker Version 11.00.60610.1
-Copyright (C) Microsoft Corporation.  All rights reserved.
-
-   Creating library E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\link-probe\out\wp81probe.lib and object E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\link-probe\out\wp81probe.exp
-wp81_link_probe.lib(std-bba471de6efb32b6.std.a34b8272e14a63e2-cgu.04.rcgu.o) : warning LNK4217: locally defined symbol SetEnvironmentVariableW imported in function _RNvNtNtNtCse1dlmQ8zL9e_3std3sys3env7windows6setenv
-wp81_link_probe.lib(std-bba471de6efb32b6.std.a34b8272e14a63e2-cgu.12.rcgu.o) : warning LNK4217: locally defined symbol SetCurrentDirectoryW imported in function _RNvNtNtNtCse1dlmQ8zL9e_3std3sys5paths7windows5chdir
-wp81_link_probe.lib(std-bba471de6efb32b6.std.a34b8272e14a63e2-cgu.06.rcgu.o) : warning LNK4217: locally defined symbol CreatePipe imported in function _RNvNtNtNtCse1dlmQ8zL9e_3std3sys4pipe7windows4pipe
-wp81_link_probe.lib(std-bba471de6efb32b6.std.a34b8272e14a63e2-cgu.14.rcgu.o) : warning LNK4217: locally defined symbol GetEnvironmentVariableW imported in function _RINvNtNtNtCse1dlmQ8zL9e_3std3sys3pal7windows14fill_utf16_bufNCNvNtNtB6_3env7windows6getenv0NvYNtNtNtB8_3ffi6os_str8OsStringNtNtNtNtB8_2os7windows3ffi11OsStringExt9from_wideB1u_EB8_
-wp81_link_probe.lib(std-bba471de6efb32b6.std.a34b8272e14a63e2-cgu.14.rcgu.o) : warning LNK4217: locally defined symbol GetCurrentDirectoryW imported in function _RINvNtNtNtCse1dlmQ8zL9e_3std3sys3pal7windows14fill_utf16_bufNCNvNtNtB6_5paths7windows6getcwd0NvB2_7os2pathNtNtB8_4path7PathBufEB8_

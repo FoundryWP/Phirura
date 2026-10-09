@@ -131,11 +131,14 @@
     <Content Include="Assets\StoreLogo.scale-240.png" />
     <Content Include="Assets\WideLogo.scale-240.png" />
   </ItemGroup>
-  <ItemGroup>
-    <!-- Bundled demo song so the port is playable without importing anything. -->
-    <Content Include="Assets\demo\chart.json" />
-    <Content Include="Assets\demo\demo.wav" />
-  </ItemGroup>
+  <!--
+    `Assets\demo\` (chart.json + demo.wav) is deliberately NOT packaged any more. The port is
+    playable without importing anything because of `Assets\charts\190`, which
+    `EnsureBundledChartAsync` copies into phira's own `data/charts/custom/190`, and
+    `ChartLibrary` no longer emits the `appx:demo` card that was the only reader of this
+    folder. Keeping it would ship ~2.8 MB behind a `ms-appx:///Assets/demo/chart.json` that
+    nothing opens any more.
+  -->
   <ItemGroup>
     <!--
       Note / hold / hit textures and fonts used by the chart renderer, plus the audio.
@@ -161,17 +164,37 @@
     <Content Include="Assets\game\switch.wav" />
 
     <!--
-        The whole phira asset tree, so a build is self-contained.
+        What the app needs to RUN, shipped inside the package.
 
-        Without it the chart, the respack and every shared UI image had to be pushed from the PC with
-        `stage-chart.ps1 -Push` before the app would do anything at all - and a missing push showed up
-        on the device as "asset not found", not as a build error.
+        `Assets\respack` is the half phira cannot do without: `font.ttf`, every UI sprite, the
+        hit sounds, `rank\`, `mod\`. Real phira makes the player import this as a resource pack
+        before it draws anything at all, so a build that shipped without it would not be
+        "不需要任何导入资源" - it would be an app that needs an import nobody can perform on a
+        phone. `SeedRootAsync` copies it into `LocalFolder\respack` on first launch, which is
+        also what makes `stage-chart.ps1 -Push` unnecessary: without that copy a missing push
+        showed up on the device as "asset not found", never as a build error.
 
-        A recursive glob rather than 114 explicit items on purpose: this tree is generated output of
-        that push, so listing it by hand would mean a csproj edit for every asset ever added, and the
-        failure mode of forgetting one is a device-only symptom.
+        Charts are the opposite case and are deliberately NOT shipped. phira reads them from its
+        own `data/charts` - downloaded from the online library, or imported by the player - and
+        `dir::charts()` creates that tree itself, so an empty library on a fresh phone is a
+        working state rather than a broken one. `Assets\charts\` is kept as the hook for
+        bundling one: a chart dropped in there ships as soon as its name comes off the
+        `Exclude`, and `EnsureBundledChartAsync` will copy it into phira's library on first
+        launch.
+
+        Both folders currently under that root are excluded on purpose - `190` (the development
+        chart) and `demo` (the second copy of the demo: chart.json + demo.wav + info.yml, the
+        same bytes as `Assets\demo\`). Unlike the `appx:demo` card, which `ChartLibrary` has
+        stopped emitting, this copy would surface on its own: seeding puts it into
+        `LocalFolder\charts` and `ChartLibrary.LoadAllAsync` enumerates that folder and turns
+        every entry it finds into a playable card.
+
+        `Exclude` rather than a second item because MSBuild 12 has no `<Content Remove>`, and
+        the glob is recursive on purpose so that a chart or an asset added later is packaged
+        without a csproj edit - which is exactly why the two names that must not ship have to be
+        spelled out here.
     -->
-    <Content Include="Assets\charts\**\*" />
+    <Content Include="Assets\charts\**\*" Exclude="Assets\charts\190\**\*;Assets\charts\demo\**\*" />
     <Content Include="Assets\respack\**\*" />
   </ItemGroup>
   <ItemGroup>

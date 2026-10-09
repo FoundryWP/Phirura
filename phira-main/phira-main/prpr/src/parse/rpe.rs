@@ -489,6 +489,64 @@ fn parse_speed_events_legacy(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f
     Ok(AnimFloat::new(kfs))
 }
 
+/// Bytes of decoded RGBA a single GIF judge line is allowed to hold, and the smallest linear scale
+/// its frames may be shrunk to before frames start being dropped instead.
+///
+/// An RPE chart may attach an animated GIF to a judge line, and `GifFrames` keeps every decoded
+/// frame resident for the entire song because the draw path only ever picks one per tick. A 480x480
+/// GIF of 118 frames decodes to 103 MB - a quarter of this device's whole app-memory budget held by
+/// one decorative judge line - and the OS kills the process for it with no error, no panic and no
+/// managed exception: the game simply stops mid-song. Shrinking the frames costs resolution on a
+/// background element nobody reads closely; the alternative costs the game.
+const GIF_FRAME_BUDGET: usize = 12 * 1024 * 1024;
+const GIF_MIN_SCALE: f32 = 0.25;
+
+fn gif_frame_bytes(frame: &image::RgbaImage) -> usize {
+    frame.width() as usize * frame.height() as usize * 4
+}
+
+/// Caps the resident size of a decoded GIF before its frames become textures.
+///
+/// Resolution is spent first and frames only second. A gif judge line is decoration, so a softer
+/// image reads fine, whereas a halved frame rate reads as stutter - and dropping frames cannot help
+/// at all until the smallest permitted scale has already been tried, because the budget is an
+/// absolute byte ceiling and only scale moves enough of it at once.
+fn shrink_gif_frames(frames: &mut Vec<(u128, image::RgbaImage)>) {
+    if frames.is_empty() {
+        return;
+    }
+    let mut total: usize = frames.iter().map(|(_, frame)| gif_frame_bytes(frame)).sum();
+    if total <= GIF_FRAME_BUDGET {
+        return;
+    }
+    let scale = (GIF_FRAME_BUDGET as f32 / total as f32).sqrt().max(GIF_MIN_SCALE).min(1.0);
+    if scale < 1.0 {
+        for (_, frame) in frames.iter_mut() {
+            let width = ((frame.width() as f32 * scale) as u32).max(1);
+            let height = ((frame.height() as f32 * scale) as u32).max(1);
+            *frame = image::imageops::resize(frame, width, height, image::imageops::FilterType::Triangle);
+        }
+        total = frames.iter().map(|(_, frame)| gif_frame_bytes(frame)).sum();
+    }
+    // Still over the ceiling even at the smallest scale: thin the animation out. The dropped
+    // frame's delay is folded into the frame that survives it, so `total_time` is unchanged - and
+    // that value is what `parse_gif_events` times every keyframe against, so letting it drift would
+    // desynchronise the gif's own events from the chart rather than merely make it choppier.
+    while total > GIF_FRAME_BUDGET && frames.len() > 1 {
+        let len = frames.len();
+        let mut iter = std::mem::take(frames).into_iter();
+        let mut kept: Vec<(u128, image::RgbaImage)> = Vec::with_capacity(len / 2 + 1);
+        while let Some(mut frame) = iter.next() {
+            if let Some(next) = iter.next() {
+                frame.0 = frame.0.saturating_add(next.0);
+            }
+            kept.push(frame);
+        }
+        *frames = kept;
+        total = frames.iter().map(|(_, frame)| gif_frame_bytes(frame)).sum();
+    }
+}
+
 fn parse_gif_events<V: Clone + Into<f32>>(r: &mut BpmList, rpe: &[RPEEvent<V>], bezier_map: &BezierMap, gif: &GifFrames) -> Result<Anim<f32>> {
     let mut kfs = Vec::new();
     kfs.push(Keyframe::new(0.0, 0.0, 2));
@@ -758,21 +816,26 @@ async fn parse_judge_line(
                     .load_file(&rpe.texture)
                     .await
                     .with_context(|| ptl!("gif-load-failed", "path" => rpe.texture.clone()))?;
+                let mut decoded: Vec<(u128, image::RgbaImage)> = tokio::spawn(async move {
+                    let decoder = gif::GifDecoder::new(Cursor::new(data))?;
+                    debug!("decoding gif");
+                    Ok::<std::vec::Vec<_>, ImageError>(decoder.into_frames().collect())
+                })
+                .into_future()
+                .await??
+                .into_iter()
+                .map(|frame| -> (u128, image::RgbaImage) {
+                    let frame = frame.unwrap();
+                    let delay: Duration = frame.delay().into();
+                    (delay.as_millis(), frame.into_buffer())
+                })
+                .collect();
+                shrink_gif_frames(&mut decoded);
                 let frames = GifFrames::new(
-                    tokio::spawn(async move {
-                        let decoder = gif::GifDecoder::new(Cursor::new(data))?;
-                        debug!("decoding gif");
-                        Ok::<std::vec::Vec<_>, ImageError>(decoder.into_frames().collect())
-                    })
-                    .into_future()
-                    .await??
-                    .into_iter()
-                    .map(|frame| -> (u128, SafeTexture) {
-                        let frame = frame.unwrap();
-                        let delay: Duration = frame.delay().into();
-                        (delay.as_millis(), SafeTexture::from(DynamicImage::ImageRgba8(frame.into_buffer())))
-                    })
-                    .collect(),
+                    decoded
+                        .into_iter()
+                        .map(|(time, image)| (time, SafeTexture::from(DynamicImage::ImageRgba8(image))))
+                        .collect(),
                 );
                 debug!("gif decoded");
                 let events = parse_gif_events(r, events, bezier_map, &frames).with_context(|| ptl!("gif-events-parse-failed"))?;

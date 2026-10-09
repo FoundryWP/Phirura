@@ -196,6 +196,7 @@ $staged = Get-ChildItem $Out -Recurse -File
 # Taken before step 2 because step 2 uninstalls, which is the moment the data stops existing.
 # ---------------------------------------------------------------------------
 $dataKeep = $null
+$logKeep = $null
 if ($Deploy -or $Push) {
     $keepDir = "E:\_phirura_keep"
     if (Test-Path $keepDir) {
@@ -216,6 +217,23 @@ if ($Deploy -or $Push) {
         # No `data` yet, or `ts` failed against a locked store. Either way there is nothing to
         # put back, and claiming otherwise would read as a preserved login in the run output.
         "no LocalState\data in the store - nothing to preserve"
+    }
+
+    # `phirura.log` sits at LocalFolder's ROOT, so `rs` deletes it along with everything else -
+    # and unlike `data` the loss is invisible. `AppLog` opens with `CreationCollisionOption.
+    # OpenIfExists`, so the next launch silently recreates a file whose first line is
+    # `=== Phirura launched ===`, and the previous session is simply gone. That is what made
+    # every pull read as "a session with no past": an ending page played before the push looked
+    # exactly like one that had never run, and the run was reported as empty three times in a
+    # row. The log is the one artefact whose entire job is to outlive a deploy, so it joins
+    # `data` in this same pre-uninstall pull - which has to happen before step 2, because
+    # `/uninstall` is the moment LocalState stops existing.
+    $keepLog = Join-Path $keepDir "IsolatedStore\phirura.log"
+    if (Test-Path $keepLog) {
+        $logKeep = $keepLog
+        "kept phirura.log: {0} bytes" -f (Get-Item -LiteralPath $keepLog).Length
+    } else {
+        "no phirura.log in the store - nothing to preserve"
     }
 }
 
@@ -256,6 +274,14 @@ if ($Push) {
             $n = (Get-ChildItem -LiteralPath $merged -Recurse -File | Measure-Object).Count
             "merged kept data: $n files -> $Out\data"
         }
+    }
+    # The log goes back the same way and before `rs` for the same reason: restoring it afterwards
+    # would be a restore onto a store `rs` already emptied. Appending across deploys is exactly
+    # what `OpenIfExists` is for, and `AppLog`'s size rotation keeps the file bounded on its own.
+    if ($logKeep -and (Test-Path $logKeep)) {
+        $logDst = Join-Path $Out "phirura.log"
+        Copy-Item -LiteralPath $logKeep -Destination $logDst -Force
+        "merged kept phirura.log -> {0} bytes" -f (Get-Item -LiteralPath $logDst).Length
     }
     & $ise rs $Device $ProductId $Out 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { Write-Warning "ISETool rs exit $LASTEXITCODE" }

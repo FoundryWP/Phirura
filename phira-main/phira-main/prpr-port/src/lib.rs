@@ -1023,6 +1023,17 @@ pub extern "C" fn wp81_texture_drop_info(index: u32) -> u32 {
         4 => bytes as u32,
         5 => macroquad::draw::texture_used_bytes() as u32,
         6 => macroquad::draw::texture_capacity() as u32,
+        // The reclaimer's own view. `held=` pinned at the cap with drops still happening had two
+        // opposite explanations - nothing readable to give, or every candidate overlapped a
+        // survivor - and the reading was being argued from the drop count alone. 7..10 are the
+        // pass counters, 11..13 the held bytes split by the exact predicate the pass tests.
+        7 => macroquad::draw::texture_evict_stats().0,
+        8 => macroquad::draw::texture_evict_stats().1,
+        9 => macroquad::draw::texture_evict_stats().2,
+        10 => macroquad::draw::texture_evict_stats().3,
+        11 => macroquad::draw::texture_pool_split().0,
+        12 => macroquad::draw::texture_pool_split().1,
+        13 => macroquad::draw::texture_pool_split().2,
         _ => 0,
     }
 }

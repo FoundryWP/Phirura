@@ -1240,6 +1240,16 @@ namespace Phirura.Game
             // still looks busy while nothing appears - and "the notes and the UI are missing" is
             // exactly that, seen from the outside. These two numbers name it.
             int nGeoTex = 0, nGeoTexMissing = 0;
+            // How many batches each texture id accounted for. `geoTexId` below names only the
+            // *first* textured batch, so "the note sprites are emitted" and "the note sprites are
+            // never emitted" produce the same line - a chart with 406 notes draws every one of
+            // them every frame, and one id beside a total cannot say which sprite that id is, or
+            // whether any note sprite is in the frame at all. On this target the four note
+            // textures are 77=click 78=hold 79=flick 80=drag, so this one field answers the
+            // question directly: if 80 carries commands and 77 carries none, Rust is emitting
+            // drags and nothing else; if 77 carries them too, the draws reach the shell and the
+            // fault is downstream of here.
+            Dictionary<uint, int> geoTexCounts = new Dictionary<uint, int>();
             // uv extents across every batch that actually names a texture, plus one such id.
             // `noCarrier` cannot see this class of fault: the carrier is present and the alpha
             // is non-zero and nothing is skipped, yet the draw still yields nothing, because
@@ -1324,6 +1334,9 @@ namespace Phirura.Game
                                 {
                                     nGeoTexMissing++;
                                 }
+                                int nOfTex;
+                                geoTexCounts.TryGetValue(c.flags, out nOfTex);
+                                geoTexCounts[c.flags] = nOfTex + 1;
                             }
                             for (int vi = vs; vi < ve; vi++)
                             {
@@ -1418,6 +1431,25 @@ namespace Phirura.Game
                 : uvMinU.ToString("0.###") + "," + uvMinV.ToString("0.###")
                   + "-" + uvMaxU.ToString("0.###") + "," + uvMaxV.ToString("0.###");
 
+            // `id x batch-count`, ids ascending. Sorted so two frames can be diffed by eye, and
+            // only built on the second the line is written - this method already pays for the
+            // dictionary once a second, not once a frame.
+            string geoTexSummary = "-";
+            if (geoTexCounts.Count > 0)
+            {
+                List<uint> texIds = new List<uint>(geoTexCounts.Keys);
+                texIds.Sort();
+                geoTexSummary = "";
+                for (int k = 0; k < texIds.Count; k++)
+                {
+                    if (k > 0)
+                    {
+                        geoTexSummary += ",";
+                    }
+                    geoTexSummary += texIds[k] + "x" + geoTexCounts[texIds[k]];
+                }
+            }
+
             double dipW = _canvas == null ? 0.0 : _canvas.ActualWidth;
             double dipH = _canvas == null ? 0.0 : _canvas.ActualHeight;
             string pxToDip = (PrprPort.ScreenPixelWidth > 0f && dipW > 0.0)
@@ -1439,6 +1471,9 @@ namespace Phirura.Game
                 // (untextured geometry) and the background (its own texture command) draw,
                 // while every glyph and sprite does not.
                 + " geoUv=" + uvSummary + " geoTexId=" + geoTexId
+                // The rest of that id's company. One id proves *a* textured batch survived; this
+                // is every texture that carried batches this frame and how many each one got.
+                + " geoTexCounts=" + geoTexSummary
                 // Paint order, which is the only reading the counts above cannot give. A
                 // cover drawn last hides every panel and glyph the page put in front of it
                 // while leaving itself perfectly visible - the exact reported picture, and
@@ -1988,7 +2023,8 @@ namespace Phirura.Game
             Color cv1 = FloatColor(b.r, b.g, b.b, b.a);
             Color cv2 = FloatColor(c.r, c.g, c.b, c.a);
             bool uFlat = cv0 == cv1 && cv1 == cv2;
-            if (uFresh && _unLogBudget > 0)
+            bool uLogged = uFresh && _unLogBudget > 0;
+            if (uLogged)
             {
                 _unLogBudget--;
                 _lastUnX = ux0; _lastUnY = uy0;
@@ -2006,6 +2042,15 @@ namespace Phirura.Game
                 using (CanvasGeometry tri = PortTriangle(ds, a, b, c))
                 {
                     ds.FillGeometry(tri, FloatColor(a.r, a.g, a.b, alpha));
+                }
+                // Bisect probe. The census line above fires *before* the fill, so a native death
+                // inside `PortTriangle`/`FillGeometry` and a death in the command after it leave the
+                // exact same surviving line. This one fires after it: a log ending on `untext dst=`
+                // means the fill never returned, one ending on `fill-ok` means it did and the fault
+                // is downstream. Emitted only when the census above was, so it costs no extra lines.
+                if (uLogged)
+                {
+                    AppLog.WriteSync("Win2D: untext fill-ok i=" + _portCmdIdx);
                 }
                 return;
             }
@@ -2042,6 +2087,12 @@ namespace Phirura.Game
             using (CanvasGeometry tri = PortTriangle(ds, a, b, c))
             {
                 ds.FillGeometry(tri, grad);
+            }
+            // Same bisect probe as the flat branch: the census fires before this fill too, so a
+            // death in the brush cache and a death after it are otherwise indistinguishable.
+            if (uLogged)
+            {
+                AppLog.WriteSync("Win2D: untext fill-ok (grad) i=" + _portCmdIdx);
             }
         }
 

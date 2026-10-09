@@ -1975,6 +1975,17 @@ pub mod draw {
         /// nothing, and all text disappeared while `texNew`/`texRebuilt` kept insisting the atlas
         /// had been registered - which is exactly the reported symptom.
         refs: u32,
+        /// Whether the pixels arrived as one whole-image upload rather than as a render texture.
+        ///
+        /// This is what makes staging reclaimable. `prpr` sub-writes *only* render textures (the
+        /// glyph atlas arrives through `glTexSubImage2D`), so bytes behind a `from_rgba8` upload
+        /// cannot change after creation and the copy the shell already holds is then the only one
+        /// that matters. Dropping the same bytes off an atlas entry would instead strand every
+        /// later write in a zero-length range, which is how text breaks - not how memory comes
+        /// back. The ceiling is fixed and the session is not, so without a way to tell the two
+        /// apart the library's covers pin `held=` at the budget while the chart's own sprites are
+        /// the ones being refused.
+        static_tex: bool,
     }
 
     static mut TEX_ENTRIES: [TexEntry; TEX_SLOTS] = [TexEntry {
@@ -1986,6 +1997,7 @@ pub mod draw {
         dirty: [0; 4],
         dirty_pending: false,
         refs: 0,
+        static_tex: false,
     }; TEX_SLOTS];
     static mut TEX_COUNT: usize = 0;
     static mut TEX_BYTES: Vec<u8> = Vec::new();
@@ -1999,6 +2011,18 @@ pub mod draw {
     /// Why: 1 = out of slots, 2 = this one texture alone exceeds the budget, 3 = the running total
     /// would exceed it.
     static mut TEX_DROP_REASON: u8 = 0;
+
+    // What the reclaimer actually did, counted instead of inferred.
+    //
+    // A drop count on its own has two opposite readings: no candidate existed (every live byte
+    // still unread by the shell, or owned by a render target) versus candidates existed but each
+    // overlapped a survivor (an aliasing layout no victim can be chosen from). Those need
+    // opposite fixes - one is a poll that never ran, the other is a layout - and the static
+    // analysis of this registry picked the wrong one. The four counters say which.
+    static mut TEX_EVICT_OK: u32 = 0;
+    static mut TEX_EVICT_BYTES: u32 = 0;
+    static mut TEX_EVICT_NONE: u32 = 0;
+    static mut TEX_EVICT_BLOCK: u32 = 0;
 
     /// Render textures registered for the first time, and existing ones rebuilt in place.
     ///
@@ -2068,6 +2092,7 @@ pub mod draw {
                         dirty: [0, 0, width, height],
                         dirty_pending: true,
                         refs: 1,
+                        static_tex: true,
                     };
                     TEX_COUNT = count + 1;
                     TEX_ALIAS = TEX_ALIAS.wrapping_add(1);
@@ -2075,13 +2100,23 @@ pub mod draw {
                 }
             }
 
-            let offset = (&TEX_BYTES).len();
-            let end = offset + bytes.len();
+            let mut offset = (&TEX_BYTES).len();
+            let mut end = offset + bytes.len();
             // Counted from here, so an aliased request adds nothing - it is the same bytes again.
             TEX_DEMAND += bytes.len();
-            if end > TEX_MAX_BYTES {
-                note_drop(id, width, height, bytes.len(), 3);
-                return;
+            // The ceiling is reached by a long session, not by one chart. Refusing here was the
+            // only answer this had, and a refusal is an absence rather than an error - the shell
+            // cannot tell it from an engine that drew nothing, and the textures it started losing
+            // were the chart's own sprites because the library's covers were still holding pixels
+            // the shell had already copied. Reclaim those first so that a drop reported below
+            // means a real limit instead of stale bytes.
+            while end > TEX_MAX_BYTES {
+                if !evict_static_staging() {
+                    note_drop(id, width, height, bytes.len(), 3);
+                    return;
+                }
+                offset = (&TEX_BYTES).len();
+                end = offset + bytes.len();
             }
             TEX_BYTES.extend_from_slice(bytes);
             TEX_ENTRIES[count] = TexEntry {
@@ -2095,6 +2130,7 @@ pub mod draw {
                 dirty: [0, 0, width, height],
                 dirty_pending: true,
                 refs: 1,
+                static_tex: true,
             };
             TEX_COUNT = count + 1;
         }
@@ -2169,6 +2205,92 @@ pub mod draw {
                 }
             }
         }
+    }
+
+    /// Frees staging pixels the shell has already copied, to make room for a new upload.
+    ///
+    /// Returns true when it reclaimed something. The budget in `register_texture` used to answer
+    /// every over-ceiling upload with a refusal, and a refusal draws nothing while logging nothing
+    /// on its own - so a long session that scrolled the library filled `held=` with covers the
+    /// shell had read once and kept, and the textures that were refused afterwards were the
+    /// chart's own sprites. `dirty_pending == false` is the "the shell has it all" signal, because
+    /// `texture_dirty` clears it only once the union of everything written has been handed over;
+    /// `static_tex` is what says those pixels cannot change afterwards, since `texture_write` only
+    /// ever feeds render textures. Reclaimed bytes cost the shell nothing: it keys its bitmaps by
+    /// id and reads them once (see the header note on `register_texture`).
+    ///
+    /// Entries sharing a range go together or not at all. `register_texture` aliases a second id
+    /// onto byte-identical pixels, so dropping the range while a survivor still pointed into it
+    /// would leave that id reading a hole - the same overlap test `release_texture` uses, and the
+    /// same conservative answer when it does not hold. This is deliberately not an LRU: choosing a
+    /// victim by age would need a clock that the phone's frame loop does not reliably give, and
+    /// "cannot tell which one is safe" must never become "picks one anyway".
+    ///
+    /// # Safety
+    /// Touches the registry's `static mut` state; callers are on the one render thread.
+    unsafe fn evict_static_staging() -> bool {
+        let count = TEX_COUNT;
+        let mut saw_clean = false;
+        for i in 0..count {
+            let e = TEX_ENTRIES[i];
+            if !e.static_tex || e.len == 0 || e.dirty_pending {
+                continue;
+            }
+            // Past the first test, so this was a real candidate: a pass that still ends with
+            // nothing freed failed on overlap, not on "there was nothing to read".
+            saw_clean = true;
+            let (offset, len) = (e.offset, e.len);
+            let end = offset + len;
+            let mut blocked = false;
+            for j in 0..count {
+                if j == i {
+                    continue;
+                }
+                let o = TEX_ENTRIES[j];
+                if o.len == 0 || o.offset >= end || o.offset + o.len <= offset {
+                    continue;
+                }
+                if !o.static_tex || o.dirty_pending {
+                    blocked = true;
+                    break;
+                }
+            }
+            if blocked {
+                TEX_EVICT_BLOCK = TEX_EVICT_BLOCK.wrapping_add(1);
+                continue;
+            }
+            // Whole group first, then the bytes: zeroing a survivor's range without freeing it
+            // costs the shell nothing, while freeing it first would strand the survivor on a
+            // range that is about to move.
+            for j in 0..count {
+                if j == i {
+                    continue;
+                }
+                let o = TEX_ENTRIES[j];
+                if o.len != 0 && !(o.offset >= end || o.offset + o.len <= offset) {
+                    TEX_ENTRIES[j].len = 0;
+                    TEX_ENTRIES[j].offset = 0;
+                }
+            }
+            let _ = TEX_BYTES.drain(offset..end);
+            for j in 0..count {
+                if j == i {
+                    continue;
+                }
+                if TEX_ENTRIES[j].offset > offset {
+                    TEX_ENTRIES[j].offset -= len;
+                }
+            }
+            TEX_ENTRIES[i].len = 0;
+            TEX_ENTRIES[i].offset = 0;
+            TEX_EVICT_OK = TEX_EVICT_OK.wrapping_add(1);
+            TEX_EVICT_BYTES = TEX_EVICT_BYTES.saturating_add(len as u32);
+            return true;
+        }
+        if !saw_clean {
+            TEX_EVICT_NONE = TEX_EVICT_NONE.wrapping_add(1);
+        }
+        false
     }
 
     // ---------------------------------------------------------------------
@@ -2257,9 +2379,17 @@ pub mod draw {
             // Counted against the same budget as chart art on purpose: the phone's memory does not
             // care which subsystem asked for it, and 8.2 MiB of headroom is the number this design
             // was sized from (see `glGetIntegerv`).
-            if TEX_BYTES.len().saturating_add(len) > TEX_MAX_BYTES {
-                note_drop(id, width, height, len, 3);
-                return;
+            //
+            // The glyph atlas is the one upload that must never be refused: a refused atlas is
+            // silent, and every text batch drawn afterwards samples a carrier that was never
+            // registered. So stale static staging gives way before this reports a drop - by now
+            // nothing should be reclaimable, because `register_texture` reclaims on every
+            // over-ceiling upload, and an empty loop here costs one pass over the slots.
+            while TEX_BYTES.len().saturating_add(len) > TEX_MAX_BYTES {
+                if !evict_static_staging() {
+                    note_drop(id, width, height, len, 3);
+                    return;
+                }
             }
 
             let offset = TEX_BYTES.len();
@@ -2275,6 +2405,9 @@ pub mod draw {
                 dirty: [0, 0, width, height],
                 dirty_pending: true,
                 refs: 1,
+                // Stays false: an atlas is fed for the rest of its life by `texture_write`, so its
+                // staging is never redundant and must never be reclaimed.
+                static_tex: false,
             };
             TEX_COUNT = count + 1;
         }
@@ -2407,6 +2540,15 @@ pub mod draw {
             let stride = (e.width as usize).saturating_mul(4);
             let row_bytes = (w as usize).saturating_mul(4);
             let total = row_bytes.saturating_mul(h as usize);
+            // An entry whose stored bytes are shorter than its own extent is one whose staging was
+            // reclaimed after the shell had already copied it (see `evict_static_staging`). The id
+            // and the dimensions are still valid - only the pixels are gone - so this is the
+            // rectangle lying outside what the registry still holds, not an unknown id, and -3 is
+            // the code every caller already handles. Without this check the read below addresses a
+            // range that is no longer there.
+            if e.len < stride.saturating_mul(e.height as usize) {
+                return -3;
+            }
             if out.is_null() {
                 return -2;
             }
@@ -2464,6 +2606,47 @@ pub mod draw {
     /// says nothing about how much *more* the chart wanted.
     pub fn texture_demand() -> (usize, u32) {
         unsafe { (TEX_DEMAND, TEX_ALIAS) }
+    }
+
+    /// `(passes that freed something, bytes freed, passes with no readable candidate, passes
+    /// whose candidates were all overlapped)`.
+    ///
+    /// The last two are the reason this exists. `texture_overflow` says how many textures were
+    /// lost; it cannot say whether the reclaimer had nothing to give (every live byte still
+    /// unread, or owned by a render target) or had candidates that each overlapped a survivor.
+    /// Those are opposite defects and the first reading was asserted from the drop count alone.
+    pub fn texture_evict_stats() -> (u32, u32, u32, u32) {
+        unsafe { (TEX_EVICT_OK, TEX_EVICT_BYTES, TEX_EVICT_NONE, TEX_EVICT_BLOCK) }
+    }
+
+    /// The held budget split the way `evict_static_staging` tests it: clean static bytes
+    /// (reclaimable), dirty static bytes (the shell has not consumed them yet), and render-target
+    /// bytes (never reclaimable by this pass).
+    ///
+    /// Without the split, one 67 MB total could be "covers nobody has read" or "three glyph
+    /// atlases", and only the first of those is a defect.
+    pub fn texture_pool_split() -> (u32, u32, u32) {
+        unsafe {
+            let count = TEX_COUNT;
+            let mut clean = 0usize;
+            let mut dirty = 0usize;
+            let mut dynamic = 0usize;
+            for i in 0..count {
+                let e = TEX_ENTRIES[i];
+                if e.len == 0 {
+                    continue;
+                }
+                if !e.static_tex {
+                    dynamic += e.len;
+                } else if e.dirty_pending {
+                    dirty += e.len;
+                } else {
+                    clean += e.len;
+                }
+            }
+            let clamp = |v: usize| if v > 0xFFFF_FFFFusize { 0xFFFF_FFFFu32 } else { v as u32 };
+            (clamp(clean), clamp(dirty), clamp(dynamic))
+        }
     }
 
     unsafe fn note_drop(id: u32, width: u32, height: u32, bytes: usize, reason: u8) {

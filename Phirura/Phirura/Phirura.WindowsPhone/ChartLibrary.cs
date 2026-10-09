@@ -13,8 +13,9 @@ using Windows.UI.Xaml.Media.Imaging;
 namespace Phirura
 {
     /// <summary>
-    /// Loads charts from the app package (the bundled demo) and from charts the user
-    /// imported into the app's local folder.
+    /// Loads the charts sitting in `LocalFolder\charts`: the ones the user imported, plus the
+    /// one `SeedRootAsync` copies out of the package on first launch. There is no bundled demo
+    /// card any more - see the note at the top of `LoadAllAsync`.
     ///
     /// Imported charts are *copied* into `ApplicationData\LocalFolder\charts\&lt;id&gt;`
     /// rather than referenced in place, because a picked StorageFolder is not guaranteed
@@ -23,15 +24,20 @@ namespace Phirura
     public static class ChartLibrary
     {
         private const string LocalChartsFolder = "charts";
-        private const string DemoBase = "ms-appx:///Assets/demo";
 
         /// <summary>Uri of the local chart root; a chart's directory name follows it.</summary>
         private const string LocalBaseUri = "ms-appdata:///local/charts/";
 
         public static async Task<List<ChartEntry>> LoadAllAsync()
         {
+            // `MakeDemoEntry()` used to run unconditionally here and made this the first card in
+            // the list. It pointed at `ms-appx:///Assets/demo`, which is no longer packaged, so
+            // the entry could never be opened - a card that is always present and always fails
+            // reads to the player as "the app is broken", not as "this one is missing". The
+            // bundled chart needs no special case any more: `EnsureBundledChartAsync` puts
+            // `Assets\charts\190` into `data/charts/custom` and phira scans that itself, while
+            // this list picks up the seeded copy under `LocalFolder\charts` by enumeration.
             List<ChartEntry> list = new List<ChartEntry>();
-            list.Add(MakeDemoEntry());
 
             StorageFolder root;
             try
@@ -54,26 +60,6 @@ namespace Phirura
                 }
             }
             return list;
-        }
-
-        /// <summary>The bundled demo ships with a fixed file set, so it needs no enumeration.</summary>
-        private static ChartEntry MakeDemoEntry()
-        {
-            ChartEntry e = new ChartEntry();
-            e.Id = "appx:demo";
-            e.BasePath = DemoBase;
-            e.IsLocalFolder = false;
-            e.ChartFile = "chart.json";
-            e.AudioFile = "demo.wav";
-            e.Title = "Phirura Demo";
-            e.Artist = "Phirura";
-            e.Charter = "Phirura";
-            e.Level = "DEMO";
-            e.Difficulty = "1";
-            e.Format = "RPE";
-            e.PreviewStart = 8.0;
-            e.PreviewEnd = 24.0;
-            return e;
         }
 
         private static async Task<ChartEntry> TryLoadEntryAsync(string baseUri, bool isLocal, string id)

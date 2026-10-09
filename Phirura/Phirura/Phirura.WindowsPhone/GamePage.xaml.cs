@@ -795,7 +795,9 @@ namespace Phirura
                 // written from the chart branch of `OnRendering` - so left up they would sit on
                 // top of phira's HUD at whatever they were initialised to ("0", "100.00%").
                 HudRoot.Visibility = Visibility.Collapsed;
-                PauseButton.Visibility = Visibility.Collapsed;
+                // No `PauseButton` to collapse any more - that button is out of the XAML, and prpr
+                // draws the pause control itself. The line that hid it here would not compile
+                // against a page that no longer declares the name.
 
                 // Installed before the engine exists: `PhiraBoot` blocks until phira parks and
                 // never yields, so a sink installed afterwards would miss the first `music_new`.
@@ -896,17 +898,37 @@ namespace Phirura
 
             Windows.Storage.StorageFolder pkg =
                 await Windows.ApplicationModel.Package.Current.InstalledLocation.GetFolderAsync("Assets");
+            // The compiler will not take this branch's work while it sits inside the `catch`
+            // clause - CS1985 was reported at the `await`, column 17 - so the clause only records
+            // that the folder was missing and everything with an effect runs after it closes.
+            bool packageRootMissing = false;
             try
             {
                 pkg = await pkg.GetFolderAsync(name);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                // A package built before the split has no `Assets\respack`. Logged rather than
-                // swallowed, because what surfaces downstream is `asset not found: font.ttf` with
-                // no mention of which folder was never populated - and this is the only place
-                // that knows the folder was absent rather than merely empty.
-                AppLog.Write("GamePage: seed '" + name + "' absent from the package", ex);
+                packageRootMissing = true;
+            }
+            if (packageRootMissing)
+            {
+                // The package carries no `Assets\<name>` at all. For `charts` that is the intended
+                // shape - the distribution build ships the resource pack and no charts, because
+                // phira reads them from its own `data/charts` - and for `respack` it is a real
+                // fault, since what surfaces downstream is `asset not found: font.ttf` with no
+                // mention of which folder was never populated. So it is still reported, once,
+                // naming the folder; only the exception is dropped, because it says nothing that
+                // the message does not.
+                //
+                // The marker is written regardless, and that is the whole point of this branch.
+                // Without it the line fired on every launch forever, and a permanent
+                // ERROR-looking entry in every log pull is actively harmful when the log is also
+                // what gets scanned for anomalies. The launch that matters is the first one after
+                // an install, and that is the launch that now carries the line; a later `-Push`
+                // wipes the marker and brings it back.
+                AppLog.WriteSync("GamePage: seed '" + name + "' absent from the package"
+                    + " - nothing copied from Assets\\" + name);
+                await dest.CreateFileAsync(".seeded", Windows.Storage.CreationCollisionOption.ReplaceExisting);
                 return;
             }
 
@@ -940,6 +962,12 @@ namespace Phirura
         /// The completion marker - not "the folder is non-empty" - is what makes it idempotent: a
         /// copy interrupted by a crash leaves a full-looking folder missing the largest file, and
         /// the next launch would skip it forever. ~15 MB is copied exactly once per install.
+        ///
+        /// Returns null when the package carries no chart, which is the normal state of a
+        /// distribution build: the resource pack ships, the charts do not, because phira reads
+        /// them from its own `data/charts`. The caller discards the value, so what matters is
+        /// only that this does not throw - a throw here is caught by `StartAsync`, which writes it
+        /// to the loading line and returns before `PhiraBoot`, i.e. the app never starts.
         /// </summary>
         private static async Task<string> EnsureBundledChartAsync()
         {
@@ -949,6 +977,32 @@ namespace Phirura
 
             Windows.Storage.StorageFolder local = Windows.Storage.ApplicationData.Current.LocalFolder;
             Windows.Storage.CreationCollisionOption open = Windows.Storage.CreationCollisionOption.OpenIfExists;
+
+            // The source is probed BEFORE anything under `data\` is created. `Assets\charts\190`
+            // is no longer packaged - the distribution build carries the resource pack only, and
+            // charts come from phira's own library - so on a normally installed phone this
+            // folder is simply absent, and building the destination first would leave
+            // `data\charts\custom\190` behind as an empty directory: one more entry for
+            // `Data::init` to open and reject on every boot, for a chart that was never going to
+            // be there.
+            //
+            // What used to sit here was a `FileNotFoundException("内置谱面缺失 ... -Push 推送")`,
+            // and that is the part that made an absent chart fatal rather than merely empty.
+            // `StartAsync` catches it, writes the message to the loading line and `return`s
+            // before `PhiraBoot`, so the app stopped starting - on every phone, from a package
+            // whose missing chart was the intended shape rather than a developer forgetting to
+            // `-Push`. No player can act on that message either.
+            Windows.Storage.StorageFolder src = await local.CreateFolderAsync("charts", open);
+            try
+            {
+                src = await src.GetFolderAsync(folder);
+            }
+            catch (Exception)
+            {
+                AppLog.WriteSync("GamePage: no bundled chart in this package (charts\\" + folder
+                    + " absent) - phira starts with an empty library");
+                return null;
+            }
 
             // Built one segment at a time: `StorageFolder.CreateFolderAsync` takes a single name on
             // this API surface, and a path with separators in it is not portable between the places
@@ -975,21 +1029,10 @@ namespace Phirura
                 // whole one by counting files.
             }
 
-            // The shell's own copy, already on disk because this is where `ChartLibrary` imports
-            // charts and where `-Push` puts them. Its absence is reported rather than ignored: the
-            // auto-open would otherwise find nothing and phira would open on an empty library, which
-            // is three separate observations to reconcile into one cause.
-            Windows.Storage.StorageFolder src = await local.CreateFolderAsync("charts", open);
-            try
-            {
-                src = await src.GetFolderAsync(folder);
-            }
-            catch (Exception)
-            {
-                throw new System.IO.FileNotFoundException(
-                    "内置谱面缺失：charts\\" + folder + "（先用 stage-chart.ps1 -Push 推送）");
-            }
-
+            // `src` is whatever the probe at the top of the method found: the shell's own copy,
+            // already on disk because this is where `ChartLibrary` imports charts and where
+            // `-Push` puts them. Its absence is answered up there rather than here, so by the
+            // time execution reaches this copy the folder is known to exist.
             foreach (Windows.Storage.StorageFile file in await src.GetFilesAsync())
             {
                 await file.CopyAsync(dest, file.Name, Windows.Storage.NameCollisionOption.ReplaceExisting);

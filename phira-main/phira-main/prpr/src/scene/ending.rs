@@ -350,6 +350,31 @@ impl Scene for EndingScene {
             } else {
                 0.1
             };
+            // The guard above only rejects an *empty* measure. A measure that is positive and
+            // finite but too large is worse and passes it: seven columns of `step` start at `lf`
+            // and walk right, so an oversized advance walks the run off the right edge and the
+            // scoreboard reads as never drawn at all - while an oversized height hands `ui.scissor`
+            // a band that starts below where the digits are clipped to, leaving nothing inside it.
+            // Both failures are silent, and neither touches the hit rectangles, so the buttons
+            // beside the score keep answering touches on a scoreboard that shows nothing. Rather
+            // than substitute a fixed value - which trades one wrong layout for another - the run
+            // is fitted to the width it actually has, scaling the advance, the glyph size and the
+            // clip height together so the roll stays lined up with the cell it rolls in. A sound
+            // measure yields `fit == 1` and leaves every number on this page where it was.
+            let fit = {
+                // `lf` is the run's left edge; the right margin is where the row's other text
+                // (`new best`) anchors, so the seven columns have to end before it.
+                let avail = 0.99 - lf;
+                let run = step * 7.;
+                if run > 1e-6 && avail > 1e-6 && run > avail {
+                    (avail / run).clamp(0.05, 1.)
+                } else {
+                    1.
+                }
+            };
+            let step = step * fit;
+            let h = h * fit;
+            let dsz = s * fit;
             ui.scissor(Rect::new(-1., y, 2., h + 0.01), |ui| {
                 for (i, d) in digits.into_iter().enumerate() {
                     let p = (p * (1. + (0.16 * (6 - i) as f32).powi(2))).min(1.);
@@ -364,12 +389,12 @@ impl Scene for EndingScene {
                     ui.text(up.to_string())
                         .pos(x + step / 2., y + o)
                         .anchor(0.5, 0.)
-                        .size(s)
+                        .size(dsz)
                         .draw_using(&PGR_FONT);
                     ui.text(dw.to_string())
                         .pos(x + step / 2., y + h + o)
                         .anchor(0.5, 0.)
-                        .size(s)
+                        .size(dsz)
                         .draw_using(&PGR_FONT);
                     x += step;
                 }

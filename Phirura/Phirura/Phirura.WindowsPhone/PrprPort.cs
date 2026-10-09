@@ -1064,7 +1064,19 @@ namespace Phirura
                 + " " + wp81_texture_drop_info(2) + "x" + wp81_texture_drop_info(3)
                 + " " + wp81_texture_drop_info(4) + "B"
                 + " held=" + wp81_texture_drop_info(5) + "B"
-                + " cap=" + wp81_texture_drop_info(6) + "B]";
+                + " cap=" + wp81_texture_drop_info(6) + "B"
+                // Why the reclaimer gave up, rather than only that it did: `evict` counts passes
+                // that freed and the bytes they freed, `none` counts passes with nothing readable
+                // to give and `block` passes whose candidates all overlapped a survivor. `pool`
+                // splits the held total the same way, so a full budget reads as "unread covers"
+                // or "glyph atlases" instead of as one undifferentiated 67 MB.
+                + " evict=" + wp81_texture_drop_info(7)
+                + "/" + wp81_texture_drop_info(8) + "B"
+                + " none=" + wp81_texture_drop_info(9)
+                + " block=" + wp81_texture_drop_info(10)
+                + " pool=" + wp81_texture_drop_info(11)
+                + "/" + wp81_texture_drop_info(12)
+                + "/" + wp81_texture_drop_info(13) + "B]";
         }
 
         // --- the registry's incremental surface ---------------------------

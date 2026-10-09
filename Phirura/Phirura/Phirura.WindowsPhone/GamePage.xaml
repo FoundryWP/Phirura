@@ -85,9 +85,7 @@
         -->
         <StackPanel x:Name="SfxHost" Opacity="0" IsHitTestVisible="False" />
 
-        <Button x:Name="PauseButton" Content="II" FontSize="16" Width="52" Height="40"
-                HorizontalAlignment="Left" VerticalAlignment="Top" Margin="14,10,0,0"
-                Click="PauseButton_Click" />
+
 
         <!--
             On-screen log.
@@ -102,9 +100,7 @@
             gameplay touch. The button sits beside the pause button in the one corner the playfield
             does not use.
         -->
-        <Button x:Name="LogToggleButton" Content="LOG" FontSize="12" Width="46" Height="40"
-                HorizontalAlignment="Left" VerticalAlignment="Top" Margin="72,10,0,0"
-                Click="LogToggle_Click" />
+
 
         <Grid x:Name="LogOverlay" Visibility="Collapsed" IsHitTestVisible="False"
               Background="#CC07070B" VerticalAlignment="Bottom" MaxHeight="320">
