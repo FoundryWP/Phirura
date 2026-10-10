@@ -10,12 +10,13 @@
 | 4 | 已修复待上机 | 本地铺面列表封面黑屏（已确认下载资源齐全） | `phira/src/images.rs` + `page.rs` |
 | 5 | 已修复待上机 | 删除铺面按钮一点就闪退 | `charts_view.rs` + `library.rs` |
 | 6 | **已修复已上机验证** | 资源为什么全在 `Assets/charts`，应该在 `Assets/games` | `Assets\charts`+`Assets\respack`、`PrprPort.AssetPackRoot`、`stage-chart.ps1` |
-| 7 | 待办 | 结算页不渲染分数等，但点对应位置按钮有响应 | `prpr/src/scene/ending.rs` |
+| 7 | 已修复待上机 | 结算页不渲染分数等，但点对应位置按钮有响应 | `prpr/src/scene/ending.rs` |
 | 8 | 已修复待上机 | 阴影渲染成格子横线（可见三角形拼缝） | `Win2DChartRenderer.cs` `FillPortTriangle` |
 | 9 | 已修复+已加诊断，待上机 | 铺面读取导致闪退 | `phira/src/lib.rs` + `song.rs` |
 | 10 | 部分修复（负长度已修，跳变待上机） | 游玩时 hold 键有时多出一截 | `prpr/src/core/note.rs` Hold 分支 |
 | 11 | 待办 | 长按 Hold 时可能出现重复的 hold 键 | prpr 判定 |
 | 12 | 已修复待上机（`fake` 淡出留观察） | 虚假 hold 体积大小不定 | `prpr/src/core/note.rs` Hold 分支 |
+| 13 | 已修复待上机 | 游玩中途静默闪退：无 PANIC / 无 UNHANDLED / 无 device-lost，进程说没就没 | `prpr/src/parse/rpe.rs` GIF 贴图判定线 |
 
 ---
 
@@ -278,6 +279,17 @@ C 拆分后 `stage-chart.ps1` 把 `$Source` 按内容分成 `$Out\charts` + `$Ou
 
 **⇒ 发出侧、顺序、裁剪、alpha 全部排除。剩下的唯一未验证假设：采样的字图区域内容是空的（atlas 该处透明）。**
 
+**修复（两处，都在 `ending.rs`，均不改变正常渲染器的显示）**：
+
+1. `fit` 系数（已上机，未验证）：`avail = 0.99 - lf`，`run = step * 7`，
+   `run > avail` 时 `fit = (avail/run).clamp(0.05, 1.)`，`step`/`h`/`dsz` 同步缩放，
+   数字 `.size(dsz)`。measure 正常时 `fit == 1`，页面纹丝不动。
+2. 落定行去 scissor（本次）：分数是全页**唯一**被 `ui.scissor` 包着的东西，
+   其它文字图标都不走 clip —— 这正是"唯独分数空白"的形状。`ran` 钳在 [0,1]，
+   所以 `p >= 1.`（t≥2.6）时七列同时 `o == 0`，落定行直接画、无 scissor；
+   入场滚动保持原 clip 路径不动。clip 正常时同字同位同尺寸、显示一致；
+   clip 吃掉矩形时分数还在。`x` 两边都步进到行尾，`new-best` 的右锚点不动。
+
 **待办**：
 - [ ] 跑 `patch_rustread.py`（`TAIL_OLD` 锚点已因 `ClipTag()` 变更而失效，需先修；且依赖并不存在的 `PrprPort.TexRect` / `ReadTextureRect`，要加 Rust `#[no_mangle]` + `/EXPORT:` 到 `rust-wp81/build-port.ps1`）
 - [ ] 或者直接对比 home.rs / song.rs 成功显示时的同一段 atlas
@@ -463,6 +475,77 @@ combo 段都不一样**，正好对上"有时"。
       对 hold **不生效** ⇒ fake hold 从 `self.time` 到 `end_time` 全程满不透明，
       到 `end_time` 再突然消失（普通 fake note 是淡出）。
       但 hold 在 `self.time` 之后**本来就得看得见**，所以不能照抄那句，得先确认预期。
+
+---
+
+## 13. 游玩中途静默闪退（内存超预算被系统杀）
+
+**现象**：打到一半进程直接消失。**没有 `PANIC`、没有 `UNHANDLED`、没有 `port draw failed` / `device lost`**，
+托管异常和 native panic 都查过为零 —— 日志末行还是一条正常的绘制日志，之后再无任何输出。
+
+**证据（23:41:59 那次会话）**
+
+```
+23:43:29.040  rust: judge: ... t=0              ← 开局
+23:44:01.712  GamePage: fps=56 ... mem=336.7/390.0MB lvl=Medium
+23:44:02.114  Win2D: untext fill-ok i=50        ← 末行，之后进程没了
+```
+
+- chart time 只走到 **32.6 s**（`MusicClock media=32.606`），曲子 76.68 s，远没打完。
+- `mem=` 游玩全程**平稳不涨**（334.3 → 336.7），不是逐帧泄漏。
+- 末行 `fill-ok` 说明那条平铺填充**活下来了**，故障在它下游 —— 顺带把"死在 `PortTriangle`/`FillGeometry`"
+  这条也证伪了（`fill-ok` 探针本来就为这个加的，几百条全绿）。
+
+**根因：RPE 的 GIF 贴图判定线把整支 GIF 每一帧都上传成常驻纹理**
+
+`prpr/src/parse/rpe.rs` 的 `JudgeLineKind::TextureGif` 分支解码时 `decoder.into_frames().collect()`，
+每一帧立刻 `SafeTexture::from(...)` 建纹理；`core/line.rs` 的 `GifFrames { frames: Vec<(u128, SafeTexture)> }`
+把它们**全部常驻整个曲目**。而绘制路径 `line.rs:275` **每 tick 只取一帧**（`frames.get_prog_frame(t)`）——
+其余 117 帧是纯常驻开销，一个像素都不会被画到。
+
+`download\80201` 的 `yqbfh.gif` 是 4.8 MB / 480×480 / **118 帧**：
+
+```
+118 × 480 × 480 × 4 = 108,748,800 B = 103.7 MB
+```
+
+而 census 里的 `pool=108879872B` **正好等于这个数**（多出的 131,072 B 是其余小纹理），
+`port texture` 也确实是 id 59..178 连号 118 个 480×480，全部在谱面解析后一次性上传。
+
+关键在于 `mem=` 那个 390 MB **只统计托管那一份**，D3D 那份不计入：
+
+```
+336.7 (托管) + 103.7 (D3D) ≈ 440 MB  >  390 MB 预算
+```
+
+⇒ 超预算 ⇒ **系统静默杀进程**。这就解释了为什么它长得像"native 但没有 panic"：
+根本没有异常，是 OS 杀的。也解释了为什么每次都崩在"音频在放 + 内存高"——那只是巧合，
+真正的开关是**这张铺带了一支 118 帧的 GIF**。
+
+**修复**（`rpe.rs:501-546`，新增 `shrink_gif_frames`）
+
+解码后、建纹理前先收缩，预算 `GIF_FRAME_BUDGET = 12 MB`：
+
+1. 先算总字节，没超就原样返回（绝大多数谱面走这条，零影响）。
+2. 超了就按 `sqrt(budget / total)` **整体降采样**（`imageops::resize` + Triangle），
+   下限 `GIF_MIN_SCALE = 0.25`。**优先牺牲分辨率而不是帧数**：判定线是装饰，
+   图软一点没人看得出来，砍帧数则是肉眼可见的卡顿。
+3. 缩到下限仍超，才丢帧 —— 但把丢掉那帧的 **delay 折进保留帧**，
+   `total_time` 保持不变。这点是硬要求：`parse_gif_events` 拿 `total_time`
+   当**所有关键帧的时间基准**，让它漂移会把 GIF 自身的事件和谱面错开，
+   比卡顿严重得多。
+
+118 帧 103.7 MB → 12 MB（约 16 帧），`mem=` 应从 337 落到 230 附近。
+
+**顺带证伪的假设**（不要再查）：Rust staging 泄漏（`held=` 有 64MB 硬顶且在正常回收，
+31 dropped / evict=53）、逐帧纹理泄漏（游玩中 `mem=` 平的）、渲染器平铺填充（`fill-ok` 全绿）、
+`1280×1280` 超设备上限（成功的 46/48/49/50/51/52/53/54 全是同尺寸）。
+
+**状态**：`build-port.ps1` → `Finished release [optimized] 4m 04s` 无 error；
+`build_wp.ps1 -Debug -Target wp` → `EXITCODE: 0`；`stage-chart.ps1 -Deploy -Push -Launch`
+staged 28 files / 17.59 MB，`kept phirura.log: 2206432 bytes` 已并回，`launched`。
+**待上机**：打 `download\80201` 到结尾，看 `mem=` 是否落到 230 附近、
+`port texture` 是否不再有 118 连号 480×480、以及能否活到结算页。
 
 ---
 

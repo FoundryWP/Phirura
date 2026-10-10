@@ -29,7 +29,7 @@ namespace Phirura
         private readonly Stopwatch _clock = new Stopwatch();
         private int _frames;
         /// <summary>
-        /// The 5-second average the log carries, kept separate from <see cref="_clock"/> (1 s, the
+        /// The 25-second average the log carries, kept separate from <see cref="_clock"/> (1 s, the
         /// HUD) because they answer different questions: the HUD tells the person holding the phone
         /// what it is doing *now*, the log line tells whoever reads it later whether the renderer
         /// was ever competing with something else on the device.
@@ -1182,15 +1182,15 @@ namespace Phirura
                 _frames = 0;
             }
 
-            // The 5-second average, into the log rather than the HUD.
+            // The 25-second average, into the log rather than the HUD.
             //
-            // One line every 5 s whether the number is good or bad, and *not* deduplicated: a
+            // One line every 25 s whether the number is good or bad, and *not* deduplicated: a
             // renderer holding 60 fps while the phone does something else behind it looks identical
             // to one that is simply idle until the samples are spread over time. Cheap enough to
             // keep (one string and one file append), which is the whole reason it is a fixed window
             // and not a profiler.
             _frames5++;
-            if (_clock5.ElapsedMilliseconds >= 5000)
+            if (_clock5.ElapsedMilliseconds >= 25000)
             {
                 long ms = _clock5.ElapsedMilliseconds;
                 AppLog.WriteSync("RustStage1: fps avg=" + (_frames5 * 1000.0 / ms).ToString("0.0")
@@ -1234,7 +1234,7 @@ namespace Phirura
             _touchDown = down == 1;
             RustRenderer.SetTouch(x, y, down);
             // Only the edges. A hover-style move (no button) would otherwise log on every event,
-            // and moves during a drag are exactly the traffic the 5-second FPS line exists to keep
+            // and moves during a drag are exactly the traffic the 25-second FPS line exists to keep
             // the log readable against.
             if (edge)
             {

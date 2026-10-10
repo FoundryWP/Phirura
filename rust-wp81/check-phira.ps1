@@ -56,7 +56,7 @@ Set-Location $ws
 # attribute that does not apply to this target, and a build script that cannot compile stops the
 # check before any of `phira`'s own code is reached - which would make this probe measure the
 # patch instead of the port.
-$patch = Join-Path $here "wp81_registry_patch.py"
+$patch = Join-Path (Split-Path -Parent $here) "tools\wp81_registry_patch.py"
 if (Test-Path $patch) {
     Write-Host "=== 0. registry patch ==="
     & $py $patch --apply

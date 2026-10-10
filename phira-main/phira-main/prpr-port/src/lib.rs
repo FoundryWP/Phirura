@@ -1334,34 +1334,40 @@ pub extern "C" fn wp81_game_frame(dt: f64) -> i32 {
             // ending counters are all zero on every screen that is not the ending, so an all-zero
             // line once a second is the signal that says the scene never ran at all.
             let (ee, er, et, eg, esc, ea, es, edw, edh) = macroquad::ending_diag::take();
-            if ee + er > 0 {
-                let mut buf = [0u8; 208];
-                let mut n = push_str(&mut buf, 0, "ending: ee=");
-                n = push_u32(&mut buf, n, ee);
-                n = push_str(&mut buf, n, " er=");
-                n = push_u32(&mut buf, n, er);
-                n = push_str(&mut buf, n, " et=");
-                n = push_u32(&mut buf, n, et);
-                n = push_str(&mut buf, n, " eg=");
-                n = push_u32(&mut buf, n, eg);
-                n = push_str(&mut buf, n, " esc=");
-                n = push_u32(&mut buf, n, esc);
-                n = push_str(&mut buf, n, " ea=");
-                n = push_u32(&mut buf, n, ea);
-                n = push_str(&mut buf, n, " es=");
-                n = push_u32(&mut buf, n, es);
-                // `dw`/`dh` are the score digits' measured advance and height in 1/10000 UI
-                // units. Zero in either is the blank scoreboard: the width stops the digits
-                // walking across the screen, the height empties the clip rect they are drawn
-                // inside. Without them "the scoreboard is blank" and "the scoreboard draws"
-                // produce the same line.
-                n = push_str(&mut buf, n, " dw=");
-                n = push_u32(&mut buf, n, edw);
-                n = push_str(&mut buf, n, " dh=");
-                n = push_u32(&mut buf, n, edh);
-                if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                    log_line(s);
-                }
+            // Printed unconditionally. The comment above promised exactly that, and the code did
+            // the opposite: it carried `if ee + er > 0`. Every one of these nine counters is zero
+            // on every screen that is not the ending, so under that gate the line never printed
+            // anywhere except inside the scene it was meant to diagnose - which made "the ending
+            // scene never ran" byte-identical to "this log line was never wired up", and that is
+            // the single question the line exists to answer. The zeros are the signal; the
+            // silence was the bug. One line a second, forever, is the price of being able to tell
+            // the two apart after the fact.
+            let mut buf = [0u8; 208];
+            let mut n = push_str(&mut buf, 0, "ending: ee=");
+            n = push_u32(&mut buf, n, ee);
+            n = push_str(&mut buf, n, " er=");
+            n = push_u32(&mut buf, n, er);
+            n = push_str(&mut buf, n, " et=");
+            n = push_u32(&mut buf, n, et);
+            n = push_str(&mut buf, n, " eg=");
+            n = push_u32(&mut buf, n, eg);
+            n = push_str(&mut buf, n, " esc=");
+            n = push_u32(&mut buf, n, esc);
+            n = push_str(&mut buf, n, " ea=");
+            n = push_u32(&mut buf, n, ea);
+            n = push_str(&mut buf, n, " es=");
+            n = push_u32(&mut buf, n, es);
+            // `dw`/`dh` are the score digits' measured advance and height in 1/10000 UI
+            // units. Zero in either is the blank scoreboard: the width stops the digits
+            // walking across the screen, the height empties the clip rect they are drawn
+            // inside. Without them "the scoreboard is blank" and "the scoreboard draws"
+            // produce the same line.
+            n = push_str(&mut buf, n, " dw=");
+            n = push_u32(&mut buf, n, edw);
+            n = push_str(&mut buf, n, " dh=");
+            n = push_u32(&mut buf, n, edh);
+            if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                log_line(s);
             }
         }
     }

@@ -93,7 +93,9 @@ Write-Host "=== 0. patch the registry crates that bind Win32 with raw-dylib ==="
 # idempotent - a second run reports 0 changes - and `check_imports.py` in step 3 is what proves it
 # worked.
 $py = "C:\Users\admin\.workbuddy-ai\binaries\python\versions\3.13.12\python.exe"
-& $py (Join-Path $here "wp81_registry_patch.py") --apply
+# The wp81_*.py helpers live in the repo-level tools\ directory, not next to this script.
+$pyTools = Join-Path (Split-Path -Parent $here) "tools"
+& $py (Join-Path $pyTools "wp81_registry_patch.py") --apply
 if ($LASTEXITCODE -ne 0) { throw "registry patch failed ($LASTEXITCODE)" }
 
 # Second half of the same pass, and the one that has to run before cargo rather than after:
@@ -103,9 +105,9 @@ if ($LASTEXITCODE -ne 0) { throw "registry patch failed ($LASTEXITCODE)" }
 # checkout, so this is its counterpart: drop `net` from the tokio table and stand a failing
 # `TcpStream` in for the type the two phira-mp crates import. Idempotent, and `--check` is the
 # same assertion `wp81_registry_patch.py --check` makes.
-& $py (Join-Path $here "wp81_phira_mp_patch.py") --check
+& $py (Join-Path $pyTools "wp81_phira_mp_patch.py") --check
 if ($LASTEXITCODE -ne 0) {
-    & $py (Join-Path $here "wp81_phira_mp_patch.py") --apply
+    & $py (Join-Path $pyTools "wp81_phira_mp_patch.py") --apply
     if ($LASTEXITCODE -ne 0) { throw "phira-mp patch failed ($LASTEXITCODE)" }
 }
 

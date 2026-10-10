@@ -375,30 +375,48 @@ impl Scene for EndingScene {
             let step = step * fit;
             let h = h * fit;
             let dsz = s * fit;
-            ui.scissor(Rect::new(-1., y, 2., h + 0.01), |ui| {
+            // Once the entry roll is over every column sits at `o == 0`, so the settled row is
+            // drawn with no scissor at all. The scissor band is the only clip on this page, and if
+            // the port ever hands it a degenerate rectangle the digits vanish while every label,
+            // icon and button around them keeps drawing - which is exactly the reported "score
+            // blank, buttons alive" picture. With a working clip this branch puts the same glyphs
+            // at the same positions and sizes, so nothing visible changes; with a broken one the
+            // score is still there. The rolling animation keeps its clip untouched below.
+            if p >= 1. {
                 for (i, d) in digits.into_iter().enumerate() {
-                    let p = (p * (1. + (0.16 * (6 - i) as f32).powi(2))).min(1.);
-                    let p = 1. - (1. - p).powi(3);
-                    let mut p = d as f32 + (1. - p) * 7.;
-                    if p > 10. {
-                        p -= 10.;
-                    }
-                    let up = p as u32;
-                    let dw = (up + 1) % 10;
-                    let o = -h * (p - up as f32);
-                    ui.text(up.to_string())
-                        .pos(x + step / 2., y + o)
-                        .anchor(0.5, 0.)
-                        .size(dsz)
-                        .draw_using(&PGR_FONT);
-                    ui.text(dw.to_string())
-                        .pos(x + step / 2., y + h + o)
+                    ui.text(d.to_string())
+                        .pos(lf + step * (i as f32) + step / 2., y)
                         .anchor(0.5, 0.)
                         .size(dsz)
                         .draw_using(&PGR_FONT);
                     x += step;
                 }
-            });
+            } else {
+                ui.scissor(Rect::new(-1., y, 2., h + 0.01), |ui| {
+                    for (i, d) in digits.into_iter().enumerate() {
+                        let p = (p * (1. + (0.16 * (6 - i) as f32).powi(2))).min(1.);
+                        let p = 1. - (1. - p).powi(3);
+                        let mut p = d as f32 + (1. - p) * 7.;
+                        if p > 10. {
+                            p -= 10.;
+                        }
+                        let up = p as u32;
+                        let dw = (up + 1) % 10;
+                        let o = -h * (p - up as f32);
+                        ui.text(up.to_string())
+                            .pos(x + step / 2., y + o)
+                            .anchor(0.5, 0.)
+                            .size(dsz)
+                            .draw_using(&PGR_FONT);
+                        ui.text(dw.to_string())
+                            .pos(x + step / 2., y + h + o)
+                            .anchor(0.5, 0.)
+                            .size(dsz)
+                            .draw_using(&PGR_FONT);
+                        x += step;
+                    }
+                });
+            }
 
             if let Some(s) = &self.update_state {
                 if s.best {

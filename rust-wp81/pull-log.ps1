@@ -1,6 +1,6 @@
 param(
     [string]$Out = "E:\_phirura_tmp2\log_census.txt",
-    [string]$Url = "http://192.168.1.4:8765/log?tail=999999"
+    [string]$Url = "http://192.168.1.7:8765/log?tail=999999"
 )
 
 $PhoneGuid = "fa2c9634-5ad8-487e-be3c-9893871fda9f"

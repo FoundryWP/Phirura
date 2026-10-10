@@ -792,8 +792,8 @@ namespace Phirura
         /// "0 points, 100% accuracy" after a real play is worse than one reading nothing, because it
         /// looks like a real verdict.
         ///
-        /// Everything the result screen shows comes back here, counts included: <c>ResultPage</c>
-        /// reads <c>Score</c>, <c>MaxCombo</c>, <c>NumOfNotes</c>, <c>Counts</c> and
+        /// Everything the result screen shows comes back here, counts included: phira's own
+        /// ending scene reads <c>Score</c>, <c>MaxCombo</c>, <c>NumOfNotes</c>, <c>Counts</c> and
         /// <c>Early</c>/<c>Late</c>, so a partial answer would put a real score next to "0 notes"
         /// and read as a bug rather than as a known gap.
         ///

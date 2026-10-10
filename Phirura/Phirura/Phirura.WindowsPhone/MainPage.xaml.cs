@@ -63,12 +63,15 @@ namespace Phirura
 
         private void AccountButton_Click(object sender, RoutedEventArgs e)
         {
-            this.Frame.Navigate(typeof(LoginPage));
+            // The XAML login page is gone: sign-in lives in phira's own front end, which is
+            // what GamePage runs when PendingChart is null.
+            this.Frame.Navigate(typeof(GamePage));
         }
 
         private void OnlineButton_Click(object sender, RoutedEventArgs e)
         {
-            this.Frame.Navigate(typeof(OnlinePage));
+            // Same as above: the online library lives in phira's own front end.
+            this.Frame.Navigate(typeof(GamePage));
         }
 
         /// <summary>

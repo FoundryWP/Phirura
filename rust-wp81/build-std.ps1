@@ -29,7 +29,7 @@ $original = Join-Path $srcRoot "library.orig"
 
 Write-Host "=== 1. patch std ==="
 $python = "C:\Users\admin\.workbuddy-ai\binaries\python\versions\3.13.12\python.exe"
-& $python (Join-Path $here "wp81_std_patch.py") --apply
+& $python (Join-Path (Split-Path -Parent $here) "tools\wp81_std_patch.py") --apply
 if (-not (Test-Path $patched)) { throw "patch produced no output at $patched" }
 
 Write-Host "`n=== 2. swap the rust-src library for the patched copy ==="

@@ -2093,7 +2093,7 @@ namespace Phirura
         /// <c>Result()</c> would describe a flawless zero-score play - a result page reading
         /// "0 points, 100% accuracy" after a real play is worse than one reading nothing, because
         /// it looks like a real verdict. <c>GamePlayResult</c> carries the whole thing, counts and
-        /// early/late included, because <c>ResultPage</c> displays all of them.
+        /// early/late included, because phira's own ending scene displays all of them.
         /// </summary>
         private PlayResult RustResult()
         {
@@ -2123,7 +2123,17 @@ namespace Phirura
             }
             LastResult = RustResult();
             LastChartTitle = _entry.Title + "  ·  " + _entry.LevelDisplay;
-            this.Frame.Navigate(typeof(ResultPage));
+            // No XAML result page anymore: on the Rust path phira draws its own ending scene,
+            // so finishing here just returns to the list. Forward (not only back) because this
+            // page can be first in the stack.
+            if (this.Frame.CanGoBack)
+            {
+                this.Frame.GoBack();
+            }
+            else
+            {
+                this.Frame.Navigate(typeof(MainPage));
+            }
         }
 
         // ------------------------------------------------------------------
