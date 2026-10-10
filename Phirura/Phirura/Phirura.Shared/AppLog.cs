@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text;
 using System.Threading.Tasks;
 using Windows.Storage;
@@ -15,7 +16,10 @@ namespace Phirura
     ///
     /// Pull the file with the VS "Local Folder" browser, IsoStoreSpy, or WP Power Tools.
     /// Writes are queued and drained in order on the thread pool, so logging never blocks
-    /// the UI thread.
+    /// the UI thread. The drain is batched: one broker round-trip per few dozen lines,
+    /// not per line - a per-line task storm backed the queue up minutes behind the game
+    /// during play, which is what made pulls look "stale" and ISETool collide forever
+    /// with a file the app never stopped holding.
     /// </summary>
     public static class AppLog
     {
@@ -35,6 +39,25 @@ namespace Phirura
 
         private static readonly object Gate = new object();
         private static Task _tail = Task.FromResult(0);
+        // Lines waiting for the next drain. Swapped out whole under Gate so the drain writes
+        // one joined batch per store instead of one broker round-trip per line.
+        private static List<string> _pending = new List<string>();
+
+        // Cached file objects, one per store. Fetching them used to cost two broker round
+        // trips (CreateFile + GetBasicProperties) on EVERY drain, and the drain is serial -
+        // so at play-time line rates the chain never caught up and the frame-stats
+        // `WriteSync`, which waits on it once a second, ate the full 500 ms bound every
+        // time: worstMs ~520 ms on nearly every fps line, a visible hitch every second or
+        // two with rust/draw/present all near zero. A cached StorageFile is not an open
+        // file - FileIO opens and closes per append - so this keeps the ISETool windows the
+        // open-close rhythm used to provide. Nulled on any failure, refetched next drain.
+        private static StorageFile _localFile;
+        private static StorageFile _tempFile;
+        // Estimated bytes on disk per store, for rotation without a properties call per
+        // drain. -1 means unknown (fetch once). UTF-8 counted exactly at append time; the
+        // estimate only decides rotation, so drift is harmless.
+        private static long _localBytes = -1;
+        private static long _tempBytes = -1;
 
         /// <summary>
         /// Until then, appends are skipped because the last one threw.
@@ -70,7 +93,20 @@ namespace Phirura
             }
             lock (Gate)
             {
-                _tail = _tail.ContinueWith(delegate { Append(line); }, TaskScheduler.Default);
+                _pending.Add(line);
+                EnsureDrainLocked();
+            }
+        }
+
+        /// <summary>
+        /// Schedules a drain when the chain is idle. Gate must be held. Split out because
+        /// three call sites need exactly this: Write, WriteSync, and the drain's own re-arm.
+        /// </summary>
+        private static void EnsureDrainLocked()
+        {
+            if (_tail.IsCompleted)
+            {
+                _tail = _tail.ContinueWith(delegate { Drain(); }, TaskScheduler.Default);
             }
         }
 
@@ -100,7 +136,7 @@ namespace Phirura
             lock (Gate)
             {
                 Task previous = _tail;
-                _tail = previous.ContinueWith(delegate { Append(line); }, TaskScheduler.Default);
+                _pending.Add(line);
                 if (!previous.IsCompleted)
                 {
                     // The chain is already wedged: an append is stuck, which is what happens the
@@ -111,9 +147,12 @@ namespace Phirura
                     // turned "someone is reading the log" into a frozen screen - the frame never
                     // got past the first second of texture construction, which is also the second
                     // half of why text was on screen as white blocks. At most one wait is now
-                    // ever spent on any one wedge.
+                    // ever spent on any one wedge. The line is not lost: the running drain
+                    // re-arms itself while anything is still pending (see Drain), so it rides the
+                    // drain that clears the wedge instead of a wait that cannot.
                     return;
                 }
+                EnsureDrainLocked();
                 try
                 {
                     // Bounded: logging must never be the reason the app hangs either.
@@ -242,11 +281,24 @@ namespace Phirura
         }
 
         /// <summary>Runs on a thread-pool thread; the WinRT I/O is awaited there, never on the UI thread.</summary>
-        private static void Append(string line)
+        private static void Drain()
         {
-            StringBuilder sb = new StringBuilder(line.Length + 2);
-            sb.Append(line);
-            sb.Append("\r\n");
+            List<string> batch;
+            lock (Gate)
+            {
+                if (_pending.Count == 0)
+                {
+                    return;
+                }
+                batch = _pending;
+                _pending = new List<string>();
+            }
+            StringBuilder sb = new StringBuilder(batch.Count * 48);
+            for (int i = 0; i < batch.Count; i++)
+            {
+                sb.Append(batch[i]);
+                sb.Append("\r\n");
+            }
             string text = sb.ToString();
 
             // Two stores, each in its own try: one failing must not cost the other.
@@ -258,20 +310,42 @@ namespace Phirura
             // "no log" was really "the copy died at the mp3, which sorts before it". The temporary
             // store holds nothing but this file, so `ts appxfolder:Temp` is reliable and instant -
             // no 22 MB of chart art to walk first.
-            TryAppend(ApplicationData.Current.LocalFolder, text);
-            TryAppend(ApplicationData.Current.TemporaryFolder, text);
+            TryAppend(ApplicationData.Current.LocalFolder, text, ref _localFile, ref _localBytes);
+            TryAppend(ApplicationData.Current.TemporaryFolder, text, ref _tempFile, ref _tempBytes);
+
+            // Re-arm: lines that arrived while this drain owned no lock ride the next drain
+            // instead of waiting for a Write that may never come. The wedged-WriteSync early
+            // return above relies on exactly this - without it a line queued behind a stuck
+            // append would sit in `_pending` until some unrelated later line scheduled a drain.
+            lock (Gate)
+            {
+                if (_pending.Count > 0)
+                {
+                    EnsureDrainLocked();
+                }
+            }
         }
 
-        private static void TryAppend(StorageFolder folder, string text)
+        private static void TryAppend(StorageFolder folder, string text,
+            ref StorageFile cached, ref long bytes)
         {
             try
             {
-                StorageFile file = folder.CreateFileAsync(
-                    FileName, CreationCollisionOption.OpenIfExists).AsTask().Result;
-
-                Windows.Storage.FileProperties.BasicProperties props =
-                    file.GetBasicPropertiesAsync().AsTask().Result;
-                if (props != null && props.Size > MaxBytes)
+                StorageFile file = cached;
+                if (file == null)
+                {
+                    file = folder.CreateFileAsync(
+                        FileName, CreationCollisionOption.OpenIfExists).AsTask().Result;
+                    cached = file;
+                }
+                if (bytes < 0)
+                {
+                    Windows.Storage.FileProperties.BasicProperties props =
+                        file.GetBasicPropertiesAsync().AsTask().Result;
+                    bytes = props == null ? 0 : (long)props.Size;
+                }
+                int upcoming = System.Text.Encoding.UTF8.GetByteCount(text);
+                if ((ulong)(bytes + upcoming) > MaxBytes)
                 {
                     // Keep the tail; do not start over. This used to delete the file and recreate it
                     // empty, which threw away the *beginning* of the run - and the beginning is
@@ -293,15 +367,22 @@ namespace Phirura
                     {
                         tail = tail.Substring(nl + 1);
                     }
-                    FileIO.WriteTextAsync(file,
-                        "...(log rotated; kept the last " + tail.Length + " of " + all.Length
-                        + " chars)...\r\n" + tail).AsTask().Wait();
+                    string rotated = "...(log rotated; kept the last " + tail.Length + " of " + all.Length
+                        + " chars)...\r\n" + tail;
+                    FileIO.WriteTextAsync(file, rotated).AsTask().Wait();
+                    bytes = System.Text.Encoding.UTF8.GetByteCount(rotated);
                 }
 
                 FileIO.AppendTextAsync(file, text).AsTask().Wait();
+                bytes += upcoming;
             }
             catch (Exception)
             {
+                // Drop the cached objects: the next drain refetches both, which is also what
+                // recovers from an externally deleted or replaced file. Size resets to unknown
+                // for the same reason.
+                cached = null;
+                bytes = -1;
                 // Logging must never be the reason the app dies.
                 System.Threading.Interlocked.Exchange(
                     ref _mutedUntilTicks, DateTime.UtcNow.AddSeconds(5).Ticks);

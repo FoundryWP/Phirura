@@ -252,17 +252,6 @@ warning: function `glFramebufferRenderbuffer` should have a snake case name
 fer`
 
 warning: `miniquad` (lib) generated 15 warnings
-warning: linker stdout: LINK : warning LNK4044: unrecognized option '/NATVIS:C:\Users\admin\.workbuddy-ai\binaries\rust
-\rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\etc\intrinsic.natvis'; ignored鈵?         LINK : warning L
-NK4044: unrecognized option '/NATVIS:C:\Users\admin\.workbuddy-ai\binaries\rust\rustup\toolchains\nightly-x86_64-pc-win
-dows-msvc\lib\rustlib\etc\liballoc.natvis'; ignored鈵?         LINK : warning LNK4044: unrecognized option '/NATVIS:C:\U
-sers\admin\.workbuddy-ai\binaries\rust\rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\etc\libcore.natvis'
-; ignored鈵?         LINK : warning LNK4044: unrecognized option '/NATVIS:C:\Users\admin\.workbuddy-ai\binaries\rust\rus
-tup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\etc\libstd.natvis'; ignored
-  |
-  = note: `#[warn(linker_messages)]` on by default
-
-warning: `phira` (build script) generated 1 warning
 warning: unused doc comment
     --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\macroquad\src\lib.rs:1243:5
      |
@@ -465,7 +454,18 @@ warning: creating a shared reference to mutable static
 g.org/reference/interior-mutability.html>
      = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
 
+warning: linker stdout: LINK : warning LNK4044: unrecognized option '/NATVIS:C:\Users\admin\.workbuddy-ai\binaries\rust
+\rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\etc\intrinsic.natvis'; ignored鈵?         LINK : warning L
+NK4044: unrecognized option '/NATVIS:C:\Users\admin\.workbuddy-ai\binaries\rust\rustup\toolchains\nightly-x86_64-pc-win
+dows-msvc\lib\rustlib\etc\liballoc.natvis'; ignored鈵?         LINK : warning LNK4044: unrecognized option '/NATVIS:C:\U
+sers\admin\.workbuddy-ai\binaries\rust\rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\etc\libcore.natvis'
+; ignored鈵?         LINK : warning LNK4044: unrecognized option '/NATVIS:C:\Users\admin\.workbuddy-ai\binaries\rust\rus
+tup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\etc\libstd.natvis'; ignored
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
 warning: `macroquad` (lib) generated 17 warnings
+warning: `phira` (build script) generated 1 warning
 warning: variable does not need to be mutable
    --> E:\Users\admin\Documents\visual studio 2013\Phirura\rust-wp81\shims\rfd\src\lib.rs:111:23
     |
@@ -543,18 +543,18 @@ warning: variable does not need to be mutable
     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
 warning: unnecessary `unsafe` block
-   --> prpr\src\core\resource.rs:397:62
+   --> prpr\src\core\resource.rs:479:62
     |
-397 | ...   gl.texture(Some(Texture2D::from_miniquad_texture(unsafe { Texture::from_raw_id(tex_id, miniquad::TextureFor
+479 | ...   gl.texture(Some(Texture2D::from_miniquad_texture(unsafe { Texture::from_raw_id(tex_id, miniquad::TextureFor
 mat::RGBA8) })));
     |                                                        ^^^^^^ unnecessary `unsafe` block
     |
     = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
 
 warning: variable does not need to be mutable
-   --> prpr\src\core\resource.rs:392:13
+   --> prpr\src\core\resource.rs:474:13
     |
-392 |         let mut gl = unsafe { get_internal_gl() };
+474 |         let mut gl = unsafe { get_internal_gl() };
     |             ----^^
     |             |
     |             help: remove this `mut`
@@ -597,41 +597,41 @@ warning: `prpr` (lib) generated 9 warnings (run `cargo fix --lib -p prpr` to app
 warning: dropping unsupported crate type `cdylib` for target `thumbv7a-pc-windows-msvc-11203888916865665807`
 
 warning: use of deprecated constant `std::f32::NAN`: replaced by the `NAN` associated constant on `f32`
-   --> phira\src\scene\song.rs:468:33
+   --> phira\src\scene\song.rs:516:33
     |
-468 |                 load_time: f32::NAN,
+516 |                 load_time: f32::NAN,
     |                                 ^^^
     |
     = note: `#[warn(deprecated)]` on by default
 
 warning: use of deprecated constant `std::f32::INFINITY`: replaced by the `INFINITY` associated constant on `f32`
-   --> phira\src\scene\song.rs:556:35
+   --> phira\src\scene\song.rs:622:35
     |
-556 |             side_enter_time: f32::INFINITY,
+622 |             side_enter_time: f32::INFINITY,
     |                                   ^^^^^^^^
 
 warning: use of deprecated constant `std::f32::NAN`: replaced by the `NAN` associated constant on `f32`
-   --> phira\src\scene\song.rs:618:28
+   --> phira\src\scene\song.rs:684:28
     |
-618 |             tr_start: f32::NAN,
+684 |             tr_start: f32::NAN,
     |                            ^^^
 
 warning: use of deprecated constant `std::f32::INFINITY`: replaced by the `INFINITY` associated constant on `f32`
-    --> phira\src\scene\song.rs:2004:41
+    --> phira\src\scene\song.rs:2067:41
      |
-2004 |             self.side_enter_time = f32::INFINITY;
+2067 |             self.side_enter_time = f32::INFINITY;
      |                                         ^^^^^^^^
 
 warning: use of deprecated constant `std::f32::NAN`: replaced by the `NAN` associated constant on `f32`
-    --> phira\src\scene\song.rs:2113:46
+    --> phira\src\scene\song.rs:2183:46
      |
-2113 |                         self.tr_start = f32::NAN;
+2183 |                         self.tr_start = f32::NAN;
      |                                              ^^^
 
 warning: use of deprecated constant `std::f32::NAN`: replaced by the `NAN` associated constant on `f32`
-    --> phira\src\scene\song.rs:2958:38
+    --> phira\src\scene\song.rs:3028:38
      |
-2958 |                 self.tr_start = f32::NAN;
+3028 |                 self.tr_start = f32::NAN;
      |                                      ^^^
 
 warning: `phira` (lib) generated 7 warnings
@@ -1155,4 +1155,4 @@ help: first cast to a pointer `as *const ()`
      |                               ++++++++++++
 
 warning: `prpr-port` (lib) generated 46 warnings (run `cargo fix --lib -p prpr-port` to apply 43 suggestions)
-    Finished `release` profile [optimized] target(s) in 3m 35s
+    Finished `release` profile [optimized] target(s) in 2m 33s

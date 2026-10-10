@@ -85,6 +85,29 @@ impl RectExt for Rect {
 
 static PENDING_TEXTURE_DELETIONS: Lazy<Mutex<Vec<Texture2D>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
+/// Chart-load phase durations, reported the moment each phase completes.
+///
+/// `prpr` has no log sink on this target (`tracing` is silent here), so phases go straight
+/// out through a sink `prpr-port` installs next to phira's (`set_log_sink`): no recording,
+/// no drain site that a scene change can strand - which is exactly what happened the first
+/// time, when the phases were collected for a drain in the song scene while the work ran
+/// under the loading scene that replaced it. `OnceLock`, never `static mut`.
+static PHASE_SINK: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+/// Install the phase sink. Called once at boot; later calls are ignored.
+pub fn set_phase_sink(f: fn(&str)) {
+    let _ = PHASE_SINK.set(f);
+}
+
+/// Record one load phase. Cheap (one formatted line); called a handful of times per chart
+/// load, never per frame. Prints immediately through the sink when one is installed, and
+/// drops the line when none is (desktop runs without the port).
+pub fn phase_push(name: &str, ms: u128) {
+    if let Some(sink) = PHASE_SINK.get() {
+        sink(&format!("SongScene: phase {name} {ms}ms"));
+    }
+}
+
 /// Deletes all textures queued up by `SafeTexture` drops so far.
 ///
 /// Deleting a GL texture from a thread other than the one owning the GL

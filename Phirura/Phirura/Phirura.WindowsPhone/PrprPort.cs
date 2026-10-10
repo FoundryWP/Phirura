@@ -1979,6 +1979,41 @@ namespace Phirura
         /// </summary>
         private static readonly System.Collections.Generic.Dictionary<string, byte[]> _assetCache =
             new System.Collections.Generic.Dictionary<string, byte[]>();
+        /// <summary>
+        /// Root folder handles, by root path. `GetFolderFromPathAsync` is a broker round-trip
+        /// like any other, and it was paid on every asset: 4-6 trips per small file is what the
+        /// respack loads measured at (~500 ms each on this phone, fourteen of them in a row at
+        /// every chart load). Roots are staged once before anything loads, so one resolution
+        /// each is exact for the session. Guarded: pool threads arrive here concurrently.
+        /// </summary>
+        private static readonly System.Collections.Generic.Dictionary<string, Windows.Storage.StorageFolder> _rootFolders =
+            new System.Collections.Generic.Dictionary<string, Windows.Storage.StorageFolder>();
+        private static readonly object _rootGate = new object();
+        private static Windows.Storage.StorageFolder RootFolder(string root)
+        {
+            if (string.IsNullOrEmpty(root))
+            {
+                return null;
+            }
+            lock (_rootGate)
+            {
+                Windows.Storage.StorageFolder folder;
+                if (_rootFolders.TryGetValue(root, out folder) && folder != null)
+                {
+                    return folder;
+                }
+                try
+                {
+                    folder = Windows.Storage.StorageFolder.GetFolderFromPathAsync(root).AsTask().Result;
+                }
+                catch (System.Exception)
+                {
+                    return null;
+                }
+                _rootFolders[root] = folder;
+                return folder;
+            }
+        }
 
         private static int OnLoadAsset(IntPtr name, IntPtr outBytes, IntPtr cap)
         {
@@ -2040,9 +2075,10 @@ namespace Phirura
                     // Zero of these lines is itself an answer: it means the engine never got as far
                     // as asking for anything.
                     //
-                    // First read only. The engine re-requests images on every scene entry, and
-                    // logging those would bury the one that matters.
-                    AppLog.WriteSync("PrprPort: asset " + relative + " -> " + data.Length + " bytes");
+                    // First read only. Queued (see the pack-root line below for why): the entry
+                    // line above already marked the request synchronously, so a crash between
+                    // the two still reads as "died inside this file".
+                    AppLog.Write("PrprPort: asset " + relative + " -> " + data.Length + " bytes");
                 }
 
                 int want = cap.ToInt32();
@@ -2540,12 +2576,11 @@ namespace Phirura
                 data = ReadAssetFrom(_assetPackRoot, normalised);
                 if (data != null)
                 {
-                    // One line, and only when the split actually did the work. Logged because a
-                    // file found *here* and nowhere else is the failure mode this split
-                    // introduces: if `respack\` had not been staged, the same request would fall
-                    // through and surface as `asset missing:` with nothing to say that both roots
-                    // had been tried.
-                    AppLog.WriteSync("PrprPort: asset resolved from pack root: " + normalised);
+                    // Queued, not sync: the entry line above (still `WriteSync`) already marked
+                    // how far the load got, and this one only adds the byte count. Same chain,
+                    // so order against every other line is preserved; a crash loses at most the
+                    // tail. Two sync waits per file on a pool thread was pure stall.
+                    AppLog.Write("PrprPort: asset resolved from pack root: " + normalised);
                 }
             }
             return data;
@@ -2578,9 +2613,13 @@ namespace Phirura
                 // would present as every chart failing to load rather than as an IO error. Walking
                 // the segments is the form that works, and it is what `ChartLibrary` does for the
                 // same reason. The whole-file cache above means this walk happens once per
-                // distinct asset, not once per frame.
-                Windows.Storage.StorageFolder folder =
-                    Windows.Storage.StorageFolder.GetFolderFromPathAsync(root).AsTask().Result;
+                // distinct asset, not once per frame - and the root handle below is resolved once
+                // per root rather than once per file (see `RootFolder`).
+                Windows.Storage.StorageFolder folder = RootFolder(root);
+                if (folder == null)
+                {
+                    return null;
+                }
 
                 string[] parts = normalised.Split(new char[] { '\\' },
                     StringSplitOptions.RemoveEmptyEntries);

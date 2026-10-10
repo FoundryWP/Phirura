@@ -256,7 +256,9 @@ impl GameScene {
             _ => {}
         }
 
+        let t0 = std::time::Instant::now();
         let (mut chart, chart_bytes, chart_format) = Self::load_chart(fs.deref_mut(), &info).await?;
+        crate::ext::phase_push("parse", t0.elapsed().as_millis());
         if config.mods.contains(Mods::NO_SHADER) {
             chart.extra.effects.clear();
             chart.extra.global_effects.clear();
@@ -302,7 +304,9 @@ impl GameScene {
 
         let exercise_range = (chart.offset + info_offset + res.config.offset) as f64..res.track_length;
 
+        let t0 = std::time::Instant::now();
         let judge = Judge::new(&chart);
+        crate::ext::phase_push("game_notes", t0.elapsed().as_millis());
 
         let music = Self::new_music(&mut res)?;
         Ok(Self {

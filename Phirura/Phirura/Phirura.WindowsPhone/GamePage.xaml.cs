@@ -164,6 +164,16 @@ namespace Phirura
         // to tell "the engine is wrong" from "the wiring is wrong".
         private const bool UseRustEngine = true;
 
+        /// <summary>
+        /// Build tag, logged once per boot. Bump on every deploy cycle: four cycles in a row
+        /// went out with "installed + launched EXIT 0" while the phone kept running older bits
+        /// (budget-era resume lines, but no phase lines and no resume-drop lines that the newer
+        /// builds must emit), and without a tag "the fix did nothing" is indistinguishable
+        /// from "the fix never arrived". If this line is missing or stale in the pull, stop
+        /// diagnosing the app and fix the deploy first.
+        /// </summary>
+        private const string BuildTag = "phase2+fair96k+touchclear+decodecount+rootcache+inputyield+worker2+dlqueue+previewfb+watchdog+drawmeter+desync+phasesink+ingestnofail+musicnolen+stallwatch+endingmusic+preload+logchain+loadslice+slowdraw+kindsplit";
+
         /// Viewport in **pixels**, which is what `wp81_game_set_screen` wants: `prpr` projects
         /// through `screen_width`/`screen_height`, and the recorded frame is 768x1229 px while
         /// `GameSurface.ActualWidth` is in DIPs.
@@ -539,6 +549,21 @@ namespace Phirura
             {
                 SetImmersive(true);
             }
+            // Every tracked finger dies here. The OS discards all contacts across a suspend
+            // and never delivers their releases, so a press still in the table would sit in
+            // Started forever - the log showed `remaining=` climbing past 150 that way, i.e.
+            // the engine handed a crowd of stale fingers on every frame while real taps
+            // drowned in it. A finger genuinely still down re-presses on resume; nothing
+            // real is lost, and the press-time stamps go with their fingers (see the sweep).
+            int stale = _active.Count;
+            _active.Clear();
+            _toRemove.Clear();
+            _rustPressTime.Clear();
+            _justStarted.Clear();
+            if (stale > 0)
+            {
+                AppLog.WriteSync("GamePage: dropped " + stale + " stale touches on resume");
+            }
         }
 
         private void OnBackPressed(object sender, BackPressedEventArgs e)
@@ -626,6 +651,12 @@ namespace Phirura
                 // Before `StartPhiraAsync`, which never yields: the music URI has to exist by the
                 // time phira first asks for the music, and phira asks from the frame thread.
                 await ResolvePhiraMusicAsync();
+                // Unconditional: the packaged-chart probe above returns early when there is no
+                // bundled chart, and the ending clip lives in the res pack, not in any chart -
+                // so gating this on the chart probe left the result page without BGM (and with
+                // the chart's music bleeding through the silent branch) for every downloaded
+                // chart.
+                await ResolvePhiraEndingMusicAsync();
                 StartPhiraAsync();
                 return;
             }
@@ -1457,6 +1488,16 @@ namespace Phirura
                 // tested either - it is only ever set by `DoPause`, which phira mode cannot reach
                 // (the pause button is collapsed and Back leaves instead), and honouring it would
                 // freeze the frame loop while phira kept animating in its own future.
+                if (InputOverlay != null && InputOverlay.Visibility == Visibility.Visible)
+                {
+                    // The shell's own input dialog is up: skip the frame and hand the UI thread
+                    // back. A Rust frame costs 15-150 ms on this phone, and a TextBox whose
+                    // keystrokes queue behind that reads as input lag on a native control. The
+                    // dialog is modal - nothing behind it needs animating - and typing, taps and
+                    // the OK/Cancel buttons are XAML events that never pass through here. Music
+                    // keeps its guard above; the clocks resync on resume like any other pause.
+                    return;
+                }
                 RenderPhiraFrame();
                 return;
             }
@@ -1643,6 +1684,7 @@ namespace Phirura
                     + ", pack root = " + PrprPort.AssetPackRoot);
 
                 var boot = System.Diagnostics.Stopwatch.StartNew();
+                AppLog.WriteSync("GamePage: build " + BuildTag);
                 AppLog.WriteSync("GamePage: phira boot (screen " + _rustW + "x" + _rustH + " px @ "
                     + _rustScale.ToString("0.0") + ", chart " + PhiraAutoChart + ")");
                 // `LocalFolder` is handed over as phira's `DATA_PATH`. It is the one directory this
@@ -1887,6 +1929,23 @@ namespace Phirura
             _sumPresent += t3 - t2;
             if (t3 - t0 > _maxFrame) _maxFrame = t3 - t0;
 
+            // Single-frame stall watchdog. The 1 s averages above die with a wedged frame -
+            // a part that never returns never prints - so a freeze reads as silence with no
+            // location. Anything past 2 s names its part at once: rust (the engine tick),
+            // draw (upload + replay) or present (the Invalidate round-trip). Fires once per
+            // wedged frame at most, silent otherwise.
+            long stallThreshold = System.Diagnostics.Stopwatch.Frequency * 2;
+            string stallPart = null;
+            long stallTicks = 0;
+            if (t1 - t0 > stallThreshold) { stallPart = "rust"; stallTicks = t1 - t0; }
+            else if (t2 - t1 > stallThreshold) { stallPart = "draw"; stallTicks = t2 - t1; }
+            else if (t3 - t2 > stallThreshold) { stallPart = "present"; stallTicks = t3 - t2; }
+            if (stallPart != null)
+            {
+                AppLog.WriteSync("GamePage: frame stall part=" + stallPart
+                    + " ms=" + ((stallTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("0")));
+            }
+
             // One line a second, and it is the shell's own number. The Rust side logs its frame
             // counter, but that only says the engine is being ticked - it cannot see how long the
             // drain, the command replay and the present took, which is where the port's cost lives
@@ -1965,7 +2024,11 @@ namespace Phirura
                     // chain makes `WriteSync` return immediately rather than block the UI).
                     + " mem=" + (Windows.System.MemoryManager.AppMemoryUsage / (1024.0 * 1024.0)).ToString("0.0")
                     + "/" + (Windows.System.MemoryManager.AppMemoryUsageLimit / (1024.0 * 1024.0)).ToString("0.0")
-                    + "MB lvl=" + Windows.System.MemoryManager.AppMemoryUsageLevel);
+                    + "MB lvl=" + Windows.System.MemoryManager.AppMemoryUsageLevel
+                    // Gen2 count, cumulative: a 500 ms worst frame with rust/draw/present near
+                    // zero and a Gen2 that moved since the last line is the collector pausing
+                    // the UI thread, not the engine. Deltas are computed off-device.
+                    + " gc2=" + GcGen2());
                 _frames = 0;
                 _sumRust = 0; _sumDraw = 0; _sumPresent = 0; _maxFrame = 0;
             }
@@ -1973,6 +2036,18 @@ namespace Phirura
 
         private int _frames;
         private int _fpsTick = Environment.TickCount;
+
+        /// <summary>
+        /// Gen2 collection count, or -1 when the profile does not expose it. Split out
+        /// because `GC.CollectionCount` is the one call on the fps line whose availability
+        /// was not byte-verified: a `MissingMethodException` here must read as -1, never
+        /// as a dead frame loop.
+        /// </summary>
+        private static int GcGen2()
+        {
+            try { return System.GC.CollectionCount(2); }
+            catch (Exception) { return -1; }
+        }
 
         /// <summary>Per-second accumulators for the three phases of one frame, in Stopwatch ticks.</summary>
         private long _sumRust, _sumDraw, _sumPresent, _maxFrame;
@@ -2213,7 +2288,11 @@ namespace Phirura
             {
                 AppLog.Write("GamePage.ResolvePhiraMusic", ex);
             }
-            await ResolvePhiraEndingMusicAsync();
+            // No ending resolver here: the early return above (no packaged chart, the normal
+            // case for a downloaded-chart session) used to skip it forever, leaving
+            // PhiraEndingMusicUri null - and the ending page then fell into the silent-clock
+            // branch with the chart's music still playing. It runs unconditionally from
+            // StartAsync instead.
         }
 
         /// <summary>
@@ -2458,10 +2537,13 @@ namespace Phirura
                 {
                     // A server preview: the bytes exist in Rust but there is no file on disk for
                     // MediaElement to open. Silence with a line saying so beats reaching for
-                    // whichever chart happened to be resolved before boot.
+                    // whichever chart happened to be resolved before boot - and the old track
+                    // is stopped, otherwise it keeps playing under the silence: the clock is
+                    // free but the element is not.
                     _previewFrom = -1.0;
                     _previewTo = -1.0;
                     _clock.StartFree();
+                    try { Player.Pause(); } catch (Exception) { }
                     AppLog.Write("GamePage: music_new preview has no local file -> silent clock");
                     return;
                 }
@@ -2504,7 +2586,11 @@ namespace Phirura
             {
                 // Still free-run. A chart that plays in silence is a diagnosable state; one pinned
                 // at zero - which is what `music_position -> 0.0` meant every second - is not.
+                // And the previous track is stopped: this branch is where the ending page lands
+                // when the pack has no ending clip, and without the pause the chart's music
+                // plays on over the result page while the clock claims silence.
                 _clock.StartFree();
+                try { Player.Pause(); } catch (Exception) { }
                 AppLog.Write("GamePage: music_new secs=" + clipSecs.ToString("0.###")
                     + (isChart ? " chart but no music file" : " not the chart, no ending clip")
                     + " -> silent clock");

@@ -12,6 +12,7 @@ use miniquad::{
     gl::{GLuint, GL_LINEAR},
     Texture, TextureWrap,
 };
+use once_cell::sync::Lazy;
 use sasa::{AudioClip, AudioManager, Sfx};
 use serde::Deserialize;
 use std::{
@@ -19,7 +20,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     ops::DerefMut,
     path::Path,
-    sync::atomic::AtomicU32,
+    sync::{atomic::AtomicU32, Arc, Mutex},
 };
 
 pub const MAX_SIZE: usize = 64; // needs tweaking
@@ -52,7 +53,7 @@ fn default_tinted() -> bool {
 }
 
 #[allow(dead_code)]
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ResPackInfo {
     pub name: String,
@@ -139,6 +140,7 @@ impl ResPackInfo {
     }
 }
 
+#[derive(Clone)]
 pub struct NoteStyle {
     pub click: SafeTexture,
     pub hold: SafeTexture,
@@ -182,6 +184,7 @@ impl NoteStyle {
     }
 }
 
+#[derive(Clone)]
 pub struct ResourcePack {
     pub info: ResPackInfo,
     pub note_style: NoteStyle,
@@ -296,6 +299,85 @@ impl ResourcePack {
             ending: load_clip!("ending"),
             hit_fx,
         })
+    }
+}
+
+/// Chart-independent resources, loaded once and shared across chart loads.
+///
+/// The res pack, rank/mod icons and buttons never depend on the chart: reloading them on
+/// every play is ~30 sequential asset round trips the song page could have spent idle.
+/// Filled by the song page's preload and consumed by `Resource::new`; every field is
+/// cheap to clone (`SafeTexture` and `AudioClip` are reference-counted), so sharing costs
+/// nothing per load. Keyed by `res_pack_path` - switching packs invalidates the slot.
+/// A `Mutex`, never `static mut`; held only for the check/store, never across an await.
+#[derive(Clone)]
+pub struct CommonResource {
+    pub res_pack: ResourcePack,
+    pub icons: [SafeTexture; 8],
+    pub mod_icons: [SafeTexture; 7],
+    pub player: SafeTexture,
+    pub icon_back: SafeTexture,
+    pub icon_retry: SafeTexture,
+    pub icon_resume: SafeTexture,
+    pub icon_proceed: SafeTexture,
+}
+
+static COMMON_SLOT: Lazy<Mutex<Option<(Option<String>, Arc<CommonResource>)>>> =
+    Lazy::new(|| Mutex::new(None));
+
+impl Resource {
+    /// Load the chart-independent half of `Resource::new`. Same code, same phases
+    /// (`resource_pack`, `resource_icons`) - only the caller differs: the song page runs
+    /// this idle, the game scene runs it when the slot missed.
+    pub async fn load_common(res_pack_path: Option<String>) -> Result<Arc<CommonResource>> {
+        macro_rules! load_tex {
+            ($path:literal) => {
+                SafeTexture::from(Texture2D::from_image(&load_image($path).await?))
+            };
+        }
+        let t0 = std::time::Instant::now();
+        let res_pack = ResourcePack::from_path(res_pack_path.as_ref())
+            .await
+            .context("Failed to load resource pack")?;
+        crate::ext::phase_push("resource_pack", t0.elapsed().as_millis());
+        let t0 = std::time::Instant::now();
+        let icons = Self::load_icons().await?;
+        let mod_icons = Self::load_mod_icons().await?;
+        let player = load_tex!("player.jpg");
+        let icon_back = load_tex!("back.png");
+        let icon_retry = load_tex!("retry.png").with_mipmap();
+        let icon_resume = load_tex!("resume.png");
+        let icon_proceed = load_tex!("proceed.png").with_mipmap();
+        crate::ext::phase_push("resource_icons", t0.elapsed().as_millis());
+        Ok(Arc::new(CommonResource {
+            res_pack,
+            icons,
+            mod_icons,
+            player,
+            icon_back,
+            icon_retry,
+            icon_resume,
+            icon_proceed,
+        }))
+    }
+
+    /// Take the cached common resources when they were built for this pack path.
+    pub fn take_common(path: &Option<String>) -> Option<Arc<CommonResource>> {
+        if let Ok(slot) = COMMON_SLOT.lock() {
+            if let Some((p, common)) = slot.as_ref() {
+                if p == path {
+                    return Some(common.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// Publish freshly loaded common resources for the next chart load.
+    pub fn store_common(path: Option<String>, common: Arc<CommonResource>) {
+        if let Ok(mut slot) = COMMON_SLOT.lock() {
+            *slot = Some((path, common));
+        }
     }
 }
 
@@ -494,20 +576,28 @@ impl Resource {
         illustration: SafeTexture,
         has_no_effect: bool,
     ) -> Result<Self> {
-        macro_rules! load_tex {
-            ($path:literal) => {
-                SafeTexture::from(Texture2D::from_image(&load_image($path).await?))
-            };
-        }
-        let res_pack = ResourcePack::from_path(config.res_pack_path.as_ref())
-            .await
-            .context("Failed to load resource pack")?;
+        // Chart-independent half: served from the song page's preload when it finished in
+        // time, loaded inline otherwise - and stored either way, so the second chart of the
+        // session reuses it. `resource_common` near 0 ms is the preload paying off; the
+        // `resource_pack`/`resource_icons` lines only print on a miss.
+        let t0 = std::time::Instant::now();
+        let common = match Self::take_common(&config.res_pack_path) {
+            Some(common) => common,
+            None => {
+                let common = Self::load_common(config.res_pack_path.clone()).await?;
+                Self::store_common(config.res_pack_path.clone(), common.clone());
+                common
+            }
+        };
+        crate::ext::phase_push("resource_common", t0.elapsed().as_millis());
+        let res_pack = common.res_pack.clone();
         let camera = Camera2D {
             target: vec2(0., 0.),
             zoom: vec2(1., -config.aspect_ratio.unwrap_or(info.aspect_ratio)),
             ..Default::default()
         };
 
+        let t0 = std::time::Instant::now();
         let mut audio = create_audio_manger(&config)?;
         // Named with the file `phira` published for this launch, because the name is the only
         // thing on the `music_new` boundary that identifies the audio - every clip reports id 0.
@@ -515,7 +605,10 @@ impl Resource {
         // against the chart it knew about, which is how a downloaded chart played the res pack's
         // `ending` instead of its own music. An empty name (nothing published) keeps the old
         // behaviour rather than inventing a path.
-        let music = AudioClip::new_named(
+        // Length only, never samples: the shell keeps its own decode for playback and
+        // nothing in `prpr` reads a sample of the game track (see `new_named_len`) - decoding
+        // 228 s of f32 here is what killed 69509's load with no marker.
+        let music = AudioClip::new_named_len(
             &crate::music_source().unwrap_or_default(),
             fs.load_file(&info.music).await?,
         )?;
@@ -524,6 +617,7 @@ impl Resource {
         let sfx_click = audio.create_sfx(res_pack.sfx_click.clone(), buffer_size)?;
         let sfx_drag = audio.create_sfx(res_pack.sfx_drag.clone(), buffer_size)?;
         let sfx_flick = audio.create_sfx(res_pack.sfx_flick.clone(), buffer_size)?;
+        crate::ext::phase_push("resource_music", t0.elapsed().as_millis());
 
         let aspect_ratio = config.aspect_ratio.unwrap_or(info.aspect_ratio);
         let note_width = config.note_scale * NOTE_WIDTH_RATIO_BASE as f32;
@@ -551,14 +645,14 @@ impl Resource {
 
             background,
             illustration,
-            icons: Self::load_icons().await?,
-            mod_icons: Self::load_mod_icons().await?,
+            icons: common.icons.clone(),
+            mod_icons: common.mod_icons.clone(),
             res_pack,
-            player: if let Some(player) = player { player } else { load_tex!("player.jpg") },
-            icon_back: load_tex!("back.png"),
-            icon_retry: load_tex!("retry.png").with_mipmap(),
-            icon_resume: load_tex!("resume.png"),
-            icon_proceed: load_tex!("proceed.png").with_mipmap(),
+            player: if let Some(player) = player { player } else { common.player.clone() },
+            icon_back: common.icon_back.clone(),
+            icon_retry: common.icon_retry.clone(),
+            icon_resume: common.icon_resume.clone(),
+            icon_proceed: common.icon_proceed.clone(),
 
             emitter,
 

@@ -12,7 +12,39 @@ $Via = "http"
 if (Test-Path $Out) { Remove-Item -LiteralPath $Out -Force -ErrorAction SilentlyContinue }
 curl.exe -sS --max-time 30 $Url -o $Out
 
+$Base = $Url.Substring(0, $Url.IndexOf("/log"))
+function Get-HealthChars {
+    try {
+        $h = curl.exe -sS --max-time 6 ($Base + "/health") | Out-String
+        if ($h -match 'chars=(\d+)') { return [int]$Matches[1] }
+    } catch { }
+    return -1
+}
+
+$stale = $false
 if ((-not (Test-Path $Out)) -or ((Get-Item $Out).Length -eq 0)) {
+    $stale = $true
+} else {
+    # Freshness: the HTTP channel serves whatever FileIO can read at that instant, and a
+    # wedged append chain (or a file held open by a pull) leaves it minutes behind the live
+    # log while health chars keep moving. A pull that ends before the run under test is
+    # worse than no pull - it reads as "nothing happened". Health's chars is the live
+    # length; a pull far short of it is stale, not complete. Slack scales (see below)
+    # for the lines written between the two reads. Unreachable health (-1) skips the check: a dead app's
+    # pull is judged by the crash markers below, not by freshness.
+    $chars = Get-HealthChars
+    $got = (Get-Item $Out).Length
+    # Slack scales with the file: a fixed 32 KB swallowed a whole fresh boot (588 bytes
+    # pulled against a 14 KB live file) and called it complete. 8 KB or 5% of live,
+    # whichever is bigger, for the lines written between the two reads.
+    $slack = [Math]::Max(8192, [int]($chars / 20))
+    if ($chars -ge 0 -and ($got + $slack) -lt $chars) {
+        "HTTP pull stale (got $got B, live $chars B) - falling through to ISETool"
+        $stale = $true
+    }
+}
+
+if ($stale) {
     # The HTTP log server is a StreamSocketListener owned by the *app process*, so a crash takes
     # the log endpoint down with it - which is precisely the moment the log is worth having. This
     # fallback is the reason to reach for it: `ISETool ts` reads the isolated store straight off
@@ -30,8 +62,21 @@ if ((-not (Test-Path $Out)) -or ((Get-Item $Out).Length -eq 0)) {
     # be read back as this crash's evidence.
     if (Test-Path $iseLog) { Remove-Item -LiteralPath $iseLog -Force -ErrorAction SilentlyContinue }
 
-    & $ise ts appxfolder:Temp deviceindex:0 $PhoneGuid $pull | Out-Null
-    if (-not (Test-Path $iseLog)) { "PULL FAILED (http dead and no $iseLog)"; exit 1 }
+    # Local, not Temp: the Temp copy is wiped by the system at any time (verified empty
+    # on-device with `ts appxfolder:Temp`), so a Temp pull "succeeds" with nothing in it.
+    # Local holds the charts too, so this costs the whole-store walk Temp was meant to avoid -
+    # the price of a log that actually exists.
+    #
+    # Retried: `ts` copies the store file by file and fails with "another program is using
+    # this file" when an append holds phirura.log open. The hold lasts as long as one
+    # append, so a few seconds apart almost always lands one.
+    $ok = $false
+    for ($t = 1; $t -le 5 -and -not $ok; $t++) {
+        if (Test-Path $iseLog) { Remove-Item -LiteralPath $iseLog -Force -ErrorAction SilentlyContinue }
+        & $ise ts deviceindex:0 $PhoneGuid $pull | Out-Null
+        if (Test-Path $iseLog) { $ok = $true } elseif ($t -lt 5) { Start-Sleep -Seconds 3 }
+    }
+    if (-not $ok) { "PULL FAILED (http stale/dead and no $iseLog after 5 tries)"; exit 1 }
     Copy-Item -LiteralPath $iseLog -Destination $Out -Force
 }
 
@@ -76,9 +121,9 @@ if ($e) { "FIRST ending line = " + $e[0].LineNumber } else { "NO ending yet" }
 if ($Via -ne "http") {
     "ALIVE=n/a (pulled via ISETool - app not running, see CRASH MARKERS above)"
 } else {
-    $h1 = curl.exe -sS --max-time 6 "$Url/../health"
+    $h1 = curl.exe -sS --max-time 6 ($Base + "/health")
     Start-Sleep -Seconds 5
-    $h2 = curl.exe -sS --max-time 6 "$Url/../health"
+    $h2 = curl.exe -sS --max-time 6 ($Base + "/health")
     if (-not $h1) { "ALIVE=no (phone off or app gone)" } else {
         "A: $h1"
         "B: $h2"

@@ -157,10 +157,17 @@ impl Scene for LoadingScene {
 
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
         if let Some(future) = self.load_task.as_mut() {
+            // Bounded per frame. The old loop spun `yield_now` until the whole game scene
+            // finished, pinning ONE frame for the entire load - the log showed a 2979 ms
+            // `frame stall part=rust` on a load whose phases summed to 650 ms. The loading
+            // scene exists to cover exactly this window; its spinner animates between these
+            // slices instead of freezing with the frame. 50 ms keeps a warm load to a few
+            // frames without ever stalling one.
+            let t0 = std::time::Instant::now();
             loop {
                 match poll_future(future.as_mut()) {
                     None => {
-                        if self.target.is_none() {
+                        if self.target.is_none() || t0.elapsed().as_millis() >= 50 {
                             break;
                         }
                         std::thread::yield_now();

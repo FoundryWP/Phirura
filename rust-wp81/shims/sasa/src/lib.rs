@@ -187,6 +187,13 @@ fn decode_pcm(data: &[u8]) -> Result<(Vec<f32>, u32, u32)> {
         .map_err(|e| anyhow::anyhow!("codec: {e}"))?;
 
     let mut out: Vec<f32> = Vec::new();
+    // Reserve up front from the compressed size: without this the vector doubles its way
+    // up packet by packet, and the peak transient is ~1.5x the final size (old plus new
+    // during the last grows) - on a 228 s track that is the difference between a 40 MB
+    // spike laid on top of chart loading and none. 10x covers 128 kbps stereo with margin;
+    // unusual ratios simply grow past it the old way, and the per-packet reserve below stays
+    // as the top-up for those.
+    out.reserve(data.len() * 10);
     let mut sample_rate = 0u32;
     let mut channels = 0u32;
 
@@ -280,28 +287,41 @@ impl AudioClip {
         })
     }
 
+    /// As [`Self::new_named`], but keeps only the length - no symphonia decode, no PCM.
+    ///
+    /// The game track's samples are never read on this target: `sample` answers `None`,
+    /// `create_music` skips tag 0 in the mixer (`-2`, the shell plays its own decode), and
+    /// `Music` drives the shell's copy. All `Resource` needs is `length()` (count and rate),
+    /// which the shell's decode reports. A 228 s song is ~80 MB of f32 that used to be
+    /// allocated here, in the middle of chart loading, where the budget kills the process
+    /// with no marker - the same class of spike as the preview silence vector. The name is
+    /// still recorded: it is the only thing on the `music_new` boundary that identifies the
+    /// audio, and losing it plays the res pack's `ending` instead of the chart's own music.
+    pub fn new_named_len(name: &str, data: Vec<u8>) -> Result<Self> {
+        let (frame_count, sample_rate) = Self::decode_count(data)?;
+        Ok(Self::from_count_named(name, frame_count, sample_rate))
+    }
+
     /// Pointer and length of the recorded name, for the `sfx_new` callback.
     pub fn name_parts(&self) -> (*const u8, usize) {
         (self.name.as_ptr(), self.name_len as usize)
     }
 
-    /// `phira`'s song page needs the frames themselves, not a count: `load_local_tuple` takes
-    /// `frames.len()` as the track length and rejects the chart when the preview range runs past
-    /// it, and `with_effects` drains a range out of the vector before handing what is left to
-    /// `from_raw`.
+    /// `phira`'s song page needs the track length and the preview window's length, not
+    /// samples: `load_local_tuple` takes the count as the track length and rejects the chart
+    /// when the preview range runs past it, and the preview clip keeps only its window's
+    /// length (see `from_count_named`).
     ///
-    /// The decode itself happens in the shell, exactly like `new` - same buffer, decoded once, and
-    /// the shell keeps it for `create_music`, which asks for it by clip id. What is returned here
-    /// is that buffer's *length* materialised as frames, whose values nothing reads: this shim's
-    /// `from_raw` keeps only `frame_count` and drops the vector, `Music` plays the shell's copy,
-    /// and `AudioClip::sample` answers `None`, so no path ever observes a sample. Filling them
-    /// with silence therefore cannot change behaviour - the length is the whole payload.
-    ///
-    /// Decoding a second time in Rust (with `symphonia`, which `prpr` already pulls in) would
-    /// yield the same length and the same unread samples at the cost of a decoder in this shim.
-    /// Note the allocation: it is proportional to the track, and upstream's is too - it is freed
-    /// again by `from_raw` a few lines later.
-    pub fn decode(data: Vec<u8>) -> Result<(Vec<Frame>, u32)> {
+    /// The decode itself happens in the shell, exactly like `new` - same buffer, decoded
+    /// once - and only the count and the rate cross back. Upstream's `decode` materialises
+    /// the whole track as frames, and this shim used to do the same with silence: a 228 s
+    /// song is ten million frames, and eighty megabytes of zeros were allocated only for
+    /// `with_effects` to drain most of them away and `from_raw_named` to drop the rest.
+    /// That spike landed in the middle of chart loading, which is where the budget kills
+    /// the process with no marker. The values were never read by any path - the shell
+    /// keeps the audio for `create_music`, `Music` plays the shell's copy, and
+    /// `AudioClip::sample` answers `None` - so not allocating them cannot change behaviour.
+    pub fn decode_count(data: Vec<u8>) -> Result<(u64, u32)> {
         let mut info = shell::DecodedInfo {
             sample_rate: 0,
             frame_count: 0,
@@ -314,12 +334,30 @@ impl AudioClip {
                 data.len()
             ));
         }
-        Ok((vec![Frame(0.0, 0.0); info.frame_count as usize], info.sample_rate))
+        Ok((info.frame_count, info.sample_rate))
     }
 
     /// Build a clip from already-decoded frames. The frames are not retained - see the module note.
     pub fn from_raw(frames: Vec<Frame>, sample_rate: u32) -> Self {
         Self::from_raw_named("", frames, sample_rate)
+    }
+
+    /// Build a clip from a frame count alone, for callers that never had samples - see
+    /// [`Self::decode_count`]. Identical to [`Self::from_raw_named`] with a vector of that
+    /// length: the vector is dropped there anyway and only its length survives, so passing
+    /// the length directly allocates nothing.
+    pub fn from_count_named(name: &str, frame_count: u64, sample_rate: u32) -> Self {
+        let (buf, len) = copy_name(name);
+        AudioClip {
+            id: 0,
+            sample_rate,
+            frame_count,
+            name: buf,
+            name_len: len,
+            pcm: None,
+            pcm_channels: 0,
+            pcm_rate: 0,
+        }
     }
 
     /// As [`Self::from_raw`], but records which file these frames came from.
@@ -674,7 +712,10 @@ impl AudioManager {
     pub fn create_sfx(&mut self, clip: AudioClip, _buffer_size: Option<usize>) -> Result<Sfx> {
         let (name, name_len) = clip.name_parts();
         // The PCM goes to the shell's mixer before the handle comes back, so a `sfx_play` that
-        // lands in the same frame as `sfx_new` still finds the sound loaded.
+        // lands in the same frame as `sfx_new` still finds the sound loaded. The return is
+        // deliberately unchecked: a refused ingest (mixer down, OOM) must never fail the chart
+        // load - the shell falls back to a MediaElement for sounds the mixer never got, while a
+        // failed load shows the chart as broken. Do not turn this into a `?`.
         if let (Some(pcm), rate, channels) = (clip.pcm.as_ref(), clip.pcm_rate, clip.pcm_channels) {
             unsafe {
                 shell::wp81_audio_pcm(1, name, name_len, rate, channels,
@@ -688,6 +729,11 @@ impl AudioManager {
 
     pub fn create_music(&mut self, clip: AudioClip, settings: MusicParams) -> Result<Music> {
         let (name, name_len) = clip.name_parts();
+        // Same "never fail the load" rule as `create_sfx`, plus one more: tag 0 always reports
+        // rc=-2 ("not attempted") because music plays through the shell's own player, never the
+        // mixer - there is no voice that would read an ingested copy. Checking this return and
+        // bailing (e.g. `music ingest refused (rc=-2)`) breaks every chart load with a healthy
+        // engine. Do not check it.
         if let (Some(pcm), rate, channels) = (clip.pcm.as_ref(), clip.pcm_rate, clip.pcm_channels) {
             unsafe {
                 shell::wp81_audio_pcm(0, name, name_len, rate, channels,

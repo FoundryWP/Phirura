@@ -44,7 +44,7 @@ mod render;
 pub use render::{copy_fbo, internal_id, MSRenderTarget};
 
 mod resource;
-pub use resource::{NoteStyle, ParticleEmitter, ResPackInfo, Resource, ResourcePack, BUFFER_SIZE, DPI_VALUE};
+pub use resource::{CommonResource, NoteStyle, ParticleEmitter, ResPackInfo, Resource, ResourcePack, BUFFER_SIZE, DPI_VALUE};
 
 mod smooth;
 pub use smooth::Smooth;

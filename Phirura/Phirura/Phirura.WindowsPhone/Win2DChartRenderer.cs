@@ -152,6 +152,38 @@ namespace Phirura.Game
         /// reported its live element count here).</summary>
         public int LiveElements;
 
+        /// <summary>
+        /// Present watchdog: last tick that handed a frame over (<see cref="DrawPortFrame"/>)
+        /// versus last tick that actually drew one (<see cref="OnPortDraw"/>).
+        ///
+        /// The screen has frozen with the game alive behind it more than once - frames keep
+        /// arriving, nothing reaches the canvas, and only leaving the app and coming back
+        /// paints what was already there. A one-second timer compares the two; when a fresh
+        /// frame has sat undrawn for over 1.5 s it forces an <c>Invalidate</c> and says so.
+        /// That line in the log is also the whole diagnosis: it present means draws stopped
+        /// while frames continued (present path), its absence during a freeze means the
+        /// frames stopped too (engine side). Paused games never trip it - no new frame, no
+        /// staleness - and the force itself is one redraw, not a storm.
+        /// </summary>
+        private int _lastPortFrameTick;
+        private int _lastOnDrawTick;
+        private Windows.UI.Xaml.DispatcherTimer _presentWatch;
+        private bool _watchStarted;
+        private int _watchLogTick;
+
+        /// <summary>
+        /// True draw cost, which the fps line never saw: it times the store-and-invalidate
+        /// stub while the real work (texture uploads, carrier creation, command replay)
+        /// happens later inside <see cref="OnPortDraw"/>, on the same UI thread but outside
+        /// every measured region. A menu frame reading 120 ms of Rust with 0.9 fps has ~980
+        /// ms hiding exactly here. Accumulated per draw, reported and reset with the line
+        /// below; same thread on both ends, so no lock.
+        /// </summary>
+        private long _drawTicks;
+        private long _carrierTicks;
+        private int _carrierCount;
+        private int _drawMeterTick;
+
         public Win2DChartRenderer(CanvasControl canvas, double width, double height, float aspectRatio,
                                   ChartTexture click, ChartTexture drag, ChartTexture flick,
                                   ChartTexture hold, ChartTexture hitFx)
@@ -973,7 +1005,51 @@ namespace Phirura.Game
         public void DrawPortFrame(PrprPort.DrainFrame frame)
         {
             _portFrame = frame;
+            _lastPortFrameTick = Environment.TickCount;
+            StartPresentWatch();
             _canvas.Invalidate();
+        }
+
+        /// <summary>
+        /// Starts the present watchdog once, on the UI thread that owns the canvas (this is
+        /// only ever called from <see cref="DrawPortFrame"/>, which runs there).
+        /// </summary>
+        private void StartPresentWatch()
+        {
+            if (_watchStarted || _canvas == null)
+            {
+                return;
+            }
+            _watchStarted = true;
+            _lastOnDrawTick = Environment.TickCount;
+            Windows.UI.Xaml.DispatcherTimer timer = new Windows.UI.Xaml.DispatcherTimer();
+            timer.Interval = TimeSpan.FromSeconds(1);
+            timer.Tick += delegate(object sender, object e)
+            {
+                int now = Environment.TickCount;
+                // Frames arriving with no draws behind them. Unchecked: TickCount wraps, and
+                // a wrap turning stale into fresh for one interval beats the alternative.
+                if (_portFrame != null
+                    && unchecked(now - _lastOnDrawTick) > 1500
+                    && unchecked(_lastPortFrameTick - _lastOnDrawTick) > 1500)
+                {
+                    try
+                    {
+                        _canvas.Invalidate();
+                    }
+                    catch (Exception)
+                    {
+                    }
+                    if (unchecked(now - _watchLogTick) >= 10000)
+                    {
+                        _watchLogTick = now;
+                        AppLog.Write("Win2D: forced present, draws " +
+                            unchecked(now - _lastOnDrawTick) + "ms behind frames");
+                    }
+                }
+            };
+            _presentWatch = timer;
+            timer.Start();
         }
 
         /// <summary>
@@ -981,12 +1057,19 @@ namespace Phirura.Game
         /// </summary>
         private void OnPortDraw(CanvasDrawingSession ds)
         {
+            _lastOnDrawTick = Environment.TickCount;
+            long drawT0 = System.Diagnostics.Stopwatch.GetTimestamp();
             EnsurePortTextures(ds);
+            long tAfterPoll = System.Diagnostics.Stopwatch.GetTimestamp();
 
             PrprPort.DrainFrame frame = _portFrame;
             if (frame == null || frame.Count == 0)
             {
                 PortCommands = 0;
+                _drawTicks += System.Diagnostics.Stopwatch.GetTimestamp() - drawT0;
+                SlowDrawLog(drawT0, tAfterPoll, System.Diagnostics.Stopwatch.GetTimestamp(), 0,
+                    0, 0, 0, 0, 0, 0);
+                DrawMeter();
                 return;
             }
 
@@ -1012,6 +1095,7 @@ namespace Phirura.Game
             Matrix3x2 portTransform = ds.Transform;
             ds.Transform = Matrix3x2.CreateScale(pxToDip) * portTransform;
 
+            long kindTex = 0, kindRect = 0, kindLine = 0, kindCirc = 0, kindGeo = 0, kindClip = 0;
             for (int i = 0; i < frame.Count; i++)
             {
                 // Recorded before the dispatch, not after: a command that takes the process down
@@ -1022,10 +1106,15 @@ namespace Phirura.Game
                 // The kind's high bits carry the flip flags for textures, so mask before dispatching.
                 uint kind = c.kind & 0xFFFF;
 
+                // Per-kind cost accumulators for the slow-draw line below. Two timestamp reads
+                // per command - the only way to separate "clip layers are slow" from
+                // "geometries are slow" from "lines are slow", which are three different fixes.
+                long kt0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 switch (kind)
                 {
                     case 0: // Texture: dest x/y/w/h, then source x/y/w/h
                         DrawPortTexture(ds, c);
+                        kindTex += System.Diagnostics.Stopwatch.GetTimestamp() - kt0;
                         break;
 
                     case 1: // Rect: x/y/w/h then r/g/b/a
@@ -1033,6 +1122,7 @@ namespace Phirura.Game
                             ds.FillRectangle(
                                 c.f0, c.f1, c.f2, c.f3,
                                 FloatColor(c.f4, c.f5, c.f6, c.f7));
+                            kindRect += System.Diagnostics.Stopwatch.GetTimestamp() - kt0;
                             // A solid bar is the simplest shape this dispatcher can produce,
                             // so a reported-missing one cannot be at fault in its geometry or
                             // its texture - only in where it was drawn. Once a second, with
@@ -1053,20 +1143,24 @@ namespace Phirura.Game
                             c.f0, c.f1, c.f2, c.f3,
                             FloatColor(c.f5, c.f6, c.f7, AsFloat(c.vstart)),
                             c.f4);
+                        kindLine += System.Diagnostics.Stopwatch.GetTimestamp() - kt0;
                         break;
 
                     case 3: // Circle: cx/cy/r then r/g/b/a
                         ds.FillCircle(
                             c.f0, c.f1, c.f2,
                             FloatColor(c.f3, c.f4, c.f5, c.f6));
+                        kindCirc += System.Diagnostics.Stopwatch.GetTimestamp() - kt0;
                         break;
 
                     case 4: // Geometry: vertices carry position, uv and colour
                         DrawPortGeometry(ds, frame, c);
+                        kindGeo += System.Diagnostics.Stopwatch.GetTimestamp() - kt0;
                         break;
 
                     case 5: // Scissor: state rather than a draw - everything after it is clipped
                         ApplyPortClip(ds, c, pxToDip);
+                        kindClip += System.Diagnostics.Stopwatch.GetTimestamp() - kt0;
                         break;
                 }
             }
@@ -1095,6 +1189,65 @@ namespace Phirura.Game
             // no census behind them proves the opposite while naming the last command reached via
             // `i=`. Same single line per second, same cost - only later in the same method.
             PortFrameStats(frame, cmds);
+            _drawTicks += System.Diagnostics.Stopwatch.GetTimestamp() - drawT0;
+            SlowDrawLog(drawT0, tAfterPoll, System.Diagnostics.Stopwatch.GetTimestamp(), frame.Count,
+                kindTex, kindRect, kindLine, kindCirc, kindGeo, kindClip);
+            DrawMeter();
+        }
+
+        /// <summary>
+        /// Names the part when one draw takes longer than half a second: texture polling and
+        /// uploading (<c>poll</c>) or command replay (<c>replay</c>), with the command count
+        /// and the Gen2 collection count. Quiet otherwise - the per-second meter already
+        /// covers healthy draws. The Gen2 figure is the GC-alibi check: a 500 ms draw with a
+        /// climbing Gen2 is the collector, not the replay loop. The per-kind split says which
+        /// command family to batch: clip layers, geometries, lines, or textures.
+        /// </summary>
+        private void SlowDrawLog(long t0, long tPoll, long tEnd, int cmds,
+            long kindTex, long kindRect, long kindLine, long kindCirc, long kindGeo, long kindClip)
+        {
+            double perMs = 1000.0 / (double)System.Diagnostics.Stopwatch.Frequency;
+            double total = (tEnd - t0) * perMs;
+            if (total < 500.0)
+            {
+                return;
+            }
+            int gc2 = 0;
+            try { gc2 = System.GC.CollectionCount(2); }
+            catch (Exception) { }
+            AppLog.WriteSync("Win2D: slow draw total=" + total.ToString("0")
+                + "ms poll=" + ((tPoll - t0) * perMs).ToString("0")
+                + "ms replay=" + ((tEnd - tPoll) * perMs).ToString("0")
+                + "ms cmds=" + cmds + " gc2=" + gc2
+                + " ktex=" + (kindTex * perMs).ToString("0")
+                + " krect=" + (kindRect * perMs).ToString("0")
+                + " kline=" + (kindLine * perMs).ToString("0")
+                + " kcirc=" + (kindCirc * perMs).ToString("0")
+                + " kgeo=" + (kindGeo * perMs).ToString("0")
+                + " kclip=" + (kindClip * perMs).ToString("0"));
+        }
+
+        /// <summary>
+        /// The draw-cost line the fps line was missing: wall milliseconds spent inside
+        /// <see cref="OnPortDraw"/> (uploads, carrier creation, replay) plus how much of it
+        /// was carrier creation alone and how many carriers that built. Once a second, then
+        /// the accumulators reset. Queued, not sync: this is a meter, not a crash marker.
+        /// </summary>
+        private void DrawMeter()
+        {
+            int now = Environment.TickCount;
+            if (unchecked(now - _drawMeterTick) < 1000)
+            {
+                return;
+            }
+            _drawMeterTick = now;
+            double perMs = 1000.0 / (double)System.Diagnostics.Stopwatch.Frequency;
+            AppLog.Write("Win2D: draw ms=" + (_drawTicks * perMs).ToString("0.0")
+                + " carrierMs=" + (_carrierTicks * perMs).ToString("0.0")
+                + " carrierN=" + _carrierCount);
+            _drawTicks = 0;
+            _carrierTicks = 0;
+            _carrierCount = 0;
         }
 
         /// <summary>
@@ -1158,7 +1311,7 @@ namespace Phirura.Game
             {
                 _clipLogCount++;
                 _clipSig = sig;
-                AppLog.WriteSync("Win2D: clip " + sig);
+                AppLog.Write("Win2D: clip " + sig);
             }
 
             if (c.flags == 0)
@@ -1966,7 +2119,7 @@ namespace Phirura.Game
                 {
                     _tdLogBudget--;
                     _lastTdX = minX; _lastTdY = minY; _lastTdW = tdw; _lastTdH = tdh;
-                    AppLog.WriteSync("Win2D: texdraw id=" + texId
+                    AppLog.Write("Win2D: texdraw id=" + texId
                         + " dst=(" + minX.ToString("0.#") + "," + minY.ToString("0.#")
                         + "," + (maxX - minX).ToString("0.#") + "," + (maxY - minY).ToString("0.#") + ")"
                         + " src=(" + src.X.ToString("0.#") + "," + src.Y.ToString("0.#")
@@ -2029,7 +2182,7 @@ namespace Phirura.Game
                 _unLogBudget--;
                 _lastUnX = ux0; _lastUnY = uy0;
                 _lastUnW = ux1 - ux0; _lastUnH = uy1 - uy0;
-                AppLog.WriteSync("Win2D: untext dst=(" + ux0.ToString("0.#") + "," + uy0.ToString("0.#")
+                AppLog.Write("Win2D: untext dst=(" + ux0.ToString("0.#") + "," + uy0.ToString("0.#")
                     + "," + (ux1 - ux0).ToString("0.#") + "," + (uy1 - uy0).ToString("0.#")
                     + ") a=" + alpha.ToString("0.##")
                     + " rgb=" + a.r.ToString("0.##") + "," + a.g.ToString("0.##") + "," + a.b.ToString("0.##")
@@ -2048,9 +2201,12 @@ namespace Phirura.Game
                 // exact same surviving line. This one fires after it: a log ending on `untext dst=`
                 // means the fill never returned, one ending on `fill-ok` means it did and the fault
                 // is downstream. Emitted only when the census above was, so it costs no extra lines.
+                // Queued: this fires per fill when the gate is open, and a sync wait per
+                // fill is what turned menu draws into seconds. Crash-tail precision drops by
+                // the queue depth; the sync frame census still bounds the death to the frame.
                 if (uLogged)
                 {
-                    AppLog.WriteSync("Win2D: untext fill-ok i=" + _portCmdIdx);
+                    AppLog.Write("Win2D: untext fill-ok i=" + _portCmdIdx);
                 }
                 return;
             }
@@ -2092,7 +2248,7 @@ namespace Phirura.Game
             // death in the brush cache and a death after it are otherwise indistinguishable.
             if (uLogged)
             {
-                AppLog.WriteSync("Win2D: untext fill-ok (grad) i=" + _portCmdIdx);
+                AppLog.Write("Win2D: untext fill-ok (grad) i=" + _portCmdIdx);
             }
         }
 
@@ -2223,7 +2379,7 @@ namespace Phirura.Game
             }
             PortTexturesBound = _portTextures.Count;
             _sweepReleased += gone.Count;
-            AppLog.WriteSync("Win2D: released " + gone.Count + " port carriers (total "
+            AppLog.Write("Win2D: released " + gone.Count + " port carriers (total "
                 + _sweepReleased + ", live=" + total + ")");
         }
 
@@ -2240,6 +2396,32 @@ namespace Phirura.Game
 
         /// <summary>How many times the device has gone away this session.</summary>
         private int _deviceLost;
+
+        /// <summary>
+        /// Bytes of full-texture upload allowed per poll, and what is still left of it.
+        ///
+        /// Measured throughput on this phone is single-digit MB/s (a 1280x720 illustration
+        /// reads back at ~6 MB/s), so one unconstrained full upload is a multi-hundred-ms
+        /// hitch sitting inside a 16 ms frame - the menu-scroll and chart-load freezes. The
+        /// budget spreads a big texture over polls: covers land over one or two polls, an
+        /// illustration over a dozen, and no single poll ever pays for a whole one. Glyph
+        /// deltas are exempt (see PollPortTexture): they are small, and text that arrives a
+        /// poll late tears visibly while a cover that arrives a poll late does not. 96 KB is
+        /// ~10-35 ms at the measured rate: the menu frame is already Rust-bound past 100 ms,
+        /// so a bigger slice would only add rarer, taller hitches on top of it, while a
+        /// smaller one starves the queue faster than scrolling refills it. The `ms=` on every
+        /// upload line says whether it needs to move.
+        /// </summary>
+        private const long UploadBytesPerPoll = 98304;
+        private long _uploadBudgetLeft;
+        /// <summary>
+        /// Full uploads deferred for lack of budget, oldest first, with the row they resume
+        /// at. Drained twice per poll - half the fresh budget at the head (so the backlog
+        /// always moves, fonts included) and the remainder after the poll loop's new textures -
+        /// so a big texture can neither starve nor be starved by small ones arriving behind it.
+        /// </summary>
+        private readonly Queue<uint> _uploadQueue = new Queue<uint>();
+        private readonly Dictionary<uint, uint> _uploadResume = new Dictionary<uint, uint>();
 
         private void EnsurePortTextures(CanvasDrawingSession ds)
         {
@@ -2291,6 +2473,19 @@ namespace Phirura.Game
 
             try
             {
+                // Fresh budget every poll, split old/new half and half. New textures going
+                // first alone starved everything registered earlier for as long as the registry
+                // kept growing - which is the whole boot, so fonts and icons stayed blank until
+                // it ended (a black screen that looked hung rather than loading). Oldest-first
+                // alone would stall covers just scrolled into view behind an illustration's
+                // remainder. Half and half keeps both moving: the latest demand (a cover just
+                // scrolled into view, sprites for a chart about to start) and the backlog behind
+                // it, including font atlases the whole UI waits on.
+                _uploadBudgetLeft = UploadBytesPerPoll;
+                long queueShare = UploadBytesPerPoll / 2;
+                DrainUploadQueue(ds, ref queueShare);
+                _uploadBudgetLeft -= (UploadBytesPerPoll / 2 - queueShare);
+
                 int total = live;
                 if (total > 0)
                 {
@@ -2314,6 +2509,11 @@ namespace Phirura.Game
                             PollPortTexture(ds, id);
                         }
                     }
+
+                    // Deferred full uploads take whatever budget the new textures above left.
+                    // Same poll, same budget, opposite end: what is still queued afterwards
+                    // simply waits for the next poll, which resets the budget above.
+                    DrainUploadQueue(ds, ref _uploadBudgetLeft);
                 }
                 else if (sweep && _portTextures.Count > 0)
                 {
@@ -2411,6 +2611,108 @@ namespace Phirura.Game
         /// <summary>
         /// One id's contribution to this frame: nothing at all, a delta, or a first full read.
         /// </summary>
+        /// <summary>
+        /// Resumes full-texture uploads deferred for lack of budget, oldest first, against
+        /// the given allowance (not the field: the head-of-poll call passes half the fresh
+        /// budget so the backlog always moves, the tail call passes whatever the poll loop's
+        /// new textures left over).
+        ///
+        /// Bounded per call: at most the entries present on entry are attempted, so a texture
+        /// that never fits cannot spin this into an infinite loop.
+        /// </summary>
+        private void DrainUploadQueue(CanvasDrawingSession ds, ref long budgetLeft)
+        {
+            int entries = _uploadQueue.Count;
+            for (int k = 0; k < entries && budgetLeft > 0; k++)
+            {
+                uint id = _uploadQueue.Dequeue();
+                uint resume;
+                if (!_uploadResume.TryGetValue(id, out resume))
+                {
+                    continue;
+                }
+                PortTexture pt;
+                if (!_portTextures.TryGetValue(id, out pt) || pt == null || pt.Target == null)
+                {
+                    // Swept (or never built) since deferral: drop the resume, do not re-queue.
+                    _uploadResume.Remove(id);
+                    continue;
+                }
+                uint rw, rh;
+                if (!PrprPort.TextureSize(id, out rw, out rh) || rw != pt.PixelWidth || rh != pt.PixelHeight)
+                {
+                    // The registry's extent moved under the carrier (glyph-cache rebuild). The
+                    // poll loop below re-creates it through the budgeted full path, so dropping
+                    // here hands over rather than losing the upload.
+                    pt.Dispose();
+                    _portTextures.Remove(id);
+                    _uploadResume.Remove(id);
+                    continue;
+                }
+                uint w = pt.PixelWidth;
+                uint h = pt.PixelHeight;
+                if (resume >= h)
+                {
+                    _uploadResume.Remove(id);
+                    continue;
+                }
+                uint next;
+                SyncPortTexture(ds, id, pt, 0, resume, w, h - resume, null, ref budgetLeft, out next, true);
+                if (next < h)
+                {
+                    _uploadResume[id] = next;
+                    _uploadQueue.Enqueue(id);
+                }
+                else
+                {
+                    _uploadResume.Remove(id);
+                }
+            }
+        }
+
+        /// <summary>
+        /// A full upload through the per-poll budget: what fits goes now, the rest is queued
+        /// for the head of the next polls. Deltas never come here (see PollPortTexture) - a
+        /// full upload is the only shape big enough to hitch a frame.
+        /// </summary>
+        private void UploadFull(CanvasDrawingSession ds, uint id, PortTexture pt, uint w, uint h)
+        {
+            if (w == 0 || h == 0)
+            {
+                _uploadResume.Remove(id);
+                return;
+            }
+            if (_uploadBudgetLeft <= 0)
+            {
+                // No budget left this poll: queue the resume silently instead of running a
+                // zero-byte SyncPortTexture. That call uploads nothing (the band loop breaks
+                // before the first read) but still costs a drawing session and a blocking log
+                // line - and with animated giants churning, every poll ended with a tail of
+                // these, hundreds of log lines a second that starved the real uploads of the
+                // UI thread they both share. Queued here, drained at the next poll's head.
+                if (!_uploadResume.ContainsKey(id))
+                {
+                    _uploadQueue.Enqueue(id);
+                }
+                _uploadResume[id] = 0;
+                return;
+            }
+            uint next;
+            SyncPortTexture(ds, id, pt, 0, 0, w, h, null, ref _uploadBudgetLeft, out next, false);
+            if (next < h)
+            {
+                if (!_uploadResume.ContainsKey(id))
+                {
+                    _uploadQueue.Enqueue(id);
+                }
+                _uploadResume[id] = next;
+            }
+            else
+            {
+                _uploadResume.Remove(id);
+            }
+        }
+
         private void PollPortTexture(CanvasDrawingSession ds, uint id)
         {
             // Asked first, on every path, and for its side effect rather than its answer: an id the
@@ -2439,7 +2741,7 @@ namespace Phirura.Game
                 // agree by contract; where they do not - the flag was drained somewhere else first -
                 // only a full read leaves a carrier that is not half blank, and either way this runs
                 // once per texture.
-                SyncPortTexture(ds, id, pt, 0, 0, w, h, null);
+                UploadFull(ds, id, pt, w, h);
                 return;
             }
 
@@ -2470,12 +2772,16 @@ namespace Phirura.Game
                     return;
                 }
                 _portTextures[id] = pt;
-                SyncPortTexture(ds, id, pt, 0, 0, w, h, null);
+                UploadFull(ds, id, pt, w, h);
                 return;
             }
 
             // The incremental case: a rectangle that is usually a few hundred pixels of glyph.
-            SyncPortTexture(ds, id, pt, rect.X, rect.Y, rect.W, rect.H, null);
+            // Deltas bypass the budget (unbounded): they are small, and holding one back tears
+            // text while holding back a cover only delays it by a poll.
+            long unbounded = long.MaxValue;
+            uint done;
+            SyncPortTexture(ds, id, pt, rect.X, rect.Y, rect.W, rect.H, null, ref unbounded, out done, false);
         }
 
         /// <summary>
@@ -2496,7 +2802,10 @@ namespace Phirura.Game
 
             try
             {
+                long c0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 CanvasRenderTarget target = new CanvasRenderTarget(ds.Device, w, h, 96f);
+                _carrierTicks += System.Diagnostics.Stopwatch.GetTimestamp() - c0;
+                _carrierCount++;
                 if (target.SizeInPixels.Width != w || target.SizeInPixels.Height != h)
                 {
                     // Logged rather than assumed: there is no device to check this on while the code
@@ -2537,11 +2846,22 @@ namespace Phirura.Game
         /// play means Rust is unioning more than one frame's uploads; a `ms` that climbs means the
         /// band budget needs revisiting. Nothing else in the system can answer those questions.
         /// </summary>
+        /// <paramref name="budgetLeft"/> caps what this call may upload; <paramref name="nextRow"/>
+        /// comes back as the absolute row the next call must resume at (<c>y + h</c> when the
+        /// rectangle completed). <paramref name="resumed"/> marks a continuation: it only moves
+        /// the log labels, so a resumed chunk does not read as a new upload.
+        /// </summary>
         private void SyncPortTexture(CanvasDrawingSession ds, uint id, PortTexture pt,
-                                     uint x, uint y, uint w, uint h, byte[] preload)
+                                     uint x, uint y, uint w, uint h, byte[] preload,
+                                     ref long budgetLeft, out uint nextRow, bool resumed)
         {
+            nextRow = y;
             if (w == 0 || h == 0 || pt.Target == null)
             {
+                // Nothing to upload: report the rectangle complete rather than resume it
+                // forever. The zero-size guard in UploadFull keeps fresh registrations out;
+                // this covers the rebuild path racing a freed carrier the same way.
+                nextRow = y + h;
                 return;
             }
 
@@ -2574,6 +2894,28 @@ namespace Phirura.Game
                     while (row < h)
                     {
                         uint band = preload != null ? h : BandRows(w, h - row);
+                        if (preload == null)
+                        {
+                            // Cap the band by what the budget still holds. A band bigger
+                            // than the whole budget (a 1024-wide atlas band is 1 MB against
+                            // a 256 KB budget) is cut down instead of skipped: skipping it
+                            // defers at row 0 on every poll and the texture stays blank
+                            // forever, which is exactly how covers and glyphs went missing.
+                            // Deferring with an empty budget is safe - the budget refreshes
+                            // every poll and the queue is first-in first-out, so a texture
+                            // that finds nothing left this poll is head of the line on the
+                            // next one. Bands are written whole, so rows already painted
+                            // stay valid and the continuation neither tears nor repeats.
+                            long fit = budgetLeft / ((long)w * 4L);
+                            if (fit < 1)
+                            {
+                                break;
+                            }
+                            if ((long)band > fit)
+                            {
+                                band = (uint)fit;
+                            }
+                        }
                         byte[] rgba = preload;
                         if (rgba == null)
                         {
@@ -2588,20 +2930,23 @@ namespace Phirura.Game
                                 // Already logged by the reader. Returning rather than carrying on
                                 // leaves the rest of the rectangle stale but intact, which reads as
                                 // old glyphs instead of half a word.
+                                nextRow = y + row;
                                 return;
                             }
                         }
                         bytes += rgba.Length;
-                        if (firstBand)
+                        budgetLeft -= rgba.Length;
+                        if (firstBand && !resumed)
                         {
                             firstBand = false;
-                            AppLog.WriteSync("Win2D: port texture " + id + " band0 "
+                            AppLog.Write("Win2D: port texture " + id + " band0 "
                                 + w + "x" + band + " @" + x + "," + y
                         + " " + BandSummary(rgba));
                         }
                         PaintPortBand(ds.Device, target, x, y + row, w, band, rgba);
                         row += band;
                     }
+                    nextRow = y + row;
                 }
             }
             catch (Exception ex)
@@ -2633,11 +2978,18 @@ namespace Phirura.Game
             finally
             {
                 clock.Stop();
-                AppLog.WriteSync("Win2D: port texture " + id
-                    + (full ? " init" : " delta")
-                    + " rect=(" + x + "," + y + "," + w + "," + h + ")"
-                    + " bytes=" + bytes
-                    + " ms=" + clock.ElapsedMilliseconds);
+                // Zero-progress resumes poll every frame while a big texture waits for budget;
+                // each costs a blocking file chain for no signal, and they were the bulk of the
+                // log during play. Completions, real chunks, inits, deltas, errors and the band0
+                // probe above all keep their lines - only "nothing moved" goes quiet.
+                if (bytes != 0 || !resumed)
+                {
+                    AppLog.Write("Win2D: port texture " + id
+                        + (full ? " init" : (resumed ? "resume" : "delta"))
+                        + " rect=(" + x + "," + y + "," + w + "," + h + ")"
+                        + " bytes=" + bytes
+                        + " ms=" + clock.ElapsedMilliseconds);
+                }
             }
         }
 
@@ -2804,7 +3156,9 @@ namespace Phirura.Game
                     continue;
                 }
                 _portTextures[t.Id] = pt;
-                SyncPortTexture(ds, t.Id, pt, 0, 0, t.Width, t.Height, t.Rgba);
+                long onceUnbounded = long.MaxValue;
+                uint onceDone;
+                SyncPortTexture(ds, t.Id, pt, 0, 0, t.Width, t.Height, t.Rgba, ref onceUnbounded, out onceDone, false);
             }
             PortTexturesBound = _portTextures.Count;
         }

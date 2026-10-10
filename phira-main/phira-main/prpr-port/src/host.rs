@@ -530,6 +530,7 @@ pub fn boot_phira(data_dir: Option<String>, auto_open: Option<String>, auto_play
     // are the only thing that distinguishes "died before phira ran", "died inside phira's
     // construction" and "phira booted and the shell never got the return value".
     phira::set_log_sink(crate::log_line);
+    prpr::ext::set_phase_sink(crate::log_line);
     crate::log_line("phira: pump start (the_main not yet polled)");
 
     let res = std::panic::catch_unwind(|| {

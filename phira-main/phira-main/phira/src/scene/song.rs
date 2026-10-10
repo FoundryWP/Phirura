@@ -35,7 +35,7 @@ use once_cell::sync::Lazy;
 use phira_mp_common::{ClientCommand, CompactPos, JudgeEvent, TouchFrame};
 use prpr::{
     config::Mods,
-    core::{Tweenable, BOLD_FONT},
+    core::{CommonResource, Resource, Tweenable, BOLD_FONT},
     ext::{
         open_url, poll_future, rect_shadow, semi_black, semi_white, unzip_into, JoinToString, LocalTask, RectExt, SafeTexture, ScaleType,
         BLACK_TEXTURE,
@@ -54,7 +54,7 @@ use prpr::{
 use regex::Regex;
 use reqwest::Method;
 use sanitize_filename::sanitize;
-use sasa::{AudioClip, Frame, Music, MusicParams};
+use sasa::{AudioClip, Music, MusicParams};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -171,25 +171,64 @@ fn create_music(clip: AudioClip) -> Result<Music> {
 /// `name` rides out on the clip so the shell can find the file these frames were cut from - see
 /// `AudioClip::from_raw_named`. It is `preview|<from>|<to>|<local_path>/<file>` for a chart's own
 /// soundtrack, and `preview|0|0|` for a server preview the shell has no file to open.
-fn with_effects(name: &str, (mut frames, sample_rate): (Vec<Frame>, u32), range: Option<(f32, f32)>) -> Result<AudioClip> {
-    if let Some((begin, end)) = range {
-        frames.drain(((end * sample_rate as f32) as usize).min(frames.len())..);
-        frames.drain(..((begin * sample_rate as f32) as usize));
+///
+/// Count arithmetic, not a drained vector: the frames used to arrive as silence (see
+/// `AudioClip::decode_count`) only for the drains below to throw most of them away and
+/// `from_raw_named` to drop the rest, so the window length is computed directly. The two
+/// `min` calls replicate the drains' clamping exactly - including the case where the range
+/// runs past the track, which the caller rejects before this is reached.
+fn with_effects(name: &str, (total, sample_rate): (u64, u32), range: Option<(f32, f32)>) -> Result<AudioClip> {
+    let kept = if let Some((begin, end)) = range {
+        let end_f = ((end * sample_rate as f32) as u64).min(total);
+        let begin_f = ((begin * sample_rate as f32) as u64).min(end_f);
+        end_f - begin_f
+    } else {
+        total
+    };
+    Ok(AudioClip::from_count_named(name, kept, sample_rate))
+}
+
+/// The res-pack path the launch task derives from the selected pack.
+///
+/// One function so the launch task and the song page's common-resource preload key the
+/// same slot: a path spelled two ways is a preload that never hits and a load that never
+/// ends. Same semantics as the inline block it replaces (pack 0 = built-in = `None`).
+fn res_pack_path() -> Option<String> {
+    let id = get_data().respack_id;
+    if id == 0 {
+        None
+    } else {
+        let dir = dir::respacks().ok()?;
+        let name = get_data().respacks.get(id - 1)?;
+        Some(format!("{dir}/{name}"))
     }
-    let len = (0.8 * sample_rate as f64) as usize;
-    let len = len.min(frames.len() / 2);
-    for (i, frame) in frames[..len].iter_mut().enumerate() {
-        let s = i as f32 / len as f32;
-        frame.0 *= s;
-        frame.1 *= s;
+}
+
+impl SongScene {
+    /// Start the chart-independent resource preload unless the slot already holds this pack.
+    fn kick_preload() -> Option<(Option<String>, Task<Result<Arc<CommonResource>>>)> {
+        let path = res_pack_path();
+        if Resource::take_common(&path).is_some() {
+            return None;
+        }
+        let p = path.clone();
+        Some((path, Task::new(async move { Resource::load_common(p).await })))
     }
-    let st = frames.len() - len;
-    for (i, frame) in frames[st..].iter_mut().rev().enumerate() {
-        let s = i as f32 / len as f32;
-        frame.0 *= s;
-        frame.1 *= s;
+
+    /// Drive the preload one step; publish it under its pack path when it lands. A failure
+    /// only drops the task - pressing play loads inline, exactly as before the preload
+    /// existed - and the line says so instead of failing the page.
+    fn poll_preload(&mut self) {
+        if let Some((_, task)) = &mut self.preload_common {
+            if let Some(res) = task.take() {
+                let (path, _) = self.preload_common.take().unwrap();
+                match res {
+                    Ok(common) => Resource::store_common(path, common),
+                    Err(err) => crate::log_line(&format!("SongScene: common preload failed: {err:#}")),
+                }
+            }
+        }
     }
-    Ok(AudioClip::from_raw_named(name, frames, sample_rate))
 }
 
 async fn load_local_tuple(local_path: &str, def_illu: SafeTexture, info: ChartInfo) -> Result<LocalTuple> {
@@ -203,14 +242,14 @@ async fn load_local_tuple(local_path: &str, def_illu: SafeTexture, info: ChartIn
     let dir = prpr::dir::Dir::new(format!("{}/{local_path}", dir::charts()?))?;
     let bytes = dir.read(&info.music)?;
     crate::log_line(&format!("SongScene: music read {} bytes", bytes.len()));
-    let (frames, sample_rate) = AudioClip::decode(bytes).map_err(|err| {
+    let (total, sample_rate) = AudioClip::decode_count(bytes).map_err(|err| {
         crate::log_line(&format!("SongScene: AudioClip::decode FAILED: {err}"));
         err
     })?;
-    let length = frames.len() as f32 / sample_rate as f32;
+    let length = total as f32 / sample_rate as f32;
     crate::log_line(&format!(
         "SongScene: decoded {} frames @ {} Hz = {:.3}s preview=({:.1},{:.1})",
-        frames.len(),
+        total,
         sample_rate,
         length,
         info.preview_start,
@@ -224,7 +263,7 @@ async fn load_local_tuple(local_path: &str, def_illu: SafeTexture, info: ChartIn
     // boot - and the second to put that file where these frames start.
     let preview_range = (info.preview_start, info.preview_end.unwrap_or(info.preview_start + 15.));
     let preview_name = format!("preview|{:.1}|{:.1}|{local_path}/{}", preview_range.0, preview_range.1, info.music);
-    let preview = with_effects(&preview_name, (frames, sample_rate), Some(preview_range))?;
+    let preview = with_effects(&preview_name, (total, sample_rate), Some(preview_range))?;
     let illu = local_illustration(local_path.to_owned(), def_illu, true);
     illu.notify.notify_one();
 
@@ -339,6 +378,11 @@ pub struct SongScene {
 
     preview: Option<Music>,
     preview_task: Option<Task<Result<AudioClip>>>,
+    /// Chart-independent resources (res pack, icons, buttons) loading while the page idles.
+    /// Carries its pack path so completion publishes under the key the game scene reads;
+    /// `None` when the slot already held this pack. Driven in `update`, never awaited -
+    /// pressing play mid-preload just loads inline, the next chart reuses the finished slot.
+    preload_common: Option<(Option<String>, Task<Result<Arc<CommonResource>>>)>,
 
     load_task: Option<Task<Result<Option<Arc<Chart>>>>>,
     entity: Option<Chart>,
@@ -346,6 +390,10 @@ pub struct SongScene {
     local_path: Option<String>,
 
     downloading: Option<Downloading>,
+    /// Set when the download button is tapped while the chart detail (`entity`) is still
+    /// loading: instead of erroring with "still-loading", the download starts itself the
+    /// moment `load_task` delivers the entity below. Cleared on start and on leaving.
+    download_queued: bool,
     loading_last: f32,
 
     rank_icons: [SafeTexture; 8],
@@ -497,25 +545,42 @@ impl SongScene {
             next_scene: None,
 
             preview: None,
+            preload_common: Self::kick_preload(),
             preview_task: Some(Task::new({
                 let local_path = local_path.clone();
                 async move {
-                    if let Some(path) = local_path {
-                        let mut fs = fs_from_path(&path)?;
-                        let info = fs::load_info(fs.as_mut()).await?;
-                        let range = (info.preview_start, info.preview_end.unwrap_or(info.preview_start + 15.));
-                        let name = format!("preview|{:.1}|{:.1}|{path}/{}", range.0, range.1, info.music);
-                        with_effects(&name, AudioClip::decode(fs.load_file(&info.music).await?)?, Some(range))
-                    } else {
+                    // Server preview shared by both branches: the bytes are here but the shell
+                    // has no file to open, and the empty path after the third bar is what tells
+                    // it to stay silent rather than reach for whichever chart it resolved before
+                    // boot. A closure (not a nested fn) because the id it needs is owned by the
+                    // enclosing future.
+                    let server_preview = || async {
                         // Same as the download path: an idless chart cannot be fetched, and the
                         // `unwrap` that used to be here was a panic on a page that otherwise
                         // rendered fine.
                         let chart_id = id.ok_or_else(|| anyhow::anyhow!("chart has no id; cannot fetch its preview"))?;
                         let chart = Ptr::<Chart>::new(chart_id).fetch().await?;
-                        // Server preview: the bytes are here but the shell has no file to open, and
-                        // the empty path after the third bar is what tells it to stay silent rather
-                        // than reach for whichever chart it resolved before boot.
-                        with_effects("preview|0|0|", AudioClip::decode(chart.preview.fetch().await?.to_vec())?, None)
+                        with_effects("preview|0|0|", AudioClip::decode_count(chart.preview.fetch().await?.to_vec())?, None)
+                    };
+                    if let Some(path) = local_path {
+                        // A listed chart whose files are gone (deleted out from under it, or a
+                        // store that never finished seeding) used to fail the whole page here
+                        // with "entry not found". Fall back to the server preview when the chart
+                        // has an id; only error when there is nowhere to fetch from at all.
+                        let local: Result<AudioClip> = async {
+                            let mut fs = fs_from_path(&path)?;
+                            let info = fs::load_info(fs.as_mut()).await?;
+                            let range = (info.preview_start, info.preview_end.unwrap_or(info.preview_start + 15.));
+                            let name = format!("preview|{:.1}|{:.1}|{path}/{}", range.0, range.1, info.music);
+                            with_effects(&name, AudioClip::decode_count(fs.load_file(&info.music).await?)?, Some(range))
+                        }
+                        .await;
+                        match local {
+                            Ok(clip) => Ok(clip),
+                            Err(_) => server_preview().await,
+                        }
+                    } else {
+                        server_preview().await
                     }
                 }
             })),
@@ -530,6 +595,7 @@ impl SongScene {
             local_path,
 
             downloading: None,
+            download_queued: false,
             loading_last: 0.,
 
             rank_icons,
@@ -642,9 +708,12 @@ impl SongScene {
     fn start_download(&mut self) -> Result<()> {
         let chart = self.info.clone();
         let Some(entity) = self.entity.clone() else {
-            show_message(tl!("still-loading")).error();
+            // No error: the detail is still on its way; queue it and go when it lands.
+            self.download_queued = true;
+            self.loading_last = 0.;
             return Ok(());
         };
+        self.download_queued = false;
         self.loading_last = 0.;
         self.downloading = Some(Self::global_start_download(chart, entity, self.local_path.clone())?);
         Ok(())
@@ -1059,14 +1128,7 @@ impl SongScene {
                 .as_ref()
                 .map(|it| it.name.clone())
                 .unwrap_or_else(|| tl!("guest").into_owned());
-            config.res_pack_path = {
-                let id = get_data().respack_id;
-                if id == 0 {
-                    None
-                } else {
-                    Some(format!("{}/{}", dir::respacks()?, get_data().respacks[id - 1]))
-                }
-            };
+            config.res_pack_path = res_pack_path();
             let chart_updated = info.chart_updated;
             config.mods = mods;
             let preload = LoadingScene::load(fs.as_mut(), &info.illustration).await?;
@@ -1960,6 +2022,7 @@ impl Scene for SongScene {
             self.need_show_fav_menu = true;
         }
         self.illu.settle(t);
+        self.poll_preload();
         let rt = tm.real_time() as f32;
         self.tags.update(rt);
         self.rate_dialog.update(rt);
@@ -2072,6 +2135,13 @@ impl Scene for SongScene {
                     }
                 }
                 self.load_task = None;
+                // A download tapped while the detail was still loading starts now instead
+                // of having errored then (see `start_download`). Runs once: this block only
+                // executes while the task exists.
+                if self.download_queued && self.entity.is_some() && self.downloading.is_none() {
+                    self.download_queued = false;
+                    self.start_download()?;
+                }
             }
         }
         if let Some(task) = &mut self.preview_task {

@@ -331,13 +331,20 @@ async fn the_main() -> Result<()> {
     init_assets();
     log_line("the_main: assets registered");
 
+    // Two workers, not four: this phone has two cores, and every worker past the second
+    // is taken straight out of the UI thread's share. Four workers pegging both cores is
+    // what an 8 s chart parse looks like from the outside (no frames, no touches, a dead
+    // screen that reads as a hang), and it is what makes a 147 ms menu frame out of work
+    // that should cost a fraction of it - the scene thread fighting four busy workers for
+    // two cores. Background jobs take longer wall-clock this way (decodes and parses queue
+    // instead of running side by side); that is the trade, and responsiveness wins it.
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
+        .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
     let _guard = rt.enter();
-    log_line("the_main: tokio runtime up (4 workers)");
+    log_line("the_main: tokio runtime up (2 workers)");
 
     #[cfg(target_os = "ios")]
     {
