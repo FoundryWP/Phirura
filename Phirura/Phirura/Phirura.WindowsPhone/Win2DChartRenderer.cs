@@ -1061,13 +1061,15 @@ namespace Phirura.Game
             long drawT0 = System.Diagnostics.Stopwatch.GetTimestamp();
             EnsurePortTextures(ds);
             long tAfterPoll = System.Diagnostics.Stopwatch.GetTimestamp();
+            ReportUploadBacklog();
 
             PrprPort.DrainFrame frame = _portFrame;
             if (frame == null || frame.Count == 0)
             {
                 PortCommands = 0;
                 _drawTicks += System.Diagnostics.Stopwatch.GetTimestamp() - drawT0;
-                SlowDrawLog(drawT0, tAfterPoll, System.Diagnostics.Stopwatch.GetTimestamp(), 0,
+                SlowDrawLog(drawT0, tAfterPoll, System.Diagnostics.Stopwatch.GetTimestamp(),
+                    System.Diagnostics.Stopwatch.GetTimestamp(), 0,
                     0, 0, 0, 0, 0, 0);
                 DrawMeter();
                 return;
@@ -1176,6 +1178,7 @@ namespace Phirura.Game
             }
 
             ds.Transform = portTransform;
+            long tAfterLoop = System.Diagnostics.Stopwatch.GetTimestamp();
 
             // Geometry census, throttled to ~1 Hz - see the method below.
             //
@@ -1189,21 +1192,23 @@ namespace Phirura.Game
             // no census behind them proves the opposite while naming the last command reached via
             // `i=`. Same single line per second, same cost - only later in the same method.
             PortFrameStats(frame, cmds);
-            _drawTicks += System.Diagnostics.Stopwatch.GetTimestamp() - drawT0;
-            SlowDrawLog(drawT0, tAfterPoll, System.Diagnostics.Stopwatch.GetTimestamp(), frame.Count,
+            long tEnd = System.Diagnostics.Stopwatch.GetTimestamp();
+            _drawTicks += tEnd - drawT0;
+            SlowDrawLog(drawT0, tAfterPoll, tAfterLoop, tEnd, frame.Count,
                 kindTex, kindRect, kindLine, kindCirc, kindGeo, kindClip);
             DrawMeter();
         }
 
         /// <summary>
         /// Names the part when one draw takes longer than half a second: texture polling and
-        /// uploading (<c>poll</c>) or command replay (<c>replay</c>), with the command count
-        /// and the Gen2 collection count. Quiet otherwise - the per-second meter already
-        /// covers healthy draws. The Gen2 figure is the GC-alibi check: a 500 ms draw with a
-        /// climbing Gen2 is the collector, not the replay loop. The per-kind split says which
-        /// command family to batch: clip layers, geometries, lines, or textures.
+        /// uploading (<c>poll</c>), command replay (<c>loop</c>), or the tail after it
+        /// (<c>tail</c>: clip-layer dispose, the frame census, the meter). The per-kind split
+        /// says which command family to batch: clip layers, geometries, lines, or textures.
+        /// Quiet otherwise - the per-second meter already covers healthy draws. The Gen2
+        /// figure is the GC-alibi check: a 500 ms draw with a climbing Gen2 is the collector,
+        /// not the replay loop.
         /// </summary>
-        private void SlowDrawLog(long t0, long tPoll, long tEnd, int cmds,
+        private void SlowDrawLog(long t0, long tPoll, long tLoop, long tEnd, int cmds,
             long kindTex, long kindRect, long kindLine, long kindCirc, long kindGeo, long kindClip)
         {
             double perMs = 1000.0 / (double)System.Diagnostics.Stopwatch.Frequency;
@@ -1217,7 +1222,8 @@ namespace Phirura.Game
             catch (Exception) { }
             AppLog.WriteSync("Win2D: slow draw total=" + total.ToString("0")
                 + "ms poll=" + ((tPoll - t0) * perMs).ToString("0")
-                + "ms replay=" + ((tEnd - tPoll) * perMs).ToString("0")
+                + "ms loop=" + ((tLoop - tPoll) * perMs).ToString("0")
+                + "ms tail=" + ((tEnd - tLoop) * perMs).ToString("0")
                 + "ms cmds=" + cmds + " gc2=" + gc2
                 + " ktex=" + (kindTex * perMs).ToString("0")
                 + " krect=" + (kindRect * perMs).ToString("0")
@@ -1344,6 +1350,9 @@ namespace Phirura.Game
         /// <summary>Rate gate for <see cref="PortFrameStats"/>.</summary>
         private int _portStatsTick = int.MinValue / 2;
 
+        /// <summary>Last composition signature logged by <see cref="PortFrameStats"/>.</summary>
+        private string _lastStatsSig = "";
+
         /// <summary>
         /// One line per second describing what the frame actually contained.
         ///
@@ -1363,8 +1372,11 @@ namespace Phirura.Game
         /// calculation: the projection is in pixels, the canvas is in DIPs, and a mismatch between
         /// them is invisible until the numbers are side by side.
         ///
-        /// Walked once a second rather than per frame: a busy chart has a few hundred commands and
-        /// this reads all of them, which is real work to do sixty times over.
+        /// Walked at most once a second rather than per frame: a busy chart has a few hundred
+        /// commands and this reads all of them, which is real work to do sixty times over.
+        /// Change-gated on top: only a new composition logs, so a static scene costs the walk
+        /// and nothing else - the string, the broker calls and the file write all ride on
+        /// change, which is what keeps this off the hitch list.
         /// </summary>
         private void PortFrameStats(PrprPort.DrainFrame frame, PrprPort.PortCmd[] cmds)
         {
@@ -1609,7 +1621,21 @@ namespace Phirura.Game
                 ? (dipW / PrprPort.ScreenPixelWidth).ToString("0.###")
                 : "?";
 
-            AppLog.WriteSync("Win2D: port frame n=" + frame.Count
+            // Change-gated: a static scene repeats the identical frame for minutes, and the
+            // walk above plus the three broker calls plus the 500 ms-bounded `WriteSync` below
+            // cost ~500 ms on this phone - every second, on the UI thread, which is exactly
+            // the periodic hitch in the report. Unchanged composition logs nothing; a new
+            // composition still gets the full line. Crash-tail duty moved to the slow-draw
+            // and stall lines, which fire on the event rather than on the clock.
+            string sig = frame.Count + "/" + nTex + "/" + nRect + "/" + nLine + "/" + nCircle
+                + "/" + nGeo + "/" + nClipOn + "/" + nClipOff + "/" + lastKind;
+            if (sig == _lastStatsSig)
+            {
+                return;
+            }
+            _lastStatsSig = sig;
+
+            AppLog.Write("Win2D: port frame n=" + frame.Count
                 + " tex=" + nTex + " rect=" + nRect + " line=" + nLine
                 + " circ=" + nCircle + " geo=" + nGeo
                 + " clipOn=" + nClipOn + " clipOff=" + nClipOff
@@ -2111,7 +2137,7 @@ namespace Phirura.Game
                 if (unchecked(tNow - _tdLogTick) >= 1000)
                 {
                     _tdLogTick = tNow;
-                    _tdLogBudget = 40;
+                    _tdLogBudget = 8;
                     _lastTdX = float.MinValue;
                     tFresh = true;
                 }
@@ -2162,7 +2188,7 @@ namespace Phirura.Game
             if (unchecked(uNow - _unLogTick) >= 1000)
             {
                 _unLogTick = uNow;
-                _unLogBudget = 40;
+                _unLogBudget = 8;
                 _lastUnX = float.MinValue;
                 uFresh = true;
             }
@@ -2606,6 +2632,44 @@ namespace Phirura.Game
                 }
             }
             return false;
+        }
+
+        /// <summary>
+        /// Whether the backlog-push export exists on this DLL. Latched off on the first
+        /// missing-export throw: without it every draw would pay an exception for a call
+        /// whose absence only means the loading gate falls back to its timeout.
+        /// </summary>
+        private bool _uploadPushSupported = true;
+
+        /// <summary>
+        /// Tells the engine how many textures still need their first upload: queued
+        /// resumes plus registered ids with no carrier yet. The loading scene waits on
+        /// this before transitioning, so notes never pop in mid-song. Best-effort: any
+        /// failure only delays the gate to its timeout, never the draw.
+        /// </summary>
+        private void ReportUploadBacklog()
+        {
+            if (!_uploadPushSupported)
+            {
+                return;
+            }
+            try
+            {
+                uint pending = (uint)_uploadQueue.Count + (uint)_uploadResume.Count;
+                int missing = (int)PrprPort.TextureCount() - _portTextures.Count;
+                if (missing > 0)
+                {
+                    pending += (uint)missing;
+                }
+                PrprPort.ReportUploadPending(pending);
+            }
+            catch (Exception ex)
+            {
+                if (MissingExport(ex))
+                {
+                    _uploadPushSupported = false;
+                }
+            }
         }
 
         /// <summary>

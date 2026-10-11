@@ -133,6 +133,7 @@ namespace Phirura
             {
                 return;
             }
+            Task waitFor;
             lock (Gate)
             {
                 Task previous = _tail;
@@ -153,21 +154,29 @@ namespace Phirura
                     return;
                 }
                 EnsureDrainLocked();
-                try
-                {
-                    // Bounded: logging must never be the reason the app hangs either.
-                    //
-                    // 500 ms, not the 3 s it used to be. The append still completes - it is queued -
-                    // and the wait exists only so the last few lines survive a crash. Three seconds
-                    // was long enough to matter: this runs on the UI thread once a second (the frame
-                    // stats line), so a queue backed up by a burst of touch lines blocked the render
-                    // loop for seconds at a time, which is exactly the "picture froze but the game
-                    // is still running" that showed up on touch.
-                    _tail.Wait(500);
-                }
-                catch (Exception)
-                {
-                }
+                waitFor = _tail;
+            }
+            try
+            {
+                // Outside `Gate` on purpose. The wait used to sit inside the lock, so one slow
+                // drain held every logging thread - including the replay loop's own probe lines
+                // - for the whole 500 ms: a 72-command frame with ~30 ms of real drawing
+                // reported 500+ ms because its log lines queued behind the fps line's wait.
+                // The wait itself stays (crash survival needs the bytes on disk), but nothing
+                // else can be starved by it anymore.
+                //
+                // Bounded: logging must never be the reason the app hangs either.
+                //
+                // 500 ms, not the 3 s it used to be. The append still completes - it is queued -
+                // and the wait exists only so the last few lines survive a crash. Three seconds
+                // was long enough to matter: this runs on the UI thread once a second (the frame
+                // stats line), so a queue backed up by a burst of touch lines blocked the render
+                // loop for seconds at a time, which is exactly the "picture froze but the game
+                // is still running" that showed up on touch.
+                waitFor.Wait(500);
+            }
+            catch (Exception)
+            {
             }
         }
 

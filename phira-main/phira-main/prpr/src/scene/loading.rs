@@ -21,6 +21,12 @@ use tracing::warn;
 const BEFORE_TIME: f32 = 1.;
 const FADE_IN_TIME: f32 = 0.6;
 
+/// How long the loading scene waits for the shell's upload backlog to drain before
+/// giving up and transitioning anyway. The backlog is finite while the game scene is
+/// not running (nothing re-dirties), so hitting this means pathology, not patience -
+/// and trapping the player on the loading screen would be worse than a late sprite.
+const UPLOAD_GATE_TIMEOUT: f32 = 12.;
+
 pub type UploadFn = Arc<dyn Fn(Vec<u8>) -> Task<Result<RecordUpdateState>>>;
 pub type UpdateFn = Box<dyn FnMut(f64, &mut Resource, &mut Judge)>;
 pub type SaveFn = Box<dyn Fn(SimpleRecord) -> Result<()>>;
@@ -54,6 +60,14 @@ pub struct LoadingScene {
     illustration: SafeTexture,
     pub load_task: LocalTask<Result<GameScene>>,
     next_scene: Option<NextScene>,
+    /// The finished game scene, held while the shell's upload backlog drains. `None` until
+    /// the load task completes; the transition (`next_scene` + `finish_time`) only arms
+    /// once every registered texture has been read at least once, so notes never pop in
+    /// mid-song. Errors bypass the gate through `next_scene` directly - a failed load
+    /// must surface, not wait out a backlog for a scene that will never run.
+    ready: Option<NextScene>,
+    /// `tm.now()` when `ready` was stored. `f32::INFINITY` until then.
+    ready_time: f32,
     finish_time: f32,
     target: Option<RenderTarget>,
     charter: String,
@@ -128,6 +142,8 @@ impl LoadingScene {
             illustration,
             load_task: Some(future),
             next_scene: None,
+            ready: None,
+            ready_time: f32::INFINITY,
             finish_time: f32::INFINITY,
             target: None,
             charter,
@@ -156,30 +172,49 @@ impl Scene for LoadingScene {
     }
 
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
-        if let Some(future) = self.load_task.as_mut() {
-            // Bounded per frame. The old loop spun `yield_now` until the whole game scene
-            // finished, pinning ONE frame for the entire load - the log showed a 2979 ms
-            // `frame stall part=rust` on a load whose phases summed to 650 ms. The loading
-            // scene exists to cover exactly this window; its spinner animates between these
-            // slices instead of freezing with the frame. 50 ms keeps a warm load to a few
-            // frames without ever stalling one.
-            let t0 = std::time::Instant::now();
-            loop {
-                match poll_future(future.as_mut()) {
-                    None => {
-                        if self.target.is_none() || t0.elapsed().as_millis() >= 50 {
+        if self.ready.is_none() {
+            if let Some(future) = self.load_task.as_mut() {
+                // Bounded per frame. The old loop spun `yield_now` until the whole game scene
+                // finished, pinning ONE frame for the entire load - the log showed a 2979 ms
+                // `frame stall part=rust` on a load whose phases summed to 650 ms. The loading
+                // scene exists to cover exactly this window; its spinner animates between these
+                // slices instead of freezing with the frame. 50 ms keeps a warm load to a few
+                // frames without ever stalling one.
+                let t0 = std::time::Instant::now();
+                loop {
+                    match poll_future(future.as_mut()) {
+                        None => {
+                            if self.target.is_none() || t0.elapsed().as_millis() >= 50 {
+                                break;
+                            }
+                            std::thread::yield_now();
+                        }
+                        Some(game_scene) => {
+                            self.load_task = None;
+                            let scene = game_scene.map_or_else(|e| NextScene::PopWithResult(Box::new(e)), |it| NextScene::Replace(Box::new(it)));
+                            if matches!(scene, NextScene::PopWithResult(_)) {
+                                self.next_scene = Some(scene);
+                            } else {
+                                self.ready = Some(scene);
+                                self.ready_time = tm.now() as f32;
+                            }
                             break;
                         }
-                        std::thread::yield_now();
-                    }
-                    Some(game_scene) => {
-                        self.load_task = None;
-                        self.next_scene =
-                            Some(game_scene.map_or_else(|e| NextScene::PopWithResult(Box::new(e)), |it| NextScene::Replace(Box::new(it))));
-                        self.finish_time = tm.now() as f32 + BEFORE_TIME;
-                        break;
                     }
                 }
+            }
+        }
+        if self.ready.is_some() {
+            // Upload gate: hold the transition until the shell has read every registered
+            // texture at least once. The backlog only shrinks here (the game scene is not
+            // running, so nothing re-dirties), and the timeout bounds pathology. One phase
+            // line on release says how long the gate held - 0 ms is the common case once
+            // the song page's preload has done its job.
+            let waited = tm.now() as f32 - self.ready_time;
+            if crate::ext::upload_pending() == 0 || waited >= UPLOAD_GATE_TIMEOUT {
+                crate::ext::phase_push("upload_gate", (waited.max(0.) * 1000.) as u128);
+                self.next_scene = self.ready.take();
+                self.finish_time = tm.now() as f32 + BEFORE_TIME;
             }
         }
         Ok(())

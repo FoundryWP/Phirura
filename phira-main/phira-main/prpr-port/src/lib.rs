@@ -997,6 +997,18 @@ pub extern "C" fn wp81_particle_diag(index: u32) -> u32 {
     macroquad::draw::particle_diag(index)
 }
 
+/// Record the shell's texture-upload backlog for the loading gate.
+///
+/// Pushed by C# once per draw (carriers missing + queue depth); read back by prpr's
+/// loading scene through `prpr::ext::upload_pending`. A plain store - the shell is the
+/// only writer and the scene thread the only reader, and both sides tolerate a stale
+/// value for a frame (stale-high waits one more draw, stale-zero cannot happen before
+/// the first push because the counter starts at `u32::MAX`).
+#[no_mangle]
+pub extern "C" fn wp81_upload_pending_set(n: u32) {
+    prpr::ext::set_upload_pending(n);
+}
+
 /// Detail about the most recent refusal, indexed - `0` reason code, `1` id, `2` width, `3` height,
 /// `4` byte length, `5` bytes currently held, `6` the byte budget. `0` for any other index.
 ///

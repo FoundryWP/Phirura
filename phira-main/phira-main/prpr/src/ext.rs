@@ -21,7 +21,7 @@ use std::{
     future::Future,
     ops::Deref,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{atomic::{AtomicU32, Ordering}, Arc, Mutex},
     task::{Poll, RawWaker, RawWakerVTable, Waker},
 };
 use tracing::{debug, info_span};
@@ -106,6 +106,27 @@ pub fn phase_push(name: &str, ms: u128) {
     if let Some(sink) = PHASE_SINK.get() {
         sink(&format!("SongScene: phase {name} {ms}ms"));
     }
+}
+
+/// Upload backlog as last reported by the shell, for the loading gate.
+///
+/// The shell owns the carriers and the queue, so only it knows when every registered
+/// texture has been read at least once. It pushes the count once per draw through
+/// `prpr-port`'s `wp81_upload_pending_set`; the loading scene waits on it before
+/// transitioning, so notes never pop in mid-song. Starts at `u32::MAX` ("no draw has
+/// reported yet"), which the gate reads as "wait", never as "done". Plain `AtomicU32`,
+/// no lock, no guard page - written from the UI thread, read from the scene thread,
+// which on this target are the same thread, but the type does not rely on that.
+static UPLOAD_PENDING: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// Publish the shell's upload backlog. Called through the port, once per draw.
+pub fn set_upload_pending(n: u32) {
+    UPLOAD_PENDING.store(n, Ordering::Relaxed);
+}
+
+/// Read the last reported backlog. See [`UPLOAD_PENDING`].
+pub fn upload_pending() -> u32 {
+    UPLOAD_PENDING.load(Ordering::Relaxed)
 }
 
 /// Deletes all textures queued up by `SafeTexture` drops so far.

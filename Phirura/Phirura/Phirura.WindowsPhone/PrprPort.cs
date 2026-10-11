@@ -112,6 +112,18 @@ namespace Phirura
             return wp81_particle_diag(index);
         }
 
+        /// <summary>
+        /// Pushes the shell's texture-upload backlog for the loading gate - see the export.
+        /// New; missing on older DLLs, which the renderer's push latch handles by going quiet.
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void wp81_upload_pending_set(uint pending);
+
+        public static void ReportUploadPending(uint pending)
+        {
+            wp81_upload_pending_set(pending);
+        }
+
         // The incremental half of that same registry.
         //
         // The four calls above answer "what does this texture look like", which is all chart art

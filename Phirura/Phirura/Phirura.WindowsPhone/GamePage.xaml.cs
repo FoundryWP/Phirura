@@ -172,7 +172,7 @@ namespace Phirura
         /// from "the fix never arrived". If this line is missing or stale in the pull, stop
         /// diagnosing the app and fix the deploy first.
         /// </summary>
-        private const string BuildTag = "phase2+fair96k+touchclear+decodecount+rootcache+inputyield+worker2+dlqueue+previewfb+watchdog+drawmeter+desync+phasesink+ingestnofail+musicnolen+stallwatch+endingmusic+preload+logchain+loadslice+slowdraw+kindsplit";
+        private const string BuildTag = "phase2+fair96k+touchclear+decodecount+rootcache+inputyield+worker2+dlqueue+previewfb+watchdog+drawmeter+desync+phasesink+ingestnofail+musicnolen+stallwatch+endingmusic+preload+logchain+loadslice+slowdraw+kindsplit+censusgate+frameloop+drawtail+gatelock+uploadgate+pumpwatch";
 
         /// Viewport in **pixels**, which is what `wp81_game_set_screen` wants: `prpr` projects
         /// through `screen_width`/`screen_height`, and the recorded frame is 768x1229 px while
@@ -1164,6 +1164,7 @@ namespace Phirura
                 CompositionTarget.Rendering += OnRendering;
                 _hooked = true;
             }
+            StartPumpWatch();
         }
 
         private void StopLoop()
@@ -1173,6 +1174,54 @@ namespace Phirura
                 CompositionTarget.Rendering -= OnRendering;
                 _hooked = false;
             }
+        }
+
+        /// <summary>Rendering calls seen, for the pump watch below.</summary>
+        private int _pumpFrames;
+        /// <summary>Value of <see cref="_pumpFrames"/> at the last watch tick.</summary>
+        private int _pumpFramesLast;
+        /// <summary>Whether the pump watch timer is running.</summary>
+        private bool _pumpWatchStarted;
+
+        /// <summary>
+        /// Tells a dead pump from a blocked UI thread, and revives the former.
+        ///
+        /// The rapid-tap freeze reads as "loops dead, input alive, no exception, no slow
+        /// part" - which is either the compositor no longer calling back (re-hook fixes)
+        /// or the UI thread blocked (nothing here can fire either). A 5 s timer cannot
+        /// distinguish by itself, but its own firing is the evidence: if this tick
+        /// runs while the frame count is frozen, the thread pumps and only the callback
+        /// is gone, so re-subscribing plus a present heals it in place - no suspend cycle.
+        /// If the tick itself never runs during a freeze, the log's silence says blocked.
+        /// Once per stall at most: the re-hook restarts the count, so a healed pump goes
+        /// quiet and a still-dead one speaks every 5 s.
+        /// </summary>
+        private void StartPumpWatch()
+        {
+            if (_pumpWatchStarted)
+            {
+                return;
+            }
+            _pumpWatchStarted = true;
+            _pumpFramesLast = _pumpFrames;
+            Windows.UI.Xaml.DispatcherTimer timer = new Windows.UI.Xaml.DispatcherTimer();
+            timer.Interval = TimeSpan.FromSeconds(5);
+            timer.Tick += delegate(object sender, object e)
+            {
+                if (_pumpFrames == _pumpFramesLast)
+                {
+                    AppLog.WriteSync("GamePage: pump stalled 5s, re-hooking (frames=" + _pumpFrames + ")");
+                    StopLoop();
+                    HookLoop();
+                    if (_renderer != null)
+                    {
+                        try { _renderer.Present(); }
+                        catch (Exception) { }
+                    }
+                }
+                _pumpFramesLast = _pumpFrames;
+            };
+            timer.Start();
         }
 
         // ------------------------------------------------------------------
@@ -1467,6 +1516,35 @@ namespace Phirura
         // ------------------------------------------------------------------
 
         private void OnRendering(object sender, object e)
+        {
+            _pumpFrames++;
+            // The loop must survive a bad frame. A throw out of here used to take down the
+            // whole frame pump (CompositionTarget.Rendering never fires this handler again)
+            // while touch events kept flowing: the frozen picture with a living game, needing
+            // a suspend/resume cycle to recover - exactly the rapid-tap freeze. mem was
+            // 288/390 MB when it last happened, so an OOM inside a heavy frame is the prime
+            // suspect, but the fix does not depend on which line throws: log it and keep
+            // pumping. One WriteSync per faulting frame at most in practice - a fault every
+            // frame would spam, so this counts and quiets after 8 in a row.
+            try
+            {
+                OnRenderingInner(sender, e);
+                _frameFaults = 0;
+            }
+            catch (Exception ex)
+            {
+                _frameFaults++;
+                if (_frameFaults <= 8)
+                {
+                    AppLog.WriteSync("GamePage: frame loop fault #" + _frameFaults + " (loop survives)", ex);
+                }
+            }
+        }
+
+        /// <summary>Faults that have fired consecutively out of <see cref="OnRendering"/>.</summary>
+        private int _frameFaults;
+
+        private void OnRenderingInner(object sender, object e)
         {
             // The calibrator runs while the game itself is paused, so it gets the frame first.
             if (_calibrating)

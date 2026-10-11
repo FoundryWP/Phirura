@@ -343,6 +343,8 @@ $exports = @(
     # Particle quads in the last frame - the only evidence the hit effect reached the renderer at all.
     "wp81_sprite_quads",
     "wp81_particle_diag",
+    # Shell-to-engine upload backlog push, read back by the loading gate - see the export.
+    "wp81_upload_pending_set",
     "wp81_texture_dirty",
     "wp81_texture_rect_data",
     "wp81_texture_write_misses",
