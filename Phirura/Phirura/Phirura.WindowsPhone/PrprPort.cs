@@ -70,6 +70,140 @@ namespace Phirura
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern void wp81_draw_selftest();
 
+        // --- shell-polled bridges (file picker, links) ----------------------
+        //
+        // Rust queues, the shell polls once per frame and answers through complete calls.
+        // Polled rather than pushed through HostCallbacks so neither side inherits the
+        // other's threading model: the picker is async UI work, the URL launch is
+        // fire-and-forget, and both must run on the UI thread that already pumps frames.
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_file_pending(byte[] outId, int cap);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_file_complete(byte[] id, int idLen, byte[] path, int pathLen);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_url_pending(byte[] outUrl, int cap);
+
+        private static bool _bridgesSupported = true;
+
+        private static bool BridgesMissing(Exception ex)
+        {
+            for (Exception e = ex; e != null; e = e.InnerException)
+            {
+                string name = e.GetType().Name;
+                if (name == "EntryPointNotFoundException" || name == "DllNotFoundException")
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static readonly byte[] _bridgeBuffer = new byte[512];
+
+        /// <summary>Pending file-picker request id, or null when there is none.</summary>
+        public static string FilePending()
+        {
+            if (!_bridgesSupported)
+            {
+                return null;
+            }
+            try
+            {
+                int n = wp81_file_pending(_bridgeBuffer, _bridgeBuffer.Length);
+                if (n <= 0)
+                {
+                    return null;
+                }
+                return System.Text.Encoding.UTF8.GetString(_bridgeBuffer, 0, n);
+            }
+            catch (Exception ex)
+            {
+                if (BridgesMissing(ex))
+                {
+                    _bridgesSupported = false;
+                }
+                return null;
+            }
+        }
+
+        /// <summary>Queued link, or null when there is none.</summary>
+        public static string UrlPending()
+        {
+            if (!_bridgesSupported)
+            {
+                return null;
+            }
+            try
+            {
+                int n = wp81_url_pending(_bridgeBuffer, _bridgeBuffer.Length);
+                if (n <= 0)
+                {
+                    return null;
+                }
+                return System.Text.Encoding.UTF8.GetString(_bridgeBuffer, 0, n);
+            }
+            catch (Exception ex)
+            {
+                if (BridgesMissing(ex))
+                {
+                    _bridgesSupported = false;
+                }
+                return null;
+            }
+        }
+
+        public static void ReportFileComplete(string id, string path)
+        {
+            if (!_bridgesSupported)
+            {
+                return;
+            }
+            try
+            {
+                byte[] ib = System.Text.Encoding.UTF8.GetBytes(id ?? string.Empty);
+                byte[] pb = System.Text.Encoding.UTF8.GetBytes(path ?? string.Empty);
+                wp81_file_complete(ib, ib.Length, pb, pb.Length);
+            }
+            catch (Exception ex)
+            {
+                if (BridgesMissing(ex))
+                {
+                    _bridgesSupported = false;
+                }
+            }
+        }
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int wp81_file_cancel(byte[] id, int idLen);
+
+        /// <summary>
+        /// Withdraws a picker request (cancelled, or failed before a file existed) so the
+        /// poll stops re-firing it. Without this a dead request retries every frame and the
+        /// button reads as broken while the log fills with one failure a frame.
+        /// </summary>
+        public static void ReportFileCancel(string id)
+        {
+            if (!_bridgesSupported || string.IsNullOrEmpty(id))
+            {
+                return;
+            }
+            try
+            {
+                byte[] ib = System.Text.Encoding.UTF8.GetBytes(id);
+                wp81_file_cancel(ib, ib.Length);
+            }
+            catch (Exception ex)
+            {
+                if (BridgesMissing(ex))
+                {
+                    _bridgesSupported = false;
+                }
+            }
+        }
+
         // --- the texture registry ------------------------------------------
         //
         // A Texture record in the drain carries only a u32 id. The Rust shim allocates those ids

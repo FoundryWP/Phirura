@@ -140,6 +140,34 @@ namespace Phirura
         }
 
         /// <summary>
+        /// Invoked when the application is activated by some means other than normal launching:
+        /// file-picker continuations, mostly. Routes those to the page; everything else falls
+        /// through to the default handling.
+        /// </summary>
+        protected override void OnActivated(IActivatedEventArgs e)
+        {
+            Windows.ApplicationModel.Activation.FileOpenPickerContinuationEventArgs cont =
+                e as Windows.ApplicationModel.Activation.FileOpenPickerContinuationEventArgs;
+            if (cont != null)
+            {
+                Frame rootFrame = Window.Current.Content as Frame;
+                if (rootFrame == null)
+                {
+                    rootFrame = new Frame();
+                    Window.Current.Content = rootFrame;
+                }
+                if (rootFrame.Content == null)
+                {
+                    rootFrame.Navigate(typeof(GamePage));
+                }
+                GamePage.FilePickerContinuation(cont.Files);
+                Window.Current.Activate();
+                return;
+            }
+            base.OnActivated(e);
+        }
+
+        /// <summary>
         /// Invoked when the application is launched normally by the end user.  Other entry points
         /// will be used when the application is launched to open a specific file, to display
         /// search results, and so forth.

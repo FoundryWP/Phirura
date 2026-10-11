@@ -195,6 +195,14 @@ pub unsafe extern "C" fn wp81_install_callbacks(cb: *const HostCallbacks) {
     // fail inside `spawn` and no dialog would ever appear. Installed here rather than behind a cfg
     // because a desktop build reaches the same default through `inputbox` on its own.
     prpr::scene::set_input_backend(Arc::new(ShellInput));
+    // Same shape, two more platform gaps: the file picker (`rfd` has no backend on the
+    // phone, so every import/avatar pick would die) and links (`open::that` shells out
+    // to a desktop opener). Both are runtime flags, not cfg branches: with them set,
+    // `request_file` leaves its id pending for the shell's per-frame poll (answered
+    // through `wp81_file_complete`) and `open_url` queues for the same poll instead of
+    // reaching any platform branch.
+    prpr::scene::set_file_shell_owned();
+    prpr::ext::set_url_shell_owned();
 }
 
 /// Forwarder for the macroquad shim's asset hook.
@@ -310,6 +318,76 @@ unsafe fn read_bytes(ptr: *const u8, len: usize) -> Vec<u8> {
 /// `ptr` must be null, or readable for `len` bytes of UTF-8.
 unsafe fn read_utf8(ptr: *const u8, len: usize) -> String {
     String::from_utf8_lossy(&read_bytes(ptr, len)).into_owned()
+}
+
+/// Write one Rust string into the shell's buffer. Returns the bytes written, 0 for
+/// nothing to say, -1 for a null buffer, -2 when it does not fit. Shared by the two
+/// poll exports below so they cannot disagree on the protocol.
+fn write_out(out: *mut u8, cap: usize, s: &str) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    if s.len() > cap {
+        return -2;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(s.as_ptr(), out, s.len());
+    }
+    s.len() as i32
+}
+
+/// Poll for a pending file-picker request without consuming it.
+///
+/// The shell calls this once per frame; on a request id it shows the native picker
+/// and answers through [`wp81_file_complete`], on cancel it stays silent (a re-request
+/// overwrites the pending id). Rust consumes through `take_file` as before - this only
+/// peeks, so a draw that never launches a picker changes nothing.
+#[no_mangle]
+pub extern "C" fn wp81_file_pending(out: *mut u8, cap: usize) -> i32 {
+    match prpr::scene::peek_file() {
+        None => 0,
+        Some(id) => write_out(out, cap, &id),
+    }
+}
+
+/// Deliver the picked file. `path` is a file the engine's own `std::fs` can open
+/// (the shell copies the pick into its local folder first); the pending request is
+/// completed under that same id. Returns 0, or 1 when either side is empty.
+#[no_mangle]
+pub extern "C" fn wp81_file_complete(id: *const u8, id_len: usize, path: *const u8, path_len: usize) -> i32 {
+    let id = unsafe { read_utf8(id, id_len) };
+    let path = unsafe { read_utf8(path, path_len) };
+    if id.is_empty() || path.is_empty() {
+        return 1;
+    }
+    prpr::scene::return_file(id, path);
+    0
+}
+
+/// Withdraw a file-picker request without answering it (cancelled, or the shell failed
+/// before a file existed). Clears the pending id only when it is still the one given,
+/// so a re-request that landed meanwhile is never eaten. Without this a cancelled pick
+/// stays pending forever: the shell re-fires every frame and the request can never be
+/// made again, which reads as a dead import button.
+#[no_mangle]
+pub extern "C" fn wp81_file_cancel(id: *const u8, id_len: usize) -> i32 {
+    let id = unsafe { read_utf8(id, id_len) };
+    if id.is_empty() {
+        return 1;
+    }
+    prpr::scene::cancel_file(id);
+    0
+}
+
+/// Poll for a queued link without consuming it. Same shape as [`wp81_file_pending`]:
+/// the shell launches one per poll through its own launcher and drops failures
+/// silently (a link that will not open is not worth an error dialog).
+#[no_mangle]
+pub extern "C" fn wp81_url_pending(out: *mut u8, cap: usize) -> i32 {
+    match prpr::ext::take_url() {
+        None => 0,
+        Some(url) => write_out(out, cap, &url),
+    }
 }
 
 #[inline]

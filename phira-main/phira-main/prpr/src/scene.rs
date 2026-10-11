@@ -29,7 +29,10 @@ use std::{
     any::Any,
     borrow::Cow,
     cell::RefCell,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tracing::warn;
 
@@ -268,6 +271,12 @@ pub fn request_file(id: impl Into<String>) {
     #[cfg(target_env = "ohos")]
     let is_photo = id == "avatar";
     *CHOSEN_FILE.lock().unwrap() = (Some(id), None);
+    // WP81 port: the shell shows the native picker on its per-frame poll and answers
+    // through `wp81_file_complete`. Installed at boot; without it this falls through
+    // to the platform branches below (rfd has no backend on the phone).
+    if FILE_SHELL_OWNED.load(Ordering::Relaxed) {
+        return;
+    }
     cfg_if! {
         if #[cfg(target_os = "android")] {
             unsafe {
@@ -381,6 +390,34 @@ pub fn request_file(id: impl Into<String>) {
 pub fn take_file() -> Option<(String, String)> {
     let mut w = CHOSEN_FILE.lock().unwrap();
     w.0.clone().zip(std::mem::take(&mut w.1))
+}
+
+/// Peek the pending file request without consuming it, for the shell's poll. The Rust
+/// side consumes through [`take_file`]; the shell only reads, then answers through
+/// `wp81_file_complete` (or stays silent on cancel, leaving a re-request to overwrite).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn peek_file() -> Option<String> {
+    CHOSEN_FILE.lock().unwrap().0.clone()
+}
+
+/// Withdraw the pending file request when it is still `id`. See the port's
+/// `wp81_file_cancel`: a cancelled pick must not linger, or the shell re-fires it
+/// every frame and the button reads as dead.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn cancel_file(id: String) {
+    let mut w = CHOSEN_FILE.lock().unwrap();
+    if w.0.as_ref() == Some(&id) {
+        *w = (None, None);
+    }
+}
+
+/// The shell owns the file picker on this target - see [`request_file`].
+static FILE_SHELL_OWNED: AtomicBool = AtomicBool::new(false);
+
+/// Route [`request_file`] through the shell. Called once at boot by the port.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_file_shell_owned() {
+    FILE_SHELL_OWNED.store(true, Ordering::Relaxed);
 }
 
 #[cfg(not(target_arch = "wasm32"))]

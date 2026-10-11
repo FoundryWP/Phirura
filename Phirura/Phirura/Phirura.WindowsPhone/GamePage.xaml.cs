@@ -172,7 +172,7 @@ namespace Phirura
         /// from "the fix never arrived". If this line is missing or stale in the pull, stop
         /// diagnosing the app and fix the deploy first.
         /// </summary>
-        private const string BuildTag = "phase2+fair96k+touchclear+decodecount+rootcache+inputyield+worker2+dlqueue+previewfb+watchdog+drawmeter+desync+phasesink+ingestnofail+musicnolen+stallwatch+endingmusic+preload+logchain+loadslice+slowdraw+kindsplit+censusgate+frameloop+drawtail+gatelock+uploadgate+pumpwatch+btnblack+tinttext+scoreupload+poolwatch+touchcap+hopelesstex+stuckids+deadids+upboost+endingcover+nologinrevert+harmfont+pauseattach+gatepass+pauseradius+pausediag+pausefull";
+        private const string BuildTag = "phase2+fair96k+touchclear+decodecount+rootcache+inputyield+worker2+dlqueue+previewfb+watchdog+drawmeter+desync+phasesink+ingestnofail+musicnolen+stallwatch+endingmusic+preload+logchain+loadslice+slowdraw+kindsplit+censusgate+frameloop+drawtail+gatelock+uploadgate+pumpwatch+btnblack+tinttext+scoreupload+poolwatch+touchcap+hopelesstex+stuckids+deadids+upboost+endingcover+nologinrevert+harmfont+pauseattach+gatepass+pauseradius+pausediag+pausefull+shellfiles+pickcontinue";
 
         /// Viewport in **pixels**, which is what `wp81_game_set_screen` wants: `prpr` projects
         /// through `screen_width`/`screen_height`, and the recorded frame is 768x1229 px while
@@ -1613,6 +1613,129 @@ namespace Phirura
         /// <summary>Faults that have fired consecutively out of <see cref="OnRendering"/>.</summary>
         private int _frameFaults;
 
+        /// <summary>Whether a native pick is already in flight. The poll below skips while set. Static: the continuation that clears it has no page instance.</summary>
+        private static bool _filePickerBusy;
+
+        /// <summary>
+        /// Polls the engine's shell bridges: a pending file-picker request and queued links.
+        ///
+        /// Two P/Invokes per frame, both trivial when idle. The picker is async UI work and
+        /// the URL launch is fire-and-forget; neither may block the frame that noticed them,
+        /// so both leave this method before doing anything that can wait.
+        /// </summary>
+        private void PollShellBridges()
+        {
+            string url = PrprPort.UrlPending();
+            if (!string.IsNullOrEmpty(url))
+            {
+                try
+                {
+                    Windows.System.Launcher.LaunchUriAsync(new Uri(url));
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Write("GamePage.LaunchUrl(" + url + ")", ex);
+                }
+            }
+            if (_filePickerBusy)
+            {
+                return;
+            }
+            string req = PrprPort.FilePending();
+            if (string.IsNullOrEmpty(req))
+            {
+                return;
+            }
+            _filePickerBusy = true;
+            PickFileAsync(req);
+        }
+
+        /// <summary>
+        /// Shows the system picker for one engine file request, then hands the bytes back.
+        ///
+        /// Phone continuation style: `PickSingleFileAsync` does not exist for Store phone
+        /// apps (it throws "not supported"), so this launches `PickSingleFileAndContinue`
+        /// and returns at once - the answer lands in `App.OnActivated`, which routes it to
+        /// `FilePickerContinuation` below. `_filePickerBusy` spans the suspend so the poll
+        /// does not fire a second picker over the first.
+        /// </summary>
+        private void PickFileAsync(string req)
+        {
+            try
+            {
+                Windows.Storage.Pickers.FileOpenPicker picker =
+                    new Windows.Storage.Pickers.FileOpenPicker();
+                picker.SuggestedStartLocation =
+                    Windows.Storage.Pickers.PickerLocationId.Downloads;
+                string[] exts = { ".zip", ".pez", ".rpe", ".pec", ".json",
+                    ".png", ".jpg", ".jpeg", ".mp3", ".ogg" };
+                for (int i = 0; i < exts.Length; i++)
+                {
+                    picker.FileTypeFilter.Add(exts[i]);
+                }
+                _pendingPickReq = req;
+                picker.PickSingleFileAndContinue();
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("GamePage.PickFile(" + req + ")", ex);
+                _pendingPickReq = null;
+                _filePickerBusy = false;
+                PrprPort.ReportFileCancel(req);
+            }
+        }
+
+        /// <summary>Request id the continuation should complete, or null when there is none.</summary>
+        private static string _pendingPickReq;
+
+        /// <summary>
+        /// Finishes a picker run that left through `PickSingleFileAndContinue`.
+        ///
+        /// Called from `App.OnActivated` with the continuation's files: a pick is copied
+        /// into the temporary folder under an unguessable name and its *path* crosses
+        /// back - the engine reads it with its own `std::fs`, exactly like the desktop
+        /// dialog hands back a path. A cancel (or anything else without files) withdraws
+        /// the request instead, so the poll goes quiet and a re-tap starts clean.
+        /// Static because the continuation can arrive without a page instance in hand;
+        /// everything it touches is static or fetched fresh for the same reason.
+        /// </summary>
+        public static async void FilePickerContinuation(
+            System.Collections.Generic.IReadOnlyList<Windows.Storage.StorageFile> files)
+        {
+            string req = _pendingPickReq;
+            _pendingPickReq = null;
+            try
+            {
+                if (req != null && files != null && files.Count > 0)
+                {
+                    Windows.Storage.StorageFile file = files[0];
+                    Windows.Storage.StorageFolder temp =
+                        Windows.Storage.ApplicationData.Current.TemporaryFolder;
+                    string name = "import-" + System.Guid.NewGuid().ToString("N") + file.FileType;
+                    Windows.Storage.StorageFile copy = await file.CopyAsync(
+                        temp, name, Windows.Storage.NameCollisionOption.ReplaceExisting);
+                    PrprPort.ReportFileComplete(req, copy.Path);
+                    AppLog.Write("GamePage: picked file for '" + req + "' -> " + copy.Path);
+                }
+                else if (req != null)
+                {
+                    PrprPort.ReportFileCancel(req);
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("GamePage.FileContinuation", ex);
+                if (req != null)
+                {
+                    PrprPort.ReportFileCancel(req);
+                }
+            }
+            finally
+            {
+                _filePickerBusy = false;
+            }
+        }
+
         private void OnRenderingInner(object sender, object e)
         {
             // The calibrator runs while the game itself is paused, so it gets the frame first.
@@ -1626,6 +1749,9 @@ namespace Phirura
             // already silent by the time this one draws, and the chart path returns further
             // down for a dozen reasons that have nothing to do with the audio.
             GuardMusic();
+
+            // File picker requests and queued links, polled once per frame - see the method.
+            PollShellBridges();
 
             if (_phiraMode)
             {

@@ -343,6 +343,13 @@ $exports = @(
     # Particle quads in the last frame - the only evidence the hit effect reached the renderer at all.
     "wp81_sprite_quads",
     "wp81_particle_diag",
+    # Shell-polled bridges with no HostCallbacks entry: the pending file-picker request
+    # (answered through file_complete), its answer, and queued links. Polled, not pushed,
+    # so neither side needs the other's threading model.
+    "wp81_file_pending",
+    "wp81_file_complete",
+    "wp81_file_cancel",
+    "wp81_url_pending",
     # Shell-to-engine upload backlog push, read back by the loading gate - see the export.
     "wp81_upload_pending_set",
     "wp81_texture_dirty",

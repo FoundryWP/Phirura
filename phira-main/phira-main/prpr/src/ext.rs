@@ -664,6 +664,23 @@ pub fn open_url(url: &str) -> Result<()> {
 
 /// The shell opens URLs on this target - see [`open_url`].
 static URL_SHELL_OWNED: AtomicBool = AtomicBool::new(false);
+/// Links queued for the shell's poll, oldest first.
+static URL_QUEUE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Route [`open_url`] through the shell. Called once at boot by the port.
+pub fn set_url_shell_owned() {
+    URL_SHELL_OWNED.store(true, Ordering::Relaxed);
+}
+
+/// Take the oldest queued link, if any. Called through the port, once per frame.
+pub fn take_url() -> Option<String> {
+    let mut q = URL_QUEUE.lock().unwrap();
+    if q.is_empty() {
+        None
+    } else {
+        Some(q.remove(0))
+    }
+}
 
 mod shader {
     pub const VERTEX: &str = r#"#version 100
