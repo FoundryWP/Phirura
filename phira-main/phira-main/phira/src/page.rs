@@ -356,7 +356,7 @@ impl Fader {
             let p = self.progress_scaled(t, 1.6);
             let tp = tp + h * p - h / 2.;
             let mut x = -0.87;
-            if s == "PHIRA" {
+            if s == "Phirura" {
                 x -= ui.back_rect().w;
             }
             for c in s.chars() {
@@ -370,7 +370,7 @@ impl Fader {
                     .w
                     + 0.012;
             }
-            if s == "PHIRA" {
+            if s == "Phirura" {
                 ui.text(concat!('v', env!("CARGO_PKG_VERSION")))
                     .pos(x + 0.01, tp + h - 0.027)
                     .anchor(0., 1.)

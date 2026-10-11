@@ -10,7 +10,7 @@ use crate::{
     scene::show_message,
     task::Task,
     time::TimeManager,
-    ui::{button_hit, clip_sector, DRectButton, Dialog, MessageHandle, RectButton, Ui},
+    ui::{button_hit, DRectButton, Dialog, MessageHandle, RectButton, Ui},
 };
 use anyhow::Result;
 use macroquad::prelude::*;
@@ -253,6 +253,17 @@ impl Scene for EndingScene {
         let sr = ui.screen_rect();
         set_camera(&cam);
         draw_background(*self.background);
+
+        // The cover, drawn first and unclipped. On desktop this is revealed by a sector
+        // wipe (`clip_sector` below): a custom shader clips the illustration to a growing
+        // pie slice while the score rolls in above it. This target cannot run custom
+        // shaders, so the wipe arrives as a no-op - and this photo is what that looked
+        // like: the fullscreen cover painted *after* the score, counts and buttons,
+        // burying all of them, with only the later player chip left visible. Drawn first,
+        // the composition matches the settled desktop frame exactly (cover behind,
+        // content above); only the wipe garnish is gone.
+        ui.fill_rect(sr, (*self.illustration, sr));
+        ui.fill_rect(sr, (*self.illustration, sr.feather(0.15)));
 
         fn ran(t: f32, l: f32, r: f32) -> f32 {
             ((t - l) / (r - l)).clamp(0., 1.)
@@ -693,14 +704,6 @@ impl Scene for EndingScene {
                 }
             }
         }
-        clip_sector(ui, ct, sector_start, sector_start + center_angle, |ui| {
-            ui.fill_rect(sr, (*self.illustration, sr));
-        });
-        let sector_start = (p * 1.4 - 0.3).max(0.) * (angle_end - angle_start - center_angle) + angle_start;
-        clip_sector(ui, ct, sector_start, sector_start + center_angle * 0.5, |ui| {
-            ui.fill_rect(sr, (*self.illustration, sr.feather(0.15)));
-        });
-
         ui.alpha(pf, |ui| {
             let s = 0.05;
             let pad = 0.02;

@@ -1515,7 +1515,7 @@ impl SongScene {
                         .no_baseline()
                         .size(0.5 * (1. - (1. - rr.h / oh).powf(1.3)))
                         .max_width(rr.w)
-                        .color(if on { Color::new(0.3, 0.3, 0.3, 1.) } else { WHITE })
+                        .color(if on { BLACK } else { WHITE })
                         .draw();
                 });
                 dy!(ITEM_HEIGHT);

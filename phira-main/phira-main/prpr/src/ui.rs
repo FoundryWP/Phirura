@@ -356,7 +356,7 @@ impl DRectButton {
                 .no_baseline()
                 .size(size * (1. - (1. - r.h / oh).powf(1.3)))
                 .max_width(r.w)
-                .color(if chosen { Color::new(0.3, 0.3, 0.3, 1.) } else { WHITE })
+                .color(if chosen { BLACK } else { WHITE })
                 .draw();
         });
     }
@@ -389,7 +389,7 @@ impl DRectButton {
                 .max_width(r.w - 0.04)
                 .no_baseline()
                 .size(size * r.h / oh)
-                .color(if chosen { Color::new(0.3, 0.3, 0.3, alpha) } else { semi_white(alpha) })
+                .color(if chosen { BLACK } else { semi_white(alpha) })
                 .draw();
         });
     }

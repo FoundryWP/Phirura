@@ -172,7 +172,7 @@ namespace Phirura
         /// from "the fix never arrived". If this line is missing or stale in the pull, stop
         /// diagnosing the app and fix the deploy first.
         /// </summary>
-        private const string BuildTag = "phase2+fair96k+touchclear+decodecount+rootcache+inputyield+worker2+dlqueue+previewfb+watchdog+drawmeter+desync+phasesink+ingestnofail+musicnolen+stallwatch+endingmusic+preload+logchain+loadslice+slowdraw+kindsplit+censusgate+frameloop+drawtail+gatelock+uploadgate+pumpwatch";
+        private const string BuildTag = "phase2+fair96k+touchclear+decodecount+rootcache+inputyield+worker2+dlqueue+previewfb+watchdog+drawmeter+desync+phasesink+ingestnofail+musicnolen+stallwatch+endingmusic+preload+logchain+loadslice+slowdraw+kindsplit+censusgate+frameloop+drawtail+gatelock+uploadgate+pumpwatch+btnblack+tinttext+scoreupload+poolwatch+touchcap+hopelesstex+stuckids+deadids+upboost+endingcover+nologinrevert";
 
         /// Viewport in **pixels**, which is what `wp81_game_set_screen` wants: `prpr` projects
         /// through `screen_width`/`screen_height`, and the recorded frame is 768x1229 px while
@@ -1182,6 +1182,8 @@ namespace Phirura
         private int _pumpFramesLast;
         /// <summary>Whether the pump watch timer is running.</summary>
         private bool _pumpWatchStarted;
+        /// <summary>Last tick the frame pump ran on. Written by the UI thread, read by the pool.</summary>
+        private int _lastPumpTick = Environment.TickCount;
 
         /// <summary>
         /// Tells a dead pump from a blocked UI thread, and revives the former.
@@ -1203,6 +1205,7 @@ namespace Phirura
                 return;
             }
             _pumpWatchStarted = true;
+            StartPoolWatch();
             _pumpFramesLast = _pumpFrames;
             Windows.UI.Xaml.DispatcherTimer timer = new Windows.UI.Xaml.DispatcherTimer();
             timer.Interval = TimeSpan.FromSeconds(5);
@@ -1222,6 +1225,41 @@ namespace Phirura
                 _pumpFramesLast = _pumpFrames;
             };
             timer.Start();
+        }
+
+        /// <summary>Pool witness timer. Rooted: an unreferenced timer is collected and stops.</summary>
+        private System.Threading.Timer _poolWatch;
+
+        /// <summary>
+        /// Pool-thread twin of the pump watch: proves a blocked UI thread from the outside.
+        ///
+        /// The dispatcher timer above cannot fire while the UI thread is wedged, so its
+        /// silence during a freeze is ambiguous - dead thread or dead callback. This one
+        /// runs on the pool and only reads a timestamp the pump writes every frame: while
+        /// the pump runs it never speaks, and a freeze gets one line per 5 s with the exact
+        /// age - including freezes the UI-thread watch can never report. Started once,
+        /// alongside the page; the callback never touches UI objects.
+        /// </summary>
+        private void StartPoolWatch()
+        {
+            if (_poolWatch != null)
+            {
+                return;
+            }
+            _poolWatch = new System.Threading.Timer(delegate(object state)
+            {
+                try
+                {
+                    int age = unchecked(Environment.TickCount - _lastPumpTick);
+                    if (age >= 8000)
+                    {
+                        AppLog.WriteSync("GamePage: ui blocked " + (age / 1000) + "s (pool witness)");
+                    }
+                }
+                catch (Exception)
+                {
+                }
+            }, null, 5000, 5000);
         }
 
         // ------------------------------------------------------------------
@@ -1407,6 +1445,31 @@ namespace Phirura
             {
                 return;
             }
+            // Cap: sixteen simultaneous fingers is physically impossible on a phone, so
+            // anything past that is storm ghosts or releases the OS never delivered - and
+            // every entry rides each frame into the engine (plus its press stamp), which is
+            // exactly what the table looked like at every freeze (30-54 stale). Ended entries
+            // are swept first so a real chord clearing together never trips this; beyond that
+            // the press is dropped at the door rather than fed to the judge forever. Logged
+            // through the same gate as every other touch line, so a dropped real finger
+            // would show up as `dropped=` instead of vanishing silently.
+            int live = 0;
+            foreach (KeyValuePair<uint, TouchInput> kv in _active)
+            {
+                if (kv.Value.Phase != TouchPhase.Ended && kv.Value.Phase != TouchPhase.Cancelled)
+                {
+                    live++;
+                }
+            }
+            if (live >= 16)
+            {
+                if (TouchLogDue())
+                {
+                    AppLog.Write("GamePage: touch down id=" + id + " dropped: table full (" + live + ")");
+                    _touchLogSkipped = 0;
+                }
+                return;
+            }
             _active[id] = MakeTouch(id, TouchPhase.Started, where);
             _justStarted.Add(id);
             // The Rust path's press timestamp. Kept out of `TouchInput.Time` because the C# judge
@@ -1518,6 +1581,7 @@ namespace Phirura
         private void OnRendering(object sender, object e)
         {
             _pumpFrames++;
+            _lastPumpTick = Environment.TickCount;
             // The loop must survive a bad frame. A throw out of here used to take down the
             // whole frame pump (CompositionTarget.Rendering never fires this handler again)
             // while touch events kept flowing: the frozen picture with a living game, needing

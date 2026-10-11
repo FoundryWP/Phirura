@@ -921,6 +921,7 @@ namespace Phirura.Game
         public void ResetPortTextures()
         {
             DisposePortTextures();
+            _hopelessPortTextures.Clear();
             _portTexturesReady = false;
             _portFrame = null;
         }
@@ -941,6 +942,107 @@ namespace Phirura.Game
             _portTextures.Clear();
             PortTexturesBound = 0;
             DisposePortGradients();
+            DisposeTintCache();
+        }
+
+        /// <summary>Pre-tinted copies for dark textured draws - see the tint hook in the textured branch.</summary>
+        private const int TintCacheMax = 64;
+        /// <summary>Refuse to pre-tint anything bigger: a copy this large is a sprite, not a label.</summary>
+        private const int TintMaxPixels = 128 * 128;
+        private readonly Dictionary<string, CanvasBitmap> _tintCache = new Dictionary<string, CanvasBitmap>();
+        private readonly Queue<string> _tintOrder = new Queue<string>();
+
+        /// <summary>
+        /// A copy of <paramref name="src"/> out of <paramref name="texId"/> multiplied by the
+        /// given tint, or null when it cannot be built (too big, unreadable, device gone).
+        ///
+        /// Cached by texture, rect and tint byte: button labels are static, so the second frame
+        /// with the same label hits. FIFO-evicted past <see cref="TintCacheMax"/>, and dropped
+        /// with the carriers - the bitmaps belong to the same device.
+        /// Stored premultiplied, like every other carrier: the source is straight alpha, so the
+        /// tint multiplies first and the alpha folds after, exactly as the upload path does.
+        /// </summary>
+        private CanvasBitmap TintedCopy(ICanvasResourceCreator dev, uint texId, Rect src,
+                                        float r, float g, float b)
+        {
+            int sx = (int)src.X;
+            int sy = (int)src.Y;
+            int sw = (int)src.Width;
+            int sh = (int)src.Height;
+            if (sw <= 0 || sh <= 0 || (long)sw * sh > TintMaxPixels)
+            {
+                return null;
+            }
+            string key = texId + ":" + sx + "," + sy + "," + sw + "x" + sh + ":"
+                + ((int)(r * 255f)) + "," + ((int)(g * 255f)) + "," + ((int)(b * 255f));
+            CanvasBitmap hit;
+            if (_tintCache.TryGetValue(key, out hit) && hit != null)
+            {
+                return hit;
+            }
+            PrprPort.TexRect rect;
+            rect.X = (uint)sx;
+            rect.Y = (uint)sy;
+            rect.W = (uint)sw;
+            rect.H = (uint)sh;
+            byte[] rgba;
+            try
+            {
+                rgba = PrprPort.ReadTextureRect(texId, rect);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+            if (rgba == null || rgba.Length < sw * sh * 4)
+            {
+                return null;
+            }
+            Color[] pixels = new Color[sw * sh];
+            for (int p = 0; p < pixels.Length; p++)
+            {
+                int o = p * 4;
+                int a = rgba[o + 3];
+                pixels[p] = Color.FromArgb((byte)a,
+                    (byte)((rgba[o + 0] * r * a + 127) / 255),
+                    (byte)((rgba[o + 1] * g * a + 127) / 255),
+                    (byte)((rgba[o + 2] * b * a + 127) / 255));
+            }
+            CanvasBitmap bmp;
+            try
+            {
+                bmp = CanvasBitmap.CreateFromColors(dev, pixels, sw, sh);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+            if (_tintCache.Count >= TintCacheMax)
+            {
+                string old = _tintOrder.Dequeue();
+                CanvasBitmap victim;
+                if (_tintCache.TryGetValue(old, out victim))
+                {
+                    _tintCache.Remove(old);
+                    try { victim.Dispose(); }
+                    catch (Exception) { }
+                }
+            }
+            _tintCache[key] = bmp;
+            _tintOrder.Enqueue(key);
+            return bmp;
+        }
+
+        /// <summary>Releases the pre-tinted copies. See <see cref="DisposePortTextures"/>.</summary>
+        private void DisposeTintCache()
+        {
+            foreach (KeyValuePair<string, CanvasBitmap> kv in _tintCache)
+            {
+                try { kv.Value.Dispose(); }
+                catch (Exception) { }
+            }
+            _tintCache.Clear();
+            _tintOrder.Clear();
         }
 
         /// <summary>
@@ -2154,7 +2256,32 @@ namespace Phirura.Game
                         + " atlas=" + tex.PixelWidth + "x" + tex.PixelHeight
                         + ClipTag() + " i=" + _portCmdIdx);
                 }
-                ds.DrawImage(tex.Target, quad, src, alpha, CanvasImageInterpolation.Linear);
+                // Tint. Win2D.win81's DrawImage carries opacity but no RGB, so a textured draw
+                // lands white whatever prpr asked for - desktop multiplies the vertex colour in
+                // the shader, here nothing does. Dark vertex colours (button labels, the
+                // selected tab) therefore came out white-on-white. A dark draw re-reads its
+                // own source rect, multiplies it by the vertex colour on the CPU and draws the
+                // tinted copy instead; static labels converge into the cache on the first frame
+                // and cost one extra draw afterwards. Only dark tints take this path (every
+                // channel under half): luminous sprite tints stay on the fast white path, and
+                // oversized rects fall back rather than allocate megabytes. The rotated-quad
+                // path above has no hook - dark rotated quads are vanishingly rare, and notes
+                // (its only real traffic) are white-tinted.
+                float tintR = (a.r + b.r + c.r) / 3f;
+                float tintG = (a.g + b.g + c.g) / 3f;
+                float tintB = (a.b + b.b + c.b) / 3f;
+                ICanvasImage image = tex.Target;
+                Rect imageSrc = src;
+                if (tintR < 0.5f && tintG < 0.5f && tintB < 0.5f)
+                {
+                    CanvasBitmap tinted = TintedCopy(ds.Device, texId, src, tintR, tintG, tintB);
+                    if (tinted != null)
+                    {
+                        image = tinted;
+                        imageSrc = new Rect(0, 0, src.Width, src.Height);
+                    }
+                }
+                ds.DrawImage(image, quad, imageSrc, alpha, CanvasImageInterpolation.Linear);
                 return;
             }
 
@@ -2374,6 +2501,31 @@ namespace Phirura.Game
                 }
             }
 
+            // Hopeless entries for ids the registry has since dropped stop meaning
+            // anything; without this the gate's subtraction would drift low over charts.
+            if (_hopelessPortTextures.Count > 0)
+            {
+                List<uint> stale = null;
+                foreach (uint hid in _hopelessPortTextures.Keys)
+                {
+                    if (!_liveIds.Contains(hid))
+                    {
+                        if (stale == null)
+                        {
+                            stale = new List<uint>();
+                        }
+                        stale.Add(hid);
+                    }
+                }
+                if (stale != null)
+                {
+                    for (int i = 0; i < stale.Count; i++)
+                    {
+                        _hopelessPortTextures.Remove(stale[i]);
+                    }
+                }
+            }
+
             List<uint> gone = null;
             foreach (uint id in _portTextures.Keys)
             {
@@ -2440,6 +2592,8 @@ namespace Phirura.Game
         /// </summary>
         private const long UploadBytesPerPoll = 98304;
         private long _uploadBudgetLeft;
+        /// <summary>Whether the self-tuning budget is currently boosted. Logged on change.</summary>
+        private bool _uploadBoosted;
         /// <summary>
         /// Full uploads deferred for lack of budget, oldest first, with the row they resume
         /// at. Drained twice per poll - half the fresh budget at the head (so the backlog
@@ -2449,8 +2603,22 @@ namespace Phirura.Game
         private readonly Queue<uint> _uploadQueue = new Queue<uint>();
         private readonly Dictionary<uint, uint> _uploadResume = new Dictionary<uint, uint>();
 
+        /// <summary>
+        /// Textures whose carrier cannot be built (zero extent, oversize, device OOM), with
+        /// the poll index at which they may be retried. Retried periodically, not dropped:
+        /// device memory frees up, and a dropped id would never come back. Crucially, the
+        /// loading gate does not count these - a texture that can never complete would hold
+        /// it through its whole timeout on every load - and the create path does not hammer
+        /// them every poll (each attempt costs broker calls plus a failing `WriteSync`).
+        /// Pruned against the registry on every sweep; cleared on reset.
+        /// </summary>
+        private readonly Dictionary<uint, int> _hopelessPortTextures = new Dictionary<uint, int>();
+        /// <summary>Draw polls so far; drives the hopeless retry stamps above.</summary>
+        private int _pollIndex;
+
         private void EnsurePortTextures(CanvasDrawingSession ds)
         {
+            _pollIndex++;
             if (_portDirtyUnsupported)
             {
                 try
@@ -2507,10 +2675,25 @@ namespace Phirura.Game
                 // remainder. Half and half keeps both moving: the latest demand (a cover just
                 // scrolled into view, sprites for a chart about to start) and the backlog behind
                 // it, including font atlases the whole UI waits on.
-                _uploadBudgetLeft = UploadBytesPerPoll;
-                long queueShare = UploadBytesPerPoll / 2;
+                //
+                // Self-tuning size: a deep backlog (chart load registering megabytes at once)
+                // gets 512 KB a poll instead of 96 KB, because at 96 KB a 25 MB illustration
+                // set costs ~90 s of polls - longer than the loading gate's whole timeout, so
+                // the gate could never pass with real work outstanding and notes popped in
+                // mid-song. A deep backlog in gameplay is itself the emergency, so spending
+                // more per poll there is also right; the steady state (shallow queue) keeps the
+                // small budget and its small hitches. Logged on transitions only.
+                long pollBudget = _uploadQueue.Count > 8 ? UploadBytesPerPoll * 16 / 3 : UploadBytesPerPoll;
+                if ((pollBudget > UploadBytesPerPoll) != _uploadBoosted)
+                {
+                    _uploadBoosted = pollBudget > UploadBytesPerPoll;
+                    AppLog.Write("Win2D: upload budget " + (_uploadBoosted ? "boosted" : "normal")
+                        + " (queue=" + _uploadQueue.Count + ")");
+                }
+                _uploadBudgetLeft = pollBudget;
+                long queueShare = pollBudget / 2;
                 DrainUploadQueue(ds, ref queueShare);
-                _uploadBudgetLeft -= (UploadBytesPerPoll / 2 - queueShare);
+                _uploadBudgetLeft -= (pollBudget / 2 - queueShare);
 
                 int total = live;
                 if (total > 0)
@@ -2641,11 +2824,16 @@ namespace Phirura.Game
         /// </summary>
         private bool _uploadPushSupported = true;
 
+        /// <summary>Rate gate for the stuck-upload line below.</summary>
+        private int _stuckLogTick = int.MinValue / 2;
+
         /// <summary>
         /// Tells the engine how many textures still need their first upload: queued
-        /// resumes plus registered ids with no carrier yet. The loading scene waits on
-        /// this before transitioning, so notes never pop in mid-song. Best-effort: any
-        /// failure only delays the gate to its timeout, never the draw.
+        /// resumes plus registered ids with no carrier yet, minus hopeless ones (zero
+        /// extent, oversize, device OOM - they can never complete, so counting them would
+        /// hold the loading gate through its timeout on every load). The loading scene
+        /// waits on this before transitioning, so notes never pop in mid-song.
+        /// Best-effort: any failure only delays the gate to its timeout, never the draw.
         /// </summary>
         private void ReportUploadBacklog()
         {
@@ -2656,12 +2844,41 @@ namespace Phirura.Game
             try
             {
                 uint pending = (uint)_uploadQueue.Count + (uint)_uploadResume.Count;
-                int missing = (int)PrprPort.TextureCount() - _portTextures.Count;
+                int missing = (int)PrprPort.TextureCount() - _portTextures.Count - _hopelessPortTextures.Count;
+                // Hopeless entries for ids the registry has since dropped are pruned on the
+                // next sweep; until then the clamp keeps the count sane in the other direction.
+                if (missing < 0)
+                {
+                    missing = 0;
+                }
                 if (missing > 0)
                 {
                     pending += (uint)missing;
                 }
                 PrprPort.ReportUploadPending(pending);
+                // Names the stuck ones, once a second while anything is stuck: the count
+                // alone cannot say whether the gate is waiting on a 5 MB illustration that
+                // is nearly done or on an id that will never complete - and those need
+                // opposite fixes. Capped at a glance (three ids); the queue beyond that is
+                // backlog, not suspects.
+                if (pending > 0 && unchecked(Environment.TickCount - _stuckLogTick) >= 1000)
+                {
+                    _stuckLogTick = Environment.TickCount;
+                    System.Text.StringBuilder sb = new System.Text.StringBuilder("Win2D: upload stuck n=");
+                    sb.Append(pending).Append(" queue=");
+                    int shown = 0;
+                    foreach (uint qid in _uploadQueue)
+                    {
+                        if (shown >= 3) { break; }
+                        if (shown > 0) { sb.Append(','); }
+                        uint row = 0;
+                        _uploadResume.TryGetValue(qid, out row);
+                        sb.Append(qid).Append('@').Append(row);
+                        shown++;
+                    }
+                    sb.Append(" missing=").Append(missing);
+                    AppLog.Write(sb.ToString());
+                }
             }
             catch (Exception ex)
             {
@@ -2744,6 +2961,7 @@ namespace Phirura.Game
             if (w == 0 || h == 0)
             {
                 _uploadResume.Remove(id);
+                _hopelessPortTextures[id] = _pollIndex + 120;
                 return;
             }
             if (_uploadBudgetLeft <= 0)
@@ -2789,16 +3007,34 @@ namespace Phirura.Game
             PortTexture pt;
             if (!_portTextures.TryGetValue(id, out pt) || pt == null || pt.Target == null)
             {
+                int retryAt;
+                if (_hopelessPortTextures.TryGetValue(id, out retryAt) && _pollIndex < retryAt)
+                {
+                    // Carrier creation failed recently for this id; the device is not going
+                    // to grow memory this poll, so skip the broker calls and the failing log.
+                    return;
+                }
                 uint w, h;
                 if (!PrprPort.TextureSize(id, out w, out h))
                 {
+                    // The registry does not hold this id (a freed slot the count still
+                    // includes). Parked like any other hopeless id: without this, dead ids
+                    // kept the loading gate's missing count above zero forever and every load
+                    // waited out the full timeout while the real backlog had long drained.
+                    // Shorter stamp than a failed creation: a size miss can be transient
+                    // (an id enumerated mid-teardown), so it re-probes sooner.
+                    _hopelessPortTextures[id] = _pollIndex + 30;
                     return;
                 }
                 pt = CreatePortTexture(ds, id, w, h);
                 if (pt == null)
                 {
+                    // Zero extent, oversize, or device OOM - persistent for this id, retried
+                    // periodically, and invisible to the loading gate (see the field's note).
+                    _hopelessPortTextures[id] = _pollIndex + 120;
                     return;
                 }
+                _hopelessPortTextures.Remove(id);
                 _portTextures[id] = pt;
 
                 // The whole texture, whatever the dirty read said. For a fresh registration the two
@@ -2828,13 +3064,16 @@ namespace Phirura.Game
                 _portTextures.Remove(id);
                 if (!PrprPort.TextureSize(id, out w, out h))
                 {
+                    _hopelessPortTextures[id] = _pollIndex + 30;
                     return;
                 }
                 pt = CreatePortTexture(ds, id, w, h);
                 if (pt == null)
                 {
+                    _hopelessPortTextures[id] = _pollIndex + 120;
                     return;
                 }
+                _hopelessPortTextures.Remove(id);
                 _portTextures[id] = pt;
                 UploadFull(ds, id, pt, w, h);
                 return;

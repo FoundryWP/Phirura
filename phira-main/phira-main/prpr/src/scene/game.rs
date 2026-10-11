@@ -954,22 +954,15 @@ impl Scene for GameScene {
             State::Ending => {
                 let t = time - self.res.track_length - WAIT_TIME;
                 if t >= AFTER_TIME + 0.3 {
-                    let mut record_data = None;
-                    // TODO strengthen the protection
-                    #[cfg(closed)]
-                    if let Some(upload_fn) = &self.upload_fn {
-                        if !self.res.config.offline_mode
-                            && !self.res.config.mods.intersects(Mods::UNRATED)
-                            && !self.res.config.use_keyboard
-                            && self.res.config.speed >= 1.0 - 1e-3
-                        {
-                            if let Some(player) = &self.player {
-                                if let Some(chart) = &self.res.info.id {
-                                    record_data = Some(encode_record(self, player.id, *chart));
-                                }
-                            }
-                        }
-                    }
+                    // Uploads stay off: the token this would encode lives in upstream's
+                    // closed `inner` module, which this tree does not have - `encode_record`
+                    // does not exist here, and shipping a fabricated token would fail server
+                    // validation (or read as cheating). So nothing ever uploads, which is
+                    // also why the three switches are trivially honored: offline, autoplay
+                    // and no-shader plays cannot upload what is never sent. Local records
+                    // (`save_fn` below) are unaffected and still save rated plays.
+                    let _ = &self.upload_fn;
+                    let record_data: Option<Vec<u8>> = None;
                     let result = self.judge.result();
                     let record = if self.res.config.mods.intersects(Mods::UNRATED) || self.res.config.speed < 1.0 - 1e-3 {
                         None
