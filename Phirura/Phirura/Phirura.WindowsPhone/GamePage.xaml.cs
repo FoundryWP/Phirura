@@ -172,7 +172,7 @@ namespace Phirura
         /// from "the fix never arrived". If this line is missing or stale in the pull, stop
         /// diagnosing the app and fix the deploy first.
         /// </summary>
-        private const string BuildTag = "phase2+fair96k+touchclear+decodecount+rootcache+inputyield+worker2+dlqueue+previewfb+watchdog+drawmeter+desync+phasesink+ingestnofail+musicnolen+stallwatch+endingmusic+preload+logchain+loadslice+slowdraw+kindsplit+censusgate+frameloop+drawtail+gatelock+uploadgate+pumpwatch+btnblack+tinttext+scoreupload+poolwatch+touchcap+hopelesstex+stuckids+deadids+upboost+endingcover+nologinrevert";
+        private const string BuildTag = "phase2+fair96k+touchclear+decodecount+rootcache+inputyield+worker2+dlqueue+previewfb+watchdog+drawmeter+desync+phasesink+ingestnofail+musicnolen+stallwatch+endingmusic+preload+logchain+loadslice+slowdraw+kindsplit+censusgate+frameloop+drawtail+gatelock+uploadgate+pumpwatch+btnblack+tinttext+scoreupload+poolwatch+touchcap+hopelesstex+stuckids+deadids+upboost+endingcover+nologinrevert+harmfont+pauseattach+gatepass+pauseradius+pausediag+pausefull";
 
         /// Viewport in **pixels**, which is what `wp81_game_set_screen` wants: `prpr` projects
         /// through `screen_width`/`screen_height`, and the recorded frame is 768x1229 px while
@@ -651,6 +651,11 @@ namespace Phirura
                 // Before `StartPhiraAsync`, which never yields: the music URI has to exist by the
                 // time phira first asks for the music, and phira asks from the frame thread.
                 await ResolvePhiraMusicAsync();
+                // The respack seed ran once (`.seeded` marker): a store staged before a file
+                // shipped never receives it. Fonts are loaded by bare name through the broker,
+                // so a missing one dies at boot - copy-if-missing keeps this self-healing
+                // without re-seeding (and re-downloading) the whole pack.
+                await EnsureRespackFileAsync("harmonyos.ttf");
                 // Unconditional: the packaged-chart probe above returns early when there is no
                 // bundled chart, and the ending clip lives in the res pack, not in any chart -
                 // so gating this on the chart probe left the result page without BGM (and with
@@ -2435,6 +2440,42 @@ namespace Phirura
             // PhiraEndingMusicUri null - and the ending page then fell into the silent-clock
             // branch with the chart's music still playing. It runs unconditionally from
             // StartAsync instead.
+        }
+
+        /// <summary>
+        /// Copies one file from the packaged respack into the seeded store when absent.
+        ///
+        /// See the call site: the seed marker means new files never arrive on their own.
+        /// Replace-existing is deliberately NOT used - a user-modified store wins over the
+        /// package, and the only failure this reports is the copy itself failing, in which
+        /// case the Rust side falls back to the stock font.
+        /// </summary>
+        private static async Task EnsureRespackFileAsync(string name)
+        {
+            try
+            {
+                Windows.Storage.StorageFolder local = Windows.Storage.ApplicationData.Current.LocalFolder;
+                Windows.Storage.StorageFolder dest = await local.CreateFolderAsync(
+                    "respack", Windows.Storage.CreationCollisionOption.OpenIfExists);
+                try
+                {
+                    await dest.GetFileAsync(name);
+                    return;
+                }
+                catch (Exception)
+                {
+                }
+                Windows.Storage.StorageFolder pkg =
+                    await Windows.ApplicationModel.Package.Current.InstalledLocation.GetFolderAsync("Assets");
+                pkg = await pkg.GetFolderAsync("respack");
+                Windows.Storage.StorageFile src = await pkg.GetFileAsync(name);
+                await src.CopyAsync(dest, name, Windows.Storage.NameCollisionOption.FailIfExists);
+                AppLog.Write("GamePage: seeded missing respack file " + name);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Write("GamePage.EnsureRespackFile(" + name + ")", ex);
+            }
         }
 
         /// <summary>

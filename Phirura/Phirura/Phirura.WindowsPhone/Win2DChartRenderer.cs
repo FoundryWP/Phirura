@@ -2677,13 +2677,13 @@ namespace Phirura.Game
                 // it, including font atlases the whole UI waits on.
                 //
                 // Self-tuning size: a deep backlog (chart load registering megabytes at once)
-                // gets 512 KB a poll instead of 96 KB, because at 96 KB a 25 MB illustration
+                // gets 1 MB a poll instead of 96 KB, because at 96 KB a 25 MB illustration
                 // set costs ~90 s of polls - longer than the loading gate's whole timeout, so
                 // the gate could never pass with real work outstanding and notes popped in
                 // mid-song. A deep backlog in gameplay is itself the emergency, so spending
                 // more per poll there is also right; the steady state (shallow queue) keeps the
                 // small budget and its small hitches. Logged on transitions only.
-                long pollBudget = _uploadQueue.Count > 8 ? UploadBytesPerPoll * 16 / 3 : UploadBytesPerPoll;
+                long pollBudget = _uploadQueue.Count > 8 ? UploadBytesPerPoll * 32 / 3 : UploadBytesPerPoll;
                 if ((pollBudget > UploadBytesPerPoll) != _uploadBoosted)
                 {
                     _uploadBoosted = pollBudget > UploadBytesPerPoll;

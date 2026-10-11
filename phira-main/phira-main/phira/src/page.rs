@@ -480,7 +480,19 @@ impl SharedState {
         }
         let loaded = match font {
             Some(it) => it,
-            None => load_font_with_cksum(load_file("bold.ttf").await?)?,
+            None => {
+                // Same switch as the main UI font in the_main (PGR untouched): bold falls
+                // back to bold.ttf when HarmonyOS is off or its file is absent.
+                let bold_file = if get_data().config.harmony_font {
+                    "harmonyos.ttf"
+                } else {
+                    "bold.ttf"
+                };
+                match load_font_with_cksum(load_file(bold_file).await?) {
+                    Ok(it) => it,
+                    Err(_) => load_font_with_cksum(load_file("bold.ttf").await?)?,
+                }
+            }
         };
         set_bold_font(loaded);
         Ok(Self {

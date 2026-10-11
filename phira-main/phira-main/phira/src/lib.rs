@@ -389,7 +389,22 @@ async fn the_main() -> Result<()> {
     let pgr_font = FontArc::try_from_vec(load_file("phigros.ttf").await?)?;
     PGR_FONT.with(move |it| *it.borrow_mut() = Some(TextPainter::new(pgr_font, None)));
 
-    let font = FontArc::try_from_vec(load_file("font.ttf").await?)?;
+    // HarmonyOS switch: only the UI fonts change, never phigros.ttf (the PGR score
+    // font above). Falls back to font.ttf when the flag is on but the file is absent,
+    // so a store seeded before the font shipped still boots instead of dying here.
+    let ui_font_file = if get_data().config.harmony_font {
+        "harmonyos.ttf"
+    } else {
+        "font.ttf"
+    };
+    let font = match FontArc::try_from_vec(load_file(ui_font_file).await?) {
+        Ok(font) => font,
+        Err(_) if ui_font_file != "font.ttf" => {
+            log_line("the_main: harmonyos.ttf missing, falling back to font.ttf");
+            FontArc::try_from_vec(load_file("font.ttf").await?)?
+        }
+        Err(err) => return Err(err.into()),
+    };
     let mut painter = TextPainter::new(font.clone(), None);
 
     log_line("the_main: fonts ok, building MainScene");

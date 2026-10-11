@@ -25,7 +25,7 @@ const FADE_IN_TIME: f32 = 0.6;
 /// giving up and transitioning anyway. The backlog is finite while the game scene is
 /// not running (nothing re-dirties), so hitting this means pathology, not patience -
 /// and trapping the player on the loading screen would be worse than a late sprite.
-const UPLOAD_GATE_TIMEOUT: f32 = 12.;
+const UPLOAD_GATE_TIMEOUT: f32 = 20.;
 
 pub type UploadFn = Arc<dyn Fn(Vec<u8>) -> Task<Result<RecordUpdateState>>>;
 pub type UpdateFn = Box<dyn FnMut(f64, &mut Resource, &mut Judge)>;
@@ -79,6 +79,16 @@ pub struct LoadingScene {
 impl LoadingScene {
     pub async fn load(fs: &mut dyn FileSystem, path: &str) -> Result<(SafeTexture, SafeTexture, Color)> {
         let image = image::load_from_memory(&fs.load_file(path).await?).context("Failed to decode image")?;
+        // Downscale to the screen before anything else: a 1150x1250 cover is 5.7 MB of
+        // upload at 96-512 KB a poll, and this phone shows it at half that size at most
+        // (blurred fullscreen, or a half-screen panel) - so full resolution buys nothing
+        // and costs minutes of loading-screen backlog plus a full-size fastblur on an S4.
+        // The palette and the blur below run on the small copy, which is also ~3x faster.
+        let image = if image.width().max(image.height()) > 768 {
+            image.resize(768, 768, image::imageops::FilterType::Triangle)
+        } else {
+            image
+        };
         let (w, h) = (image.width(), image.height());
         let size = w as usize * h as usize;
 

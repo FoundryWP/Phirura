@@ -390,6 +390,7 @@ struct GeneralList {
 
     cache_btn: DRectButton,
     offline_btn: DRectButton,
+    harmony_btn: DRectButton,
     server_status_btn: DRectButton,
     mp_btn: DRectButton,
     mp_addr_btn: DRectButton,
@@ -425,6 +426,7 @@ impl GeneralList {
 
             cache_btn: DRectButton::new(),
             offline_btn: DRectButton::new(),
+            harmony_btn: DRectButton::new(),
             server_status_btn: DRectButton::new(),
             mp_btn: DRectButton::new(),
             mp_addr_btn: DRectButton::new(),
@@ -496,6 +498,13 @@ impl GeneralList {
         }
         if self.offline_btn.touch(touch, t) {
             config.offline_mode ^= true;
+            return Ok(Some(true));
+        }
+        if self.harmony_btn.touch(touch, t) {
+            // Takes effect on next launch: the painters are built once at boot from
+            // whatever this flag says, and rebuilding them live would drop every cached
+            // glyph mid-session.
+            config.harmony_font ^= true;
             return Ok(Some(true));
         }
         if self.server_status_btn.touch(touch, t) {
@@ -604,6 +613,10 @@ impl GeneralList {
         item! {
             render_title(ui, tl!("item-offline"), Some(tl!("item-offline-sub")));
             render_switch(ui, rr, t, &mut self.offline_btn, config.offline_mode);
+        }
+        item! {
+            render_title(ui, tl!("item-harmony"), Some(tl!("item-harmony-sub")));
+            render_switch(ui, rr, t, &mut self.harmony_btn, config.harmony_font);
         }
         item! {
             render_title(ui, tl!("item-server-status"), Some(tl!("item-server-status-sub")));

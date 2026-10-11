@@ -2,7 +2,7 @@ use super::{BpmList, Effect, JudgeLine, JudgeLineKind, Matrix, Resource, UIEleme
 use crate::{core::Object, fs::FileSystem, judge::JudgeStatus, ui::Ui};
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
-use nalgebra::Rotation2;
+use nalgebra::{Rotation2, Vector3};
 use sasa::AudioClip;
 use std::{cell::RefCell, collections::HashMap};
 
@@ -93,6 +93,39 @@ impl Chart {
         } else {
             f(ui, WHITE)
         }
+    }
+
+    /// Where an attached UI element's `default_pos` actually lands on screen.
+    ///
+    /// The exact transform `with_element` installs - translation, rotation about the
+    /// rotation point, scale about the scale point - applied to the default position,
+    /// so hit-testing (the pause button) resolves the same point the draw path puts on
+    /// screen. Translation alone was tried first and missed on any chart whose line
+    /// rotates or scales its UI: the icon orbits the default spot while the test waited
+    /// at the unrotated translation. Returns `None` for the static path.
+    pub fn ui_element_pos(
+        &self,
+        res: &Resource,
+        element: UIElement,
+        scale_point: Option<(f32, f32)>,
+        rotation_point: (f32, f32),
+        default_pos: (f32, f32),
+    ) -> Option<(f32, f32)> {
+        let id = self.attach_ui[element as usize - 1]?;
+        let lines = &self.lines;
+        let line = &lines[id];
+        let obj = &line.object;
+        let mut tr = line.fetch_pos(res, lines);
+        tr.y = -tr.y;
+        let scale_point = scale_point.unwrap_or(rotation_point);
+        let scale = obj.now_scale(Vector::new(scale_point.0, scale_point.1));
+        let ro = Object::new_rotation_wrt_point(
+            Rotation2::new(-obj.rotation.now().to_radians()),
+            Vector::new(rotation_point.0, rotation_point.1),
+        );
+        let m = Matrix::new_translation(&tr) * ro * scale;
+        let v = m * Vector3::new(default_pos.0, default_pos.1, 1.);
+        Some((v.x / v.z, v.y / v.z))
     }
 
     pub async fn load_textures(&mut self, fs: &mut dyn FileSystem) -> Result<()> {

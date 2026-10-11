@@ -394,6 +394,28 @@ impl GameScene {
         let pause_w = 0.015;
         let pause_h = pause_w * 3.2;
         let pause_center = Point::new(pause_w * 4.0 - 1., top + eps * 3.5 - (1. - p) * 0.4 + pause_h / 2.);
+        // The drawn icon follows the chart's attach_ui (a judge line can move, scale and
+        // rotate it - see Chart::with_element), but this test used the static default, so
+        // on such charts every tap missed an icon drawn somewhere else entirely. Resolve
+        // the hit point through the element's full transform (translation, rotation,
+        // scale - translation alone still missed rotating lines, whose icon orbits the
+        // default spot), falling back to static when unattached. Doubled radius when
+        // attached, because the target can drift under the finger while the layout
+        // animates.
+        let pause_rp = (pause_center.x - pause_w * 1.5, pause_center.y - pause_h / 2.);
+        let (pause_hit, pause_radius) = if self.chart.attach_ui[UIElement::Pause as usize - 1].is_some() {
+            let center = (
+                pause_rp.0 + pause_w * 1.5,
+                pause_rp.1 + pause_h / 2.,
+            );
+            let (x, y) = self
+                .chart
+                .ui_element_pos(res, UIElement::Pause, None, pause_rp, center)
+                .unwrap_or((pause_center.x, pause_center.y));
+            (Point::new(x, y), 0.10)
+        } else {
+            (pause_center, 0.05)
+        };
         if res.config.interactive
             && !tm.paused()
             && self.pause_rewind.is_none()
@@ -401,7 +423,17 @@ impl GameScene {
                 touch.phase == TouchPhase::Started && {
                     let p = touch.position;
                     let p = Point::new(p.x, p.y);
-                    (pause_center - p).norm() < 0.05
+                    let dist = (pause_hit - p).norm();
+                    // Forensic: taps near (but outside) the hit circle prove the tap
+                    // arrived and the geometry is wrong; silence proves it never arrived
+                    // as Started at all. Strictly gated, removed after conviction.
+                    if dist >= pause_radius && dist < 0.30 {
+                        crate::ext::diag_push(&format!(
+                            "pause near-miss dist={:.3} hit=({:.3},{:.3}) tap=({:.3},{:.3})",
+                            dist, pause_hit.x, pause_hit.y, p.x, p.y
+                        ));
+                    }
+                    dist < pause_radius
                 }
             })
         {

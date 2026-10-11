@@ -21,7 +21,10 @@ use std::{
     future::Future,
     ops::Deref,
     pin::Pin,
-    sync::{atomic::{AtomicU32, Ordering}, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        Arc, Mutex,
+    },
     task::{Poll, RawWaker, RawWakerVTable, Waker},
 };
 use tracing::{debug, info_span};
@@ -105,6 +108,16 @@ pub fn set_phase_sink(f: fn(&str)) {
 pub fn phase_push(name: &str, ms: u128) {
     if let Some(sink) = PHASE_SINK.get() {
         sink(&format!("SongScene: phase {name} {ms}ms"));
+    }
+}
+
+/// One diagnostic line through the same sink, for tap-path forensics that cannot wait
+/// for a crash marker. Same cost shape as [`phase_push`]; callers gate strictly (this
+/// one fires per qualifying tap, not per frame), and the line is removed once it has
+/// convicted its suspect - it is not a meter.
+pub fn diag_push(line: &str) {
+    if let Some(sink) = PHASE_SINK.get() {
+        sink(line);
     }
 }
 
@@ -599,6 +612,18 @@ pub fn parse_time(s: &str) -> Option<f64> {
 }
 
 pub fn open_url(url: &str) -> Result<()> {
+    // WP81 port: no desktop opener exists on the phone, so the shell opens links (its
+    // browser/Store handler) through a per-frame poll - queued here, launched there.
+    // Installed at boot next to the input backend; without it this falls through to the
+    // desktop branch below. Cap guards a runaway caller; the shell drains one per poll.
+    if URL_SHELL_OWNED.load(Ordering::Relaxed) {
+        let mut q = URL_QUEUE.lock().unwrap();
+        if q.len() >= 8 {
+            q.remove(0);
+        }
+        q.push(url.to_owned());
+        return Ok(());
+    }
     cfg_if::cfg_if! {
         if #[cfg(target_os = "android")] {
             unsafe {
@@ -636,6 +661,9 @@ pub fn open_url(url: &str) -> Result<()> {
 
     Ok(())
 }
+
+/// The shell opens URLs on this target - see [`open_url`].
+static URL_SHELL_OWNED: AtomicBool = AtomicBool::new(false);
 
 mod shader {
     pub const VERTEX: &str = r#"#version 100
